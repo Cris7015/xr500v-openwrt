@@ -80,3 +80,12 @@ La imagen sysupgrade.bin usa la receta `tclinux-trx` (decidida en Task 9), que g
 - Necesario: investigar qué recipe genera formato `03 00 00 ...` sin TRX2
   - Posible: cambiar a `append-kernel-lzma | append-squashfs` sin tclinux-trx wrapper
   - O encontrar recipe del VR1200v que generó su formato aceptado
+
+## 2026-05-06: Task 12 Fix -- Image recipe corregido
+- Recipe IMAGE/sysupgrade.bin cambiado de tclinux-trx (produce "2RDH" rechazado por bldr)
+  a tplink-v2-header con TPLINK_HVERSION=3 (produce "03 00 00 00 ver. 2.0")
+- TPLINK_FLASHLAYOUT=16Mmtk, TPLINK_HWID=0x0ec60001 (dummy, bldr no valida HWID)
+- Nueva header magic primeros 16 bytes: 030000007665722e20322e3000ffffff
+- Imagen tamano: 6214858 bytes (6.0 MB)
+- Header antes: 32524448 ("2RDH", rechazado) | Header ahora: 03000000 ("\x03\x00\x00\x00", aceptado)
+- Imagen en: /mnt/c/tftp/openwrt-xr500v-iter2.bin
