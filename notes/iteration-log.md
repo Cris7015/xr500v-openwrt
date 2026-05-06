@@ -54,3 +54,29 @@ Diario de qué se probó, qué pasó, qué se aprendió.
 - Imagen initramfs-kernel.bin: 5887402 bytes
 - Build incremental sin errores
 - Total bin/targets/econet/en751221/ tiene tanto VR1200v (baseline) como XR500v (nuestro)
+
+## 2026-05-06: Task 12 — Verificación imagen XR500v ⚠️ CRITICAL FINDING
+- Imagen tamaño: 6166960 bytes (5.88 MB)
+- Header magic primeros 4 bytes: `32 52 44 48` = **'2RDH' (TRX2 format)**
+- Squashfs offset: 0x2f4782 (3098498 bytes)
+- LZMA offset: 0x100
+
+### ❌ BLOCKER IDENTIFICADO:
+La imagen sysupgrade.bin usa la receta `tclinux-trx` (decidida en Task 9), que genera un envoltorio **TRX2 ('2RDH')**. 
+**EL BOOTLOADER RECHAZA EXPLÍCITAMENTE este formato** (notas del task original).
+
+### Comparación con referentes:
+| Imagen | Header | TRX2? | LZMA@ | Squashfs@ | Estado |
+|--------|--------|-------|-------|-----------|--------|
+| VR1200v sysupgrade | `03 00 00 00 'ver. 2.0'` | NO | 0x200 | 0x400000 | ✅ Aceptado por bldr |
+| Stock XR500v (mtd3) | `03 00 00 03 ...` | NO | 0x200 | - | ✅ En producción |
+| **NEW XR500v sysupgrade** | **'2RDH'** | **YES** | **0x100** | **0x2f4782** | **❌ RECHAZADO** |
+
+### Acción requerida:
+- Cambiar imagen recipe en `target/linux/econet/image/en751221.mk`
+- Opciones investigadas en Task 9:
+  - `tplink-v2-header`: usaba TPLINK_HWID (desconocido, FW cifrado)
+  - `tclinux-trx`: produce TRX2 envoltorio (actual, RECHAZADO)
+- Necesario: investigar qué recipe genera formato `03 00 00 ...` sin TRX2
+  - Posible: cambiar a `append-kernel-lzma | append-squashfs` sin tclinux-trx wrapper
+  - O encontrar recipe del VR1200v que generó su formato aceptado
