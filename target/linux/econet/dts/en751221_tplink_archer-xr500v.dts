@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/dts-v1/;
+
+#include "en751221.dtsi"
+
+/ {
+	model = "TP-Link Archer XR500v v1";
+	compatible = "tplink,archer-xr500v", "econet,en751221";
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x8000000>;
+	};
+
+	chosen {
+		stdout-path = "/serial@1fbf0000:115200";
+	};
+};
+
+&nand {
+	status = "okay";
+	econet,bmt;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* XR500v partition layout (from /proc/mtd stock firmware) */
+
+		partition@0 {
+			label = "boot";
+			reg = <0x0 0x40000>;
+			read-only;
+		};
+
+		partition@40000 {
+			label = "romfile";
+			reg = <0x40000 0x40000>;
+			read-only;
+		};
+
+		partition@80000 {
+			label = "kernel";
+			reg = <0x80000 0x300000>;
+		};
+
+		partition@380000 {
+			label = "rootfs";
+			reg = <0x380000 0x1000000>;
+			linux,rootfs;
+		};
+
+		partition@1380000 {
+			label = "misc";
+			reg = <0x1380000 0x480000>;
+			/*
+			 * TODO: XR500v NVMEM layout for WiFi EEPROM and MAC
+			 * addresses is not yet mapped. Will be filled in once
+			 * we have a running kernel and can dump the partition.
+			 * For PoC Phase 1, leaving as plain partition.
+			 */
+		};
+
+		partition@1800000 {
+			label = "kernel1";
+			reg = <0x1800000 0x300000>;
+		};
+
+		partition@1b00000 {
+			label = "rootfs1";
+			reg = <0x1b00000 0x1000000>;
+		};
+
+		partition@2b00000 {
+			label = "others";
+			reg = <0x2b00000 0x4e0000>;
+		};
+
+		partition@2fe0000 {
+			label = "bootflag";
+			reg = <0x2fe0000 0x20000>;
+		};
+
+		/*
+		 * OpenWrt UBI partition: starts after bootflag (0x3000000),
+		 * ends at 112MB (0x7000000) minus BMT reserve (~10 eraseblocks = 0x140000).
+		 * Usable: 0x7000000 - 0x3000000 - 0x140000 = 0x3ec0000 (~62.75MB)
+		 */
+		partition@3000000 {
+			label = "openwrt_ubi";
+			reg = <0x3000000 0x3ec0000>;
+		};
+	};
+};
+
+&gmac0 {
+	status = "okay";
+	/*
+	 * TODO: MAC address NVMEM source not yet identified for XR500v.
+	 * Will be wired once misc partition NVMEM layout is known.
+	 * nvmem-cells = <&macaddr_xr500v 0>;
+	 * nvmem-cell-names = "mac-address";
+	 */
+};
+
+&pcie0 {
+	status = "okay";
+};
+&slot0 {
+	wifi@0,0 {
+		/*
+		 * TODO: PCIe WiFi EEPROM/MAC NVMEM not yet mapped for XR500v.
+		 * Keeping node minimal to allow PCIe enumeration.
+		 * VR1200v used MT7592 here; XR500v likely similar MediaTek.
+		 */
+		compatible = "mediatek,mt76";
+		reg = <0x0000 0 0 0 0>;
+	};
+};
+&pcie1 {
+	status = "okay";
+};
+&slot1 {
+	wifi@0,0 {
+		/*
+		 * TODO: PCIe WiFi EEPROM/MAC NVMEM not yet mapped for XR500v.
+		 * Keeping node minimal to allow PCIe enumeration.
+		 * VR1200v used MT7613BE here; XR500v likely similar MediaTek.
+		 */
+		compatible = "mediatek,mt76";
+		reg = <0x0000 0 0 0 0>;
+	};
+};
