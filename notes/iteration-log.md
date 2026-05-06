@@ -25,3 +25,17 @@ Diario de qué se probó, qué pasó, qué se aprendió.
 - Duración total build: ~25 min (VM clock UTC); toolchain GCC 14.3.0 + Linux 6.12.80 + packages
 - Outputs adicionales: initramfs-kernel.bin (6.7MB), manifest, sha256sums, profiles.json
 - ✅ Pipeline OK — listo para Task 6: crear DTS del XR500v
+
+## 2026-05-06: Task 8 — DTS XR500v creado
+- Copiado de en751221_tplink_archer-vr1200v-v2.dts
+- compatible string actualizada a "tplink,archer-xr500v"
+- model actualizada a "TP-Link Archer XR500v v1"
+- Partition layout ajustado al layout real del XR500v (3MB kernel, 16MB rootfs)
+  - boot=256K, romfile=256K, kernel=3MB, rootfs=16MB, misc=4.5MB
+  - kernel1=3MB, rootfs1=16MB, others=4.9MB, bootflag=128K
+  - openwrt_ubi=~62.75MB (0x3000000-0x6ec0000, con reserva BMT)
+- NVMEM layout en partición misc eliminado (no conocemos offsets XR500v)
+- gmac0 nvmem-cells comentado (MAC address NVMEM no mapeada aún)
+- wifi@pcie0/pcie1: mantenidos con compatible=mediatek,mt76 pero sin nvmem-cells (EEPROM/MAC desconocidos)
+- CPP preprocessing OK (449 líneas post-include), dtc compilación OK con 1 warning pre-existente en dtsi
+- DTS commiteado: 418736a042fac128c8b715f5edacfcd0b25d5e37
