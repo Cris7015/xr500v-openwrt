@@ -1,0 +1,22 @@
+# OpenWrt build artifacts (no se commitean — se reproducen)
+build_dir/
+staging_dir/
+bin/
+tmp/
+.config
+.config.old
+feeds/
+
+# Editor / IDE
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backups (van en otro lado)
+*.bak
+*~
