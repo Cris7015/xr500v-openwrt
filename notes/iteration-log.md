@@ -48,3 +48,9 @@ Diario de qué se probó, qué pasó, qué se aprendió.
 - Decisión de diseño: se usa tclinux-trx en lugar de tplink-v2-header porque el XR500v
   es OEM TCLinux (no firmware TP-Link nativo); TPLINK_HWID desconocido (firmware cifrado).
 - Makefile dry-run (-n) OK: "Nothing to be done for all"
+
+## 2026-05-06: Task 11 — Primer build XR500v ✅
+- Imagen sysupgrade.bin: 6166960 bytes
+- Imagen initramfs-kernel.bin: 5887402 bytes
+- Build incremental sin errores
+- Total bin/targets/econet/en751221/ tiene tanto VR1200v (baseline) como XR500v (nuestro)
