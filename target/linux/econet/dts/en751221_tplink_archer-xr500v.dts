@@ -83,14 +83,18 @@
 		};
 
 		/*
-		 * OpenWrt UBI partition: starts after bootflag (0x3000000),
-		 * ends at 112MB (0x7000000) minus BMT reserve (~10 eraseblocks = 0x140000).
-		 * Usable: 0x7000000 - 0x3000000 - 0x140000 = 0x3ec0000 (~62.75MB)
+		 * NOTE: OpenWrt UBI partition NOT defined for PoC scope.
+		 * The unused 0x3000000-0x7000000 (64MB) on the NAND likely
+		 * contains BMT (Bad Block Table) and other bldr-managed data.
+		 * Defining a UBI partition there without verifying could
+		 * overwrite BMT and brick the device. Revisit in Phase 2+
+		 * once we dump and analyze the actual contents.
+		 *
+		 * partition@3000000 {
+		 *	label = "openwrt_ubi";
+		 *	reg = <0x3000000 0x3ec0000>;
+		 * };
 		 */
-		partition@3000000 {
-			label = "openwrt_ubi";
-			reg = <0x3000000 0x3ec0000>;
-		};
 	};
 };
 
