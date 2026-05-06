@@ -89,3 +89,16 @@ La imagen sysupgrade.bin usa la receta `tclinux-trx` (decidida en Task 9), que g
 - Imagen tamano: 6214858 bytes (6.0 MB)
 - Header antes: 32524448 ("2RDH", rechazado) | Header ahora: 03000000 ("\x03\x00\x00\x00", aceptado)
 - Imagen en: /mnt/c/tftp/openwrt-xr500v-iter2.bin
+
+## 2026-05-06: Task 13 — Flash slot B con XR500v iter2
+- Imagen: openwrt-xr500v-iter2.bin (con header tplink-v2 corregido)
+- Layout imagen: [512B file_hdr][3MB-512B kernel_data][512B zeros][2.93MB rootfs squashfs]
+- kernel1_v3.bin = src[0:0x300000]: incluye file header como partition header (03 00 00 00 ver. 2.0)
+- rootfs1_v3.bin = src[0x300200:] padded to 16MB: comienza con squashfs hsqs magic
+- kernel1 (mtd6): tftp 3MB OK → /userfs/bin/mtd -f -e kernel1 write → K_RC_0
+- rootfs1 (mtd7 via mtd0 offset 0x1b00000): tftp 16MB OK → /userfs/bin/mtd writeflash → R_RC_0
+- writeflash output: 128 sectores [e][w] x sector, "writeflash: total write 0x1000000 bytes"
+- Verificación readback kernel1 (mtd6): 030000007665722e20322e3000ffffff ✓ MATCH
+- Verificación readback rootfs1 (mtd0+0x1b00000): 687371730803000027abf06900000400 = 'hsqs' ✓ MATCH
+- Slot A (mtd3/mtd4) intacto: no tocado en ningún momento
+- Próximo: power cycle + bldr bflag set 1 + autoboot (Task 14)
