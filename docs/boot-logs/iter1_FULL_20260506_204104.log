@@ -1,0 +1,42 @@
+=== Bootlog completo iter 1 — XR500v custom OpenWrt image (con tplink-v2-header fix) ===
+Captured 2026-05-06 ~20:35
+
+[bldr banner]
+7512DRAMC V1.2.2 (0)
+Set SPI Flash Clock to 25 Mhz
+EN751221 at Mon Aug 16 01:47:46 UTC 2021 version 1.1 free bootbase
+Memory size 256MB
+SPI NAND F50L1G detected, multiple Bad Block ECC entries (existing in stock)
+BMT & BBT Init Success
+tclinux partition size = 0x1000000, real size = 0x55aa56aa
+Press any key in 0.1 secs to enter boot command mode.
+..
+
+==>Start boot kernel!
+flag 1, act_flag:0, img0[0 0 1], img1[1 1 1]
+==> boot flag = 1
+Decompress to 80020000 free_mem_ptr=80750000 free_mem_ptr_end=807B0000
+from slave
+Decompress to 80020000 , kernelEntryPoint to 80020000
+kernel_rootfs_ptr to FFFFFFFF
+Uncompressing [LZMA] ...  done.
+
+kernel_rootfs_ptr1 to 0
+Undefined Exception happen.
+CP0_STATUS=10000003
+CP0_CAUSE=8                            <- exception code 0x02 = Bus Error
+CP0_EPC=81fb91a8                       <- instruction at this address
+CP0_BADVADDR=c0000000                  <- invalid memory access
+
+[register dump follows, second exception during exception handling — register values appear to be ASCII text "CP0_STATUS=%x" etc, suggesting the kernel was trying to format the exception message and crashed again, hitting a stack/text segment]
+
+=== KEY OBSERVATION ===
+- Same EPC (0x81fb91a8) and BADVADDR (0xc0000000) as prior session
+  with VR1200v sysupgrade flashed
+- This means our XR500v-specific DTS changes did NOT change the
+  kernel's early boot path crashing point
+- The crash is at offset 0x1f971a8 from kernel base 0x80020000
+  → ~31MB into the kernel — likely in driver init or platform setup
+- 0xc0000000 is MIPS KSEG2 — typically reserved for memory-mapped
+  peripherals via TLB. Kernel is trying to access something that
+  the EN751221 platform code expects but doesn't exist on XR500v

@@ -102,3 +102,12 @@ La imagen sysupgrade.bin usa la receta `tclinux-trx` (decidida en Task 9), que g
 - Verificación readback rootfs1 (mtd0+0x1b00000): 687371730803000027abf06900000400 = 'hsqs' ✓ MATCH
 - Slot A (mtd3/mtd4) intacto: no tocado en ningún momento
 - Próximo: power cycle + bldr bflag set 1 + autoboot (Task 14)
+
+## 2026-05-06: Task 14 — Boot test iter 1 ❌ CRASH
+- Header tplink-v2 ACEPTADO por bldr (mejora vs iter previo)
+- LZMA decompress exitoso: kernel cargado a 0x80020000
+- Kernel CRASH al inicio: EPC=0x81fb91a8, BADVADDR=0xc0000000, CAUSE=8 (Bus Error)
+- Mismo crash que en sesión anterior con VR1200v sysupgrade — independiente del DTS XR500v custom
+- Hipótesis: crash en código de plataforma EcoNet o en en751221.dtsi (hardcoded peripheral access)
+- 0xc0000000 = MIPS KSEG2, periférico no existe o está en otra dirección en XR500v vs lo asumido por kernel
+- Próximo: Codex analysis para identificar la función en EPC=0x81fb91a8
