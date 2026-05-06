@@ -49,18 +49,26 @@ endef
 TARGET_DEVICES += tplink_archer-vr1200v-v2
 
 # NOTE: XR500v is an OEM TCLinux (EcoNet EN751221) rebadged as TP-Link.
-#       No TP-Link v2 firmware header (HWID unknown, stock firmware encrypted).
-#       Uses tclinux-trx format; flash via UART/U-Boot for PoC Phase 1.
+#       HWID is unknown (stock firmware is encrypted/unsigned OEM); dummy HWID used.
+#       tplink-v2-header produces "03 00 00 00 ver. 2.0" magic accepted by the bldr.
+#       tclinux-trx was dropped: it produces "2RDH" magic which the bldr rejects.
+#       Flash via UART/U-Boot tftpboot for PoC Phase 1.
 define Device/tplink_archer-xr500v
   DEVICE_VENDOR := TP-Link
   DEVICE_MODEL := Archer XR500v
   DEVICE_VARIANT := v1
+  TPLINK_FLASHLAYOUT := 16Mmtk
+  TPLINK_HWID := 0x0ec60001
+  TPLINK_HWREV := 0x00000001
+  TPLINK_HWREVADD := 0x0
+  TPLINK_HVERSION := 3
   DEVICE_DTS := en751221_tplink_archer-xr500v
   KERNEL_SIZE := 3072k
   IMAGE_SIZE := 16384k
   BLOCKSIZE := 128k
   IMAGES := sysupgrade.bin
-  IMAGE/sysupgrade.bin := append-kernel | lzma | tclinux-trx
+  IMAGE/sysupgrade.bin := append-kernel | lzma | pad-to $$$$(KERNEL_SIZE) | append-rootfs | \
+    tplink-v2-header -R 0x400000
 endef
 TARGET_DEVICES += tplink_archer-xr500v
 
