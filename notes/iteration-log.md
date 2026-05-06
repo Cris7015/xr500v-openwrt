@@ -39,3 +39,12 @@ Diario de qué se probó, qué pasó, qué se aprendió.
 - wifi@pcie0/pcie1: mantenidos con compatible=mediatek,mt76 pero sin nvmem-cells (EEPROM/MAC desconocidos)
 - CPP preprocessing OK (449 líneas post-include), dtc compilación OK con 1 warning pre-existente en dtsi
 - DTS commiteado: 418736a042fac128c8b715f5edacfcd0b25d5e37
+
+## 2026-05-06: Task 9 — Image Makefile registra XR500v
+- Bloque Device/tplink_archer-xr500v agregado a target/linux/econet/image/en751221.mk
+- KERNEL_SIZE=3072k, IMAGE_SIZE=16384k, BLOCKSIZE=128k
+- IMAGES=sysupgrade.bin con recipe: append-kernel | lzma | tclinux-trx
+- TARGET_DEVICES += tplink_archer-xr500v
+- Decisión de diseño: se usa tclinux-trx en lugar de tplink-v2-header porque el XR500v
+  es OEM TCLinux (no firmware TP-Link nativo); TPLINK_HWID desconocido (firmware cifrado).
+- Makefile dry-run (-n) OK: "Nothing to be done for all"
