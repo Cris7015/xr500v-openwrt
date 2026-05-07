@@ -23,10 +23,28 @@ attach_and_premount_ubifs_overlay() {
 			echo "[ubi-hook] ubiattach failed" >/dev/console
 			return 0
 		}
-		# Give UBI background thread + udev/mdev time to settle
-		sleep 2
+		# UBI attach is async-event-driven for /dev/ubi0_0 creation.
+		# Force mdev to populate /dev from /sys, then wait.
+		mdev -s 2>/dev/null
+		local i=0
+		while [ ! -e /dev/ubi0_0 ] && [ $i -lt 50 ]; do
+			usleep 100000 2>/dev/null || sleep 1
+			i=$((i + 1))
+			# nudge mdev periodically in case events are pending
+			[ $((i % 10)) -eq 0 ] && mdev -s 2>/dev/null
+		done
 	fi
-	[ -e /dev/ubi0_0 ] || { echo "[ubi-hook] /dev/ubi0_0 missing" >/dev/console; return 0; }
+	if [ ! -e /dev/ubi0_0 ]; then
+		# Last resort: explicit mknod from /sys/class/ubi/ubi0_0/dev
+		local devmajmin
+		[ -r /sys/class/ubi/ubi0_0/dev ] && devmajmin=$(cat /sys/class/ubi/ubi0_0/dev)
+		if [ -n "$devmajmin" ]; then
+			local maj=${devmajmin%:*} min=${devmajmin#*:}
+			mknod /dev/ubi0_0 c "$maj" "$min" 2>/dev/null
+			echo "[ubi-hook] mknod ubi0_0 c $maj $min" >/dev/console
+		fi
+	fi
+	[ -e /dev/ubi0_0 ] || { echo "[ubi-hook] /dev/ubi0_0 missing after mdev+mknod" >/dev/console; return 0; }
 	echo "[ubi-hook] /dev/ubi0_0 exists" >/dev/console
 
 	# Pre-mount UBIFS volume where mount_root expects to find /tmp/overlay
