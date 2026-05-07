@@ -1,0 +1,65 @@
+From: Cristian <pcristian292@gmail.com>
+Subject: [PATCH] en75_bmt: override mtd->_block_isbad so UBI doesn't depend on raw OOB[0..1]
+
+The en75_bmt driver shrinks the user-visible MTD size by the BBT entries in
+get_mapping_block_bbt(), so any block accessible through the visible MTD is,
+by construction, not in the BBT — i.e., good. However, mtd_block_isbad()
+falls through mtk_bmt_block_isbad() to spinand_mtd_block_isbad() which reads
+OOB[0..1] raw and treats any non-0xFF byte as a factory-bad marker.
+
+This breaks UBI persistence on NAND that has been written to before:
+- UBI's writes don't touch OOB[0..1] directly, but residue from prior
+  firmware images, mtd_block_markbad() calls from upper layers, or stale
+  data from OEM stock can leave non-0xFF bytes there.
+- Re-reading via spinand_isbad() sees those bytes and returns BAD.
+- nanddev's in-RAM BBT cache makes the result sticky for the boot session.
+- UBI ends up with most/all PEBs of an in-use partition flagged bad, and
+  cannot find its volumes ("empty MTD device detected").
+
+Fix: install a no-op _block_isbad on mtd in pub_init() after the size shrink.
+The BBT's role was already fulfilled by shrinking mtd->size. UBI handles
+runtime bad-PEB management itself via CONFIG_MTD_UBI_BEB_LIMIT.
+
+Tested on TP-Link Archer XR500v (EN751221 + GD5F1GQ4xA SPI-NAND): without
+this patch, ubi attach reports 96 of 104 PEBs as bad after one UBIFS write.
+With the patch, ubi attach is stable across reboots and rootfs_data UBIFS
+overlay survives sysupgrade-equivalent flashes of slot B.
+
+--- a/drivers/mtd/nand/en75_bmt.c
++++ b/drivers/mtd/nand/en75_bmt.c
+@@ -1361,12 +1361,33 @@ static int w_init(struct en75_bmt_m *ctx, struct device_node *np)
+
+ static struct en75_bmt_m en75_bmt_m;
+
++/*
++ * UBI persistence depends on mtd_block_isbad() not lying about good blocks.
++ * The default chain mtk_bmt_block_isbad -> spinand_mtd_block_isbad reads
++ * OOB[0..1] raw and returns BAD for any non-0xFF, which mis-flags blocks
++ * whose OOB carries residue from prior writes, even though the block itself
++ * is healthy. en75_bmt has already excluded all factory-bad blocks from the
++ * visible MTD size via get_mapping_block_bbt()'s shift; any block reachable
++ * through the MTD is good by construction. So return 0 unconditionally.
++ * UBI's own per-PEB tracking (CONFIG_MTD_UBI_BEB_LIMIT) handles runtime
++ * wear-out without needing the OOB-based discriminator.
++ */
++static int en75_block_isbad(struct mtd_info *mtd, loff_t ofs)
++{
++	if (ofs < 0 || ofs >= mtd->size)
++		return 1;
++	return 0;
++}
++
+ static int pub_init(struct device_node *np)
+ {
+ 	int ret;
+
+ 	ret = w_init(&en75_bmt_m, np);
+-	if (!ret)
++	if (!ret) {
+ 		w_sync_tables(&en75_bmt_m);
++		/* See comment on en75_block_isbad above. */
++		en75_bmt_m.mtk->mtd->_block_isbad = en75_block_isbad;
++	}
+ 	return ret;
+ }
+

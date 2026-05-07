@@ -23,6 +23,15 @@ else
     echo "WARN: $SRC_DTS not found, skipping" >&2
 fi
 
+# Kernel patches we add (target/linux/econet/patches-6.12/9XX-*.patch)
+SRC_PATCHES="$REPO_DIR/target/linux/econet/patches-6.12"
+if [[ -d "$SRC_PATCHES" ]]; then
+    for p in "$SRC_PATCHES"/*.patch; do
+        [[ -f "$p" ]] || continue
+        cp -v "$p" "$OPENWRT_DIR/target/linux/econet/patches-6.12/"
+    done
+fi
+
 # image build files (could be Makefile or en751221.mk)
 for f in "$REPO_DIR"/target/linux/econet/image/*; do
     if [[ -f "$f" ]]; then
