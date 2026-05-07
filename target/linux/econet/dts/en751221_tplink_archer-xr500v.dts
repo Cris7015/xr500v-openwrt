@@ -161,11 +161,15 @@
 };
 
 /*
- * iter 2: PCIe disabled to isolate kernel crash at EPC=0x81fb91a8 BADVADDR=0xc0000000.
- * Hipótesis Codex: ioremap del controlador PCIe o BAR del MT76 cae en KSEG2 y el
- * acceso falla con bus error porque el hardware XR500v no responde como espera el
- * driver econet,en7528-pcie (PHY/GPIO reset/chip diferente al VR1200v).
- * Si este boot llega a shell por UART, re-habilitar pcie0/pcie1 incrementalmente.
+ * Phase 2 task 3: re-enabling PCIe incrementally.
+ * iter1-iter2 (early in development) crashed at EPC=0x81fb91a8 BADVADDR=0xc0000000
+ * when pcie0+pcie1 enabled with mt76 child nodes. Codex hypothesis (later partly
+ * disproven) was PCIe init touching unmapped KSEG2. The actual iter1 crash was
+ * the bldr post-LZMA code path, not PCIe — fixed by the tplink-v2-header patcher.
+ * Now retrying PCIe with header fixed, BBT clean, overlay stable.
+ *
+ * iter30: enable pcie0 controller only, no slot child, see if PCIe controller
+ * driver (econet,en7528-pcie) probes without crashing.
  */
-&pcie0 { status = "disabled"; };
+&pcie0 { status = "okay"; };
 &pcie1 { status = "disabled"; };
