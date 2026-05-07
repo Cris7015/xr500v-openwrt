@@ -93,14 +93,23 @@
 		};
 
 		partition@1380000 {
+			compatible = "nvmem-cells";
 			label = "misc";
 			reg = <0x1380000 0x480000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			read-only;
+
 			/*
-			 * TODO: XR500v NVMEM layout for WiFi EEPROM and MAC
-			 * addresses is not yet mapped. Will be filled in once
-			 * we have a running kernel and can dump the partition.
-			 * For PoC Phase 1, leaving as plain partition.
+			 * Factory-programmed device data lives in this partition.
+			 * Confirmed via `dd if=/dev/mtd_misc skip=0xF100 count=6`
+			 * matching the same offset in the OEM stock dump:
+			 *   0xF100: <ETH MAC, 6 bytes>
+			 * The rest of the partition (most of it) is 0xFF padding.
 			 */
+			macaddr_misc_f100: macaddr@f100 {
+				reg = <0xf100 0x6>;
+			};
 		};
 
 		partition@1800000 {
@@ -147,12 +156,8 @@
 
 &gmac0 {
 	status = "okay";
-	/*
-	 * TODO: MAC address NVMEM source not yet identified for XR500v.
-	 * Will be wired once misc partition NVMEM layout is known.
-	 * nvmem-cells = <&macaddr_xr500v 0>;
-	 * nvmem-cell-names = "mac-address";
-	 */
+	nvmem-cells = <&macaddr_misc_f100>;
+	nvmem-cell-names = "mac-address";
 };
 
 /*
