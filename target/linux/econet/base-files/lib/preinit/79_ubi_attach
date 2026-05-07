@@ -47,15 +47,22 @@ attach_and_premount_ubifs_overlay() {
 	[ -e /dev/ubi0_0 ] || { echo "[ubi-hook] /dev/ubi0_0 missing after mdev+mknod" >/dev/console; return 0; }
 	echo "[ubi-hook] /dev/ubi0_0 exists" >/dev/console
 
-	# Pre-mount UBIFS volume where mount_root expects to find /tmp/overlay
-	mkdir -p /tmp/overlay
-	mount -t ubifs ubi0:rootfs_data /tmp/overlay >/dev/console 2>&1
+	# UBIFS-warmup trick: the kernel-time UBIFS mount via mount_root fails
+	# with -EINVAL when journal replay is needed. Mount + umount once here
+	# triggers the journal replay so the volume is "clean" when mount_root
+	# attempts its own mount. Then we leave /tmp/overlay non-existent so
+	# mount_root's mkdir succeeds.
+	mkdir -p /tmp/.ubifs_warmup
+	mount -t ubifs ubi0:rootfs_data /tmp/.ubifs_warmup >/dev/console 2>&1
 	local rc=$?
-	echo "[ubi-hook] mount RC=$rc" >/dev/console
+	echo "[ubi-hook] warmup mount RC=$rc" >/dev/console
 	if [ "$rc" = "0" ]; then
-		mkdir -p /tmp/overlay/upper /tmp/overlay/work
-		echo "[ubi-hook] overlay ready" >/dev/console
+		# ensure recovery committed before unmount
+		sync
+		umount /tmp/.ubifs_warmup >/dev/console 2>&1
+		echo "[ubi-hook] warmup umount RC=$?" >/dev/console
 	fi
+	rmdir /tmp/.ubifs_warmup 2>/dev/null
 }
 
 boot_hook_add preinit_main attach_and_premount_ubifs_overlay
