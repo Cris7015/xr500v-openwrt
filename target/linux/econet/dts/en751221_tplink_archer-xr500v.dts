@@ -27,6 +27,16 @@
 &nand {
 	status = "okay";
 	econet,bmt;
+	/*
+	 * Allow en75_bmt to write a Bad Block Table to the NAND reserve
+	 * area on first boot. Without this property the driver gives up
+	 * with "BBT not found" and falls back to per-boot OOB scanning,
+	 * which conflicts with UBI's ECC parity in OOB and causes UBI
+	 * to misdetect every PEB as bad after a write. With BBT, the
+	 * bad-block status comes from the table not the OOB markers,
+	 * so UBI persistence works across reboots.
+	 */
+	econet,can-write-factory-bbt;
 
 	partitions {
 		compatible = "fixed-partitions";
