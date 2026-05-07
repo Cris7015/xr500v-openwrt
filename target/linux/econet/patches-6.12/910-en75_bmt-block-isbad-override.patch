@@ -1,8 +1,29 @@
-Subject: en75_bmt: override mtd block_isbad/markbad so UBI doesn't depend on raw OOB
+Subject: en75_bmt: full UBI persistence fix (block_isbad/markbad override + handle empty factory-badblocks + skip w_sync_tables when empty)
 
 --- a/drivers/mtd/nand/en75_bmt.c	2026-05-07 06:27:53.777258060 +0000
-+++ b/drivers/mtd/nand/en75_bmt.c	2026-05-07 06:28:50.150812974 +0000
-@@ -1360,13 +1360,37 @@
++++ b/drivers/mtd/nand/en75_bmt.c	2026-05-07 07:46:59.468108356 +0000
+@@ -1072,6 +1072,20 @@
+ 
+ static int w_factory_badblocks(struct en75_bmt_m *ctx, const u32 *blocks, int count)
+ {
++	/*
++	 * Empty list = "no factory bad blocks in user area". Init bbt/bmt
++	 * headers cleanly and return early; without this, the WARN_ON_ONCE
++	 * checks fire on the empty-DT-property path.
++	 */
++	if (count == 0) {
++		ctx->bbt.header.version = 1;
++		ctx->bbt.header.size = 0;
++		if (!ctx->bmt.header.version) {
++			ctx->bmt.header.version = 1;
++			ctx->bmt.header.size = 0;
++		}
++		return 0;
++	}
+ 	if (WARN_ON_ONCE(!ctx->bbt.header.version))
+ 		return -EINVAL;
+ 	if (WARN_ON_ONCE(!ctx->bmt.header.version))
+@@ -1360,13 +1374,45 @@
  
  static struct en75_bmt_m en75_bmt_m;
  
@@ -33,8 +54,17 @@ Subject: en75_bmt: override mtd block_isbad/markbad so UBI doesn't depend on raw
  
  	ret = w_init(&en75_bmt_m, np);
 -	if (!ret)
+-		w_sync_tables(&en75_bmt_m);
 +	if (!ret) {
- 		w_sync_tables(&en75_bmt_m);
++		/*
++		 * Skip w_sync_tables when both BBT and BMT have no entries:
++		 * each BMT write contaminates OOB byte 0 of the target reserve
++		 * block, which the next boot's scan reports as "bad", shrinking
++		 * the reserve area by 1. With empty tables nothing useful needs
++		 * writing.
++		 */
++		if (en75_bmt_m.bbt.header.size || en75_bmt_m.bmt.header.size)
++			w_sync_tables(&en75_bmt_m);
 +		en75_bmt_m.mtk->mtd->_block_isbad = en75_block_isbad;
 +		en75_bmt_m.mtk->mtd->_block_markbad = en75_block_markbad;
 +	}
