@@ -38,13 +38,12 @@
 	 */
 	econet,can-write-factory-bbt;
 	/*
-	 * Assert reserve area size = 96. The bldr reports "bmt pool size: 94"
-	 * but en75_bmt's own count is 96 (likely the bldr excludes 2 BBT
-	 * blocks from its tally). 96 is what the driver derives, so we assert
-	 * that. Mismatch would refuse init (safer than writing BBT to wrong
-	 * area).
+	 * No assert-reserve-size: each BMT/BBT write seems to consume one
+	 * block from the reserve area's tally (block becomes "bad" on next
+	 * boot's scan), so the count grows over time. Asserting any specific
+	 * value would refuse init after the first BMT rewrite. The driver
+	 * is fine deriving the size dynamically.
 	 */
-	econet,assert-reserve-size = <96>;
 
 	partitions {
 		compatible = "fixed-partitions";
