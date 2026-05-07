@@ -1,0 +1,24 @@
+#!/bin/sh
+# Attach UBI to the rootfs_data partition before mount_root runs, so
+# fstools/block can detect the UBIFS volume and mount it as overlay.
+#
+# This is needed on the XR500v (and possibly other EN751221 boards) because
+# kernel-time UBI auto-attach via `ubi.mtd=` cmdline triggers OOB-marker
+# misinterpretation under en75_bmt-without-BBT, marking all PEBs bad and
+# making subsequent userspace ubiformat impossible. Doing the attach from
+# userspace at preinit avoids that codepath.
+
+attach_rootfs_data_ubi() {
+	# already attached?
+	[ -e /dev/ubi0_0 ] && return
+
+	local mtdnum
+	mtdnum=$(grep '"rootfs_data"' /proc/mtd | cut -d: -f1 | tr -d 'mtd:')
+	[ -n "$mtdnum" ] || return
+
+	# nothing to attach until something is provisioned; first boot leaves
+	# this partition raw. The first-boot provisioning runs separately.
+	ubiattach -m "$mtdnum" -d 0 >/dev/null 2>&1
+}
+
+boot_hook_add preinit_main attach_rootfs_data_ubi

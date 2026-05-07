@@ -15,16 +15,12 @@
 	chosen {
 		stdout-path = "/serial@1fbf0000:115200";
 		/*
-		 * UBI overlay strategy: the squashfs root stays raw on rootfs1
-		 * (mtd-split creates "rootfs_data" sub-partition after squashfs).
-		 * That sub-partition is provisioned as UBI from running OpenWrt
-		 * (ubiformat + ubimkvol -N rootfs_data) — mainline-driver-formatted,
-		 * not via stock OEM writeflash whose OOB layout breaks UBI scan.
-		 * This bootarg makes the kernel auto-attach UBI to the rootfs_data
-		 * partition so mount_root can find the rootfs_data UBIFS volume
-		 * and use it as overlay.
+		 * UBI overlay is attached at preinit time by
+		 * /lib/preinit/79_ubi_attach (see base-files), NOT via kernel
+		 * cmdline ubi.mtd=. The kernel-time auto-attach was found to
+		 * mismark OOB on this NAND via en75_bmt, breaking subsequent
+		 * userspace ubiformat. Userspace ubiattach is consistent.
 		 */
-		bootargs = "ubi.mtd=rootfs_data";
 	};
 };
 

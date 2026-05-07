@@ -30,6 +30,13 @@ for f in "$REPO_DIR"/target/linux/econet/image/*; do
     fi
 done
 
+# base-files (preinit hooks, etc) — sync entire tree
+SRC_BASEFILES="$REPO_DIR/target/linux/econet/base-files"
+if [[ -d "$SRC_BASEFILES" ]]; then
+    mkdir -p "$OPENWRT_DIR/target/linux/econet/base-files"
+    cp -rv "$SRC_BASEFILES/." "$OPENWRT_DIR/target/linux/econet/base-files/"
+fi
+
 echo
 echo "[+] Done. Now run on the OpenWrt tree:"
 echo "    cd $OPENWRT_DIR && make defconfig"
