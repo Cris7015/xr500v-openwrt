@@ -46,13 +46,18 @@
 		};
 
 		partition@380000 {
-			label = "rootfs";
-			reg = <0x380000 0x1000000>;
 			/*
-			 * Slot A rootfs holds the stock OEM squashfs (LZMA-compressed,
-			 * unsupported by mainline). Do NOT mark as linux,rootfs while
-			 * we boot from slot B; otherwise kernel tries to mount it.
+			 * Slot A rootfs holds the stock OEM squashfs (LZMA-compressed).
+			 * Renamed from "rootfs" to "rootfs_stock" so OpenWrt's
+			 * mtdsplit-support patch (drivers/mtd/mtdpart.c) does NOT match
+			 * this partition by name — otherwise mtdsplit_squashfs runs on
+			 * mtd3 (stock) and the global rootfs_found flag prevents it
+			 * from running on mtd7 (rootfs1) where we actually need the
+			 * overlay split.
 			 */
+			label = "rootfs_stock";
+			reg = <0x380000 0x1000000>;
+			read-only;
 		};
 
 		partition@1380000 {
