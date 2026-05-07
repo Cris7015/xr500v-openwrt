@@ -108,31 +108,12 @@
 	 */
 };
 
-&pcie0 {
-	status = "okay";
-};
-&slot0 {
-	wifi@0,0 {
-		/*
-		 * TODO: PCIe WiFi EEPROM/MAC NVMEM not yet mapped for XR500v.
-		 * Keeping node minimal to allow PCIe enumeration.
-		 * VR1200v used MT7592 here; XR500v likely similar MediaTek.
-		 */
-		compatible = "mediatek,mt76";
-		reg = <0x0000 0 0 0 0>;
-	};
-};
-&pcie1 {
-	status = "okay";
-};
-&slot1 {
-	wifi@0,0 {
-		/*
-		 * TODO: PCIe WiFi EEPROM/MAC NVMEM not yet mapped for XR500v.
-		 * Keeping node minimal to allow PCIe enumeration.
-		 * VR1200v used MT7613BE here; XR500v likely similar MediaTek.
-		 */
-		compatible = "mediatek,mt76";
-		reg = <0x0000 0 0 0 0>;
-	};
-};
+/*
+ * iter 2: PCIe disabled to isolate kernel crash at EPC=0x81fb91a8 BADVADDR=0xc0000000.
+ * Hipótesis Codex: ioremap del controlador PCIe o BAR del MT76 cae en KSEG2 y el
+ * acceso falla con bus error porque el hardware XR500v no responde como espera el
+ * driver econet,en7528-pcie (PHY/GPIO reset/chip diferente al VR1200v).
+ * Si este boot llega a shell por UART, re-habilitar pcie0/pcie1 incrementalmente.
+ */
+&pcie0 { status = "disabled"; };
+&pcie1 { status = "disabled"; };
