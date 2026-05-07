@@ -37,6 +37,13 @@
 	 * so UBI persistence works across reboots.
 	 */
 	econet,can-write-factory-bbt;
+	/*
+	 * Assert that the en75_bmt-computed reserve area size matches the
+	 * bldr's "bmt pool size: 94" reported in the bootloader log. If
+	 * mismatched, the driver will refuse to initialize (safer than
+	 * silently writing a BBT to the wrong area).
+	 */
+	econet,assert-reserve-size = <94>;
 
 	partitions {
 		compatible = "fixed-partitions";
