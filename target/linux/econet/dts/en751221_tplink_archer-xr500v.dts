@@ -38,12 +38,20 @@
 	 */
 	econet,can-write-factory-bbt;
 	/*
-	 * No assert-reserve-size: each BMT/BBT write seems to consume one
-	 * block from the reserve area's tally (block becomes "bad" on next
-	 * boot's scan), so the count grows over time. Asserting any specific
-	 * value would refuse init after the first BMT rewrite. The driver
-	 * is fine deriving the size dynamically.
+	 * Provide an empty factory-badblocks list so en75_bmt's pub_init takes
+	 * the "factory_badblocks given -> reconstruct BMT only" branch and
+	 * SKIPS the destructive r_reconstruct_bbt() OOB scan. The OOB scan
+	 * walks every block reading byte 0 raw and treats non-0xFF as bad,
+	 * but byte 0 gets contaminated by UBI's writes so the scan reports
+	 * more false bad blocks each boot. With empty factory-badblocks,
+	 * user-area shift stays at 0 across reboots, which keeps the UBIFS
+	 * volume's logical->physical mapping stable.
+	 *
+	 * Real factory bad blocks (if any) in the user area are handled by
+	 * UBI itself (CONFIG_MTD_UBI_BEB_LIMIT) — UBI marks them on first
+	 * write/erase failure and skips them for life of the volume.
 	 */
+	econet,factory-badblocks = <>;
 
 	partitions {
 		compatible = "fixed-partitions";
