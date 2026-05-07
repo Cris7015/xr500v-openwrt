@@ -38,12 +38,13 @@
 	 */
 	econet,can-write-factory-bbt;
 	/*
-	 * Assert that the en75_bmt-computed reserve area size matches the
-	 * bldr's "bmt pool size: 94" reported in the bootloader log. If
-	 * mismatched, the driver will refuse to initialize (safer than
-	 * silently writing a BBT to the wrong area).
+	 * Assert reserve area size = 96. The bldr reports "bmt pool size: 94"
+	 * but en75_bmt's own count is 96 (likely the bldr excludes 2 BBT
+	 * blocks from its tally). 96 is what the driver derives, so we assert
+	 * that. Mismatch would refuse init (safer than writing BBT to wrong
+	 * area).
 	 */
-	econet,assert-reserve-size = <94>;
+	econet,assert-reserve-size = <96>;
 
 	partitions {
 		compatible = "fixed-partitions";
