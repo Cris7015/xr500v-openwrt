@@ -1,24 +1,38 @@
 #!/bin/sh
-# Attach UBI to the rootfs_data partition before mount_root runs, so
-# fstools/block can detect the UBIFS volume and mount it as overlay.
+# 79_ubi_attach — attach UBI to rootfs_data partition AND pre-mount the UBIFS
+# volume at /tmp/overlay before mount_root runs.
 #
-# This is needed on the XR500v (and possibly other EN751221 boards) because
-# kernel-time UBI auto-attach via `ubi.mtd=` cmdline triggers OOB-marker
-# misinterpretation under en75_bmt-without-BBT, marking all PEBs bad and
-# making subsequent userspace ubiformat impossible. Doing the attach from
-# userspace at preinit avoids that codepath.
+# Kernel-time UBI auto-attach via `ubi.mtd=` cmdline triggers OOB-marker
+# misinterpretation under en75_bmt-without-BBT and breaks subsequent userspace
+# ubiformat. Userspace ubiattach via this hook is consistent.
+#
+# The pre-mount at /tmp/overlay sidesteps a bug where fstools mount_root
+# fails to mount UBIFS with -EINVAL post-reboot, even though
+# `mount -t ubifs ubi0:rootfs_data /target` works manually. With /tmp/overlay
+# already mounted by us, mount_root proceeds to the overlayfs pivot.
 
-attach_rootfs_data_ubi() {
-	# already attached?
-	[ -e /dev/ubi0_0 ] && return
-
+attach_and_premount_ubifs_overlay() {
 	local mtdnum
 	mtdnum=$(grep '"rootfs_data"' /proc/mtd | cut -d: -f1 | tr -d 'mtd:')
-	[ -n "$mtdnum" ] || return
+	[ -n "$mtdnum" ] || return 0
 
-	# nothing to attach until something is provisioned; first boot leaves
-	# this partition raw. The first-boot provisioning runs separately.
-	ubiattach -m "$mtdnum" -d 0 >/dev/null 2>&1
+	# Attach UBI if not already attached
+	if [ ! -e /dev/ubi0_0 ]; then
+		ubiattach -m "$mtdnum" -d 0 >/dev/null 2>&1 || return 0
+		local i=0
+		while [ ! -e /dev/ubi0_0 ] && [ $i -lt 20 ]; do
+			usleep 100000 2>/dev/null || sleep 1
+			i=$((i + 1))
+		done
+	fi
+	[ -e /dev/ubi0_0 ] || return 0
+
+	# Pre-mount UBIFS volume where mount_root expects to find /tmp/overlay
+	mkdir -p /tmp/overlay
+	if mount -t ubifs ubi0:rootfs_data /tmp/overlay 2>/dev/null; then
+		# overlayfs needs upper/work subdirs underneath the rw store
+		mkdir -p /tmp/overlay/upper /tmp/overlay/work
+	fi
 }
 
-boot_hook_add preinit_main attach_rootfs_data_ubi
+boot_hook_add preinit_main attach_and_premount_ubifs_overlay
