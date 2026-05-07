@@ -1,0 +1,21 @@
+=== iter 28 — FINAL — UBIFS overlay persistence verified ===
+Captured 2026-05-07 ~07:30 AM after marathon session
+
+Key markers in this boot log:
+- en75_bmt: BBT not found, reconstructing from econet,factory-badblocks   ← clean DT path, NO destructive scan
+- en75_bmt: blocks: ... user: 922, factory_bad: 0, worn: 0 reserve: 102   ← stable user-area
+- (no "BMT written to block N" — skip-w_sync_tables patch)
+- ubi0: good PEBs: 104, bad PEBs: 0, corrupted PEBs: 0
+- ubi0: user volume: 1                                                     ← persisted volume
+- [ubi-hook] mtdnum=7
+- [ubi-hook] mknod ubi0_0 c 253 1                                          ← mknod fallback worked
+- [ubi-hook] /dev/ubi0_0 exists
+- UBIFS recovery needed → recovery completed                               ← warmup ran journal replay
+- [ubi-hook] warmup mount RC=0
+- [ubi-hook] warmup umount RC=0
+- (mount_root then mounted UBIFS clean — no recovery needed second time)
+- mount_root: switching to ubifs overlay                                   ← overlayfs pivoted!
+- (post-boot, /etc/marker_persisted.txt readable from previous boot)
+- (post-boot, ip addr show br-lan = 192.168.68.2/24 from previous uci config)
+
+Status: PERSISTENCE 100% WORKING. 28 iterations from start to here.
