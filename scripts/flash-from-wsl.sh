@@ -37,8 +37,13 @@ if len(kernel) < 0x300000:
 open('$TFTP_DIR/openwrt_kernel1_v3.bin', 'wb').write(kernel)
 print(f"  kernel1 payload: {len(kernel)} bytes md5={hashlib.md5(kernel).hexdigest()}")
 
-# Rootfs (16MB) - bytes from 0x400000 onwards, padded
-rootfs = src[0x400000:]
+# Rootfs (16MB) — slice from actual squashfs magic offset.
+# tplink-v2-header recipe places squashfs at 0x200 (header) + KERNEL_SIZE = 0x300200,
+# NOT at 0x400000 as the original script hardcoded. Detect magic to be safe.
+sqsh_off = src.find(b'hsqs')
+if sqsh_off < 0:
+    raise SystemExit("squashfs hsqs magic not found in image")
+rootfs = src[sqsh_off:]
 if len(rootfs) < 0x1000000:
     rootfs += b'\xff' * (0x1000000 - len(rootfs))
 elif len(rootfs) > 0x1000000:

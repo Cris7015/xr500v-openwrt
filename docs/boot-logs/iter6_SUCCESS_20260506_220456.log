@@ -1,0 +1,22 @@
+=== iter 6 — SUCCESS — XR500v OpenWrt PoC kernel→shell ===
+Captured 2026-05-06 ~21:50
+
+Key markers:
+- ==> boot flag = 1
+- Decompress to 80020000, kernelEntryPoint to 80020000
+- kernel_rootfs_ptr to 300000
+- Uncompressing Linux at load address 81000000
+- Linux version 6.12.80 (cristuu@xr500v-builder)
+- MIPS: machine is TP-Link Archer XR500v v1
+- mtd: setting mtd7 (rootfs1) as root device
+- VFS: Mounted root (squashfs filesystem) readonly on device 31:7
+- Run /sbin/init as init process
+- procd: - init -
+- econet_eth 1fb50000.ethernet: port 1 (LAN) registered with ae:a7:18:9e:85:50
+- BusyBox v1.37.0 (2026-01-02 17:07:02 UTC) built-in shell (ash)
+- OpenWrt SNAPSHOT, r34203-f3605b31fb
+- root@OpenWrt:~#
+- br-lan: port 1(eth0) entered blocking state
+
+Status: PoC Phase 1 COMPLETE. Kernel boots, rootfs mounts, shell available.
+Slot A (stock OEM) preserved. bflag=1 boots OpenWrt, bflag=0 returns to stock.

@@ -111,3 +111,28 @@ La imagen sysupgrade.bin usa la receta `tclinux-trx` (decidida en Task 9), que g
 - Hipótesis: crash en código de plataforma EcoNet o en en751221.dtsi (hardcoded peripheral access)
 - 0xc0000000 = MIPS KSEG2, periférico no existe o está en otra dirección en XR500v vs lo asumido por kernel
 - Próximo: Codex analysis para identificar la función en EPC=0x81fb91a8
+
+## 2026-05-06: Task 16 — Iteration loop summary
+
+| iter | change | result |
+|------|--------|--------|
+| 1 | Initial build, PCIe enabled, no TrendChip header | bldr crash EPC=0x81fb91a8 BADVADDR=0xc0000000 |
+| 2 | Disabled pcie0/pcie1 (Codex hypothesis) | Same crash — PCIe was not the cause |
+| 3 | Patched TrendChip header (magic + entry=0x8176d140) | Bldr jumped to kernel_entry too early → RI exception |
+| 4 | entry=0x80020000 (wrapper start) | Kernel booted, but panic mounting stock LZMA rootfs from mtd3 |
+| 5 | DTS: moved linux,rootfs to mtd7 (rootfs1) | Mounted mtd7, failed: rootfs flashed garbage |
+| 6 | Fixed flash script: rootfs slice from 0x300200 not 0x400000 | **Shell reached, PoC complete** |
+
+## 2026-05-06: Task N — PoC validated
+
+- Linux 6.12.80 boots from slot B (mtd6 kernel + mtd7 rootfs)
+- DTS recognized: "TP-Link Archer XR500v v1"
+- Squashfs XZ root mounted readonly
+- procd init runs, BusyBox shell available, eth0 port LAN registered
+- Slot A intact (bflag=0 returns to stock OEM firmware)
+
+### Key insights captured
+1. The bldr 512-byte header has TrendChip-specific fields that tplink-v2-header recipe doesn't fill — must patch post-build with magic at 0x60, entry at 0x6c, rootfs offset at 0x7c
+2. Kernel entry must be the WRAPPER start (= KERNEL_LOADADDR = 0x80020000), not the final vmlinux entry — wrapper does inner LZMA decompress before jumping to real kernel
+3. `linux,rootfs` must be on mtd7 (slot B rootfs1) since stock mtd3 has unsupported LZMA squashfs
+4. flash-from-wsl.sh had a bug: assumed rootfs at offset 0x400000 but tplink-v2 recipe puts it at 0x300200 (header 0x200 + KERNEL_SIZE 0x300000)
