@@ -1,77 +1,15 @@
-From: Cristian <pcristian292@gmail.com>
-Subject: [PATCH] en75_bmt + nanddev: bypass OOB-marker bad-block detection for UBI
+Subject: en75_bmt: override mtd block_isbad/markbad so UBI doesn't depend on raw OOB
 
-Three coordinated fixes for the en75_bmt+spi-nand stack so UBI overlay
-persistence works on devices like the TP-Link Archer XR500v (EN751221 +
-GD5F1GQ4xA SPI-NAND):
-
-1. en75_bmt overrides mtd->_block_isbad to always return 0 for in-range
-   blocks. en75_bmt already shrinks mtd->size via the BBT shift, so any
-   block reachable through the visible MTD is good by construction. The
-   default chain (mtk_bmt_block_isbad -> spinand_mtd_block_isbad ->
-   spinand_isbad) reads OOB[0..1] raw and mis-flags blocks whose OOB
-   carries residue from prior writes.
-
-2. en75_bmt overrides mtd->_block_markbad to a no-op. The default path
-   stamps OOB[0..1] = 0x00 raw via spinand_markbad, which would persist
-   false bad-block markers when UBI sees a transient read error and tries
-   to mark a block bad. UBI's own per-PEB bad-block tracking (driven by
-   CONFIG_MTD_UBI_BEB_LIMIT) handles wear-out without needing the OOB
-   marker; the BMT (Block Mapping Table) en75_bmt manages handles real
-   factory-bad blocks. So we don't need OOB markbad at all.
-
-3. nanddev_erase in core.c is patched to skip the nanddev_isbad gate.
-   Without this, mtk_bmt_mtd_erase -> spinand_mtd_erase -> nanddev_mtd_erase
-   -> nanddev_erase rejects with -EIO any block whose raw OOB[0..1] looks
-   bad. The override of mtd->_block_isbad doesn't help because nanddev_erase
-   calls nanddev_isbad directly through nand->ops->isbad, not through
-   mtd->_block_isbad. Skipping the isbad gate here is safe: if the block
-   is truly unerasable, nand->ops->erase will fail with -EIO and the upper
-   layer (UBI) handles it via its own bad-PEB tracking. nanddev_isreserved
-   still applies, which is the legitimate "this region is off-limits" check.
-
-Tested on TP-Link Archer XR500v: with this triple fix, ubiformat /dev/mtd7
-succeeds on a contaminated NAND where it would otherwise fail with
-"consecutive bad blocks exceed limit" after the first few PEBs.
-
---- a/drivers/mtd/nand/core.c
-+++ b/drivers/mtd/nand/core.c
-@@ -185,9 +185,15 @@ EXPORT_SYMBOL_GPL(nanddev_mtd_max_bad_blocks);
-  */
- static int nanddev_erase(struct nand_device *nand, const struct nand_pos *pos)
- {
--	if (nanddev_isbad(nand, pos) || nanddev_isreserved(nand, pos)) {
--		pr_warn("attempt to erase a bad/reserved block @%llx\n",
--			nanddev_pos_to_offs(nand, pos));
-+	/*
-+	 * Don't gate on nanddev_isbad here: on stacks like mtk_bmt + spi-nand
-+	 * + UBI, the raw OOB[0..1] read inside nanddev_isbad mis-flags blocks
-+	 * whose OOB carries non-0xFF residue from prior writes, even though
-+	 * the block itself is healthy. If the block is truly bad, the
-+	 * underlying erase op will return -EIO and the caller can handle it.
-+	 */
-+	if (nanddev_isreserved(nand, pos)) {
-+		pr_warn("attempt to erase a reserved block @%llx\n",
-+			nanddev_pos_to_offs(nand, pos));
- 		return -EIO;
- 	}
-
---- a/drivers/mtd/nand/en75_bmt.c
-+++ b/drivers/mtd/nand/en75_bmt.c
-@@ -1361,12 +1361,42 @@ static int w_init(struct en75_bmt_m *ctx, struct device_node *np)
-
+--- a/drivers/mtd/nand/en75_bmt.c	2026-05-07 06:27:53.777258060 +0000
++++ b/drivers/mtd/nand/en75_bmt.c	2026-05-07 06:28:50.150812974 +0000
+@@ -1360,13 +1360,37 @@
+ 
  static struct en75_bmt_m en75_bmt_m;
-
+ 
 +/*
-+ * UBI persistence depends on mtd_block_isbad() not lying about good blocks.
-+ * The default chain mtk_bmt_block_isbad -> spinand_mtd_block_isbad reads
-+ * OOB[0..1] raw and returns BAD for any non-0xFF, which mis-flags blocks
-+ * whose OOB carries residue from prior writes, even though the block itself
-+ * is healthy. en75_bmt has already excluded all factory-bad blocks from the
-+ * visible MTD size via get_mapping_block_bbt()'s shift; any block reachable
-+ * through the MTD is good by construction. So return 0 unconditionally.
-+ * UBI's own per-PEB tracking (CONFIG_MTD_UBI_BEB_LIMIT) handles runtime
-+ * wear-out without needing the OOB-based discriminator.
++ * en75_bmt has shrunk mtd->size via the BBT shift, so any in-range block
++ * is good by construction. Skip the raw-OOB-byte-0 check that mis-flags
++ * blocks whose OOB carries residue from prior writes.
 + */
 +static int en75_block_isbad(struct mtd_info *mtd, loff_t ofs)
 +{
@@ -81,11 +19,8 @@ succeeds on a contaminated NAND where it would otherwise fail with
 +}
 +
 +/*
-+ * Suppress mtd_block_markbad: the default chain stamps OOB[0..1] = 0x00
-+ * raw via spinand_markbad, which would persist false bad markers if UBI
-+ * (or any upper layer) calls markbad on a block that's actually healthy.
-+ * Real factory-bad blocks are tracked by the BMT/BBT en75_bmt manages;
-+ * runtime bad-PEB management is UBI's own concern.
++ * No-op markbad: don't stamp OOB[0..1]=0x00 with persistent false markers.
++ * UBI's own bad-PEB tracking handles wear-out.
 + */
 +static int en75_block_markbad(struct mtd_info *mtd, loff_t ofs)
 +{
@@ -95,7 +30,7 @@ succeeds on a contaminated NAND where it would otherwise fail with
  static int pub_init(struct device_node *np)
  {
  	int ret;
-
+ 
  	ret = w_init(&en75_bmt_m, np);
 -	if (!ret)
 +	if (!ret) {
@@ -105,4 +40,4 @@ succeeds on a contaminated NAND where it would otherwise fail with
 +	}
  	return ret;
  }
-
+ 
