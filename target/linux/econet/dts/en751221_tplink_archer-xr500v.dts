@@ -15,12 +15,16 @@
 	chosen {
 		stdout-path = "/serial@1fbf0000:115200";
 		/*
-		 * UBI overlay: rootfs1 partition is now a UBI device (label "ubi"
-		 * triggers OpenWrt's auto-attach patch). The squashfs lives in
-		 * UBI volume "rootfs"; UBIFS overlay at "rootfs_data" is created
-		 * by mount_root on first boot.
+		 * UBI overlay strategy: the squashfs root stays raw on rootfs1
+		 * (mtd-split creates "rootfs_data" sub-partition after squashfs).
+		 * That sub-partition is provisioned as UBI from running OpenWrt
+		 * (ubiformat + ubimkvol -N rootfs_data) — mainline-driver-formatted,
+		 * not via stock OEM writeflash whose OOB layout breaks UBI scan.
+		 * This bootarg makes the kernel auto-attach UBI to the rootfs_data
+		 * partition so mount_root can find the rootfs_data UBIFS volume
+		 * and use it as overlay.
 		 */
-		bootargs = "ubi.mtd=ubi root=ubi0:rootfs rootfstype=squashfs";
+		bootargs = "ubi.mtd=rootfs_data";
 	};
 };
 
@@ -85,15 +89,13 @@
 
 		partition@1b00000 {
 			/*
-			 * Slot B "rootfs" — labeled "ubi" so the OpenWrt
-			 * auto-attach patch (490-ubi-auto-attach-mtd-device-named-
-			 * ubi-or-data-on-boot) runs UBI on this partition at boot.
-			 * Image build uses Build/append-ubi to put a "rootfs"
-			 * (squashfs ro) volume here; rootfs_data (ubifs rw) is
-			 * created by mount_root on first boot.
+			 * Slot B rootfs (raw squashfs at start; mtd-split creates
+			 * "rootfs_data" sub-partition for the post-squashfs area
+			 * that we provision as UBI from running OpenWrt).
 			 */
-			label = "ubi";
+			label = "rootfs1";
 			reg = <0x1b00000 0x1000000>;
+			linux,rootfs;
 		};
 
 		partition@2b00000 {

@@ -66,11 +66,10 @@ define Device/tplink_archer-xr500v
   KERNEL_SIZE := 3072k
   IMAGE_SIZE := 16384k
   BLOCKSIZE := 128k
-  PAGESIZE := 2048
   IMAGES := sysupgrade.bin
-  # rootfs lives inside UBI on slot B's "ubi" partition; mount_root creates
-  # the rootfs_data UBIFS overlay automatically on first boot.
-  IMAGE/sysupgrade.bin := append-kernel | lzma | pad-to $$$$(KERNEL_SIZE) | append-ubi | \
+  # raw squashfs in slot B; mtd-split creates rootfs_data; UBI is provisioned
+  # from running OpenWrt (see chosen.bootargs ubi.mtd=rootfs_data).
+  IMAGE/sysupgrade.bin := append-kernel | lzma | pad-to $$$$(KERNEL_SIZE) | append-rootfs | \
     tplink-v2-header -R 0x400000
 endef
 TARGET_DEVICES += tplink_archer-xr500v
