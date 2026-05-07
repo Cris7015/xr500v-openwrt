@@ -48,7 +48,11 @@
 		partition@380000 {
 			label = "rootfs";
 			reg = <0x380000 0x1000000>;
-			linux,rootfs;
+			/*
+			 * Slot A rootfs holds the stock OEM squashfs (LZMA-compressed,
+			 * unsupported by mainline). Do NOT mark as linux,rootfs while
+			 * we boot from slot B; otherwise kernel tries to mount it.
+			 */
 		};
 
 		partition@1380000 {
@@ -70,6 +74,7 @@
 		partition@1b00000 {
 			label = "rootfs1";
 			reg = <0x1b00000 0x1000000>;
+			linux,rootfs;
 		};
 
 		partition@2b00000 {
