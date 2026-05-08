@@ -25,7 +25,7 @@ define KernelPackage/econet-eth
   SUBMENU:=Network Devices
   TITLE:=EcoNet EN751221 Ethernet Driver (eth+DSA bundle)
   DEPENDS:=@TARGET_econet +kmod-libphy +kmod-of-mdio +kmod-mdio-devres \
-           +kmod-dsa +kmod-pcs-mtk-lynxi
+           +kmod-dsa +kmod-dsa-mt7530
   FILES:=$(PKG_BUILD_DIR)/econet-eth.ko \
          $(PKG_BUILD_DIR)/econet-gsw.ko \
          $(PKG_BUILD_DIR)/econet-gsw-mmio.ko \
