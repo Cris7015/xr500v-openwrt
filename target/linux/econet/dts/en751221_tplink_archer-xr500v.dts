@@ -92,7 +92,7 @@
 			read-only;
 		};
 
-		partition@1380000 {
+		misc_partition: partition@1380000 {
 			compatible = "nvmem-cells";
 			label = "misc";
 			reg = <0x1380000 0x480000>;
@@ -110,6 +110,17 @@
 			macaddr_misc_f100: macaddr@f100 {
 				reg = <0xf100 0x6>;
 			};
+
+			/*
+			 * iter36: MT7662 factory EEPROM (chip ID 0x7662 confirmado
+			 * en byte 0). 512 bytes que contienen calibration data
+			 * (TX power per-channel, etc). El driver mt76x2e la lee via
+			 * nvmem-cells = <&eeprom_misc_e0000>; nvmem-cell-names = "eeprom".
+			 * Sin esto, el driver usa defaults conservadores (TX=3dBm).
+			 */
+			eeprom_misc_e0000: eeprom@e0000 {
+				reg = <0xe0000 0x200>;
+			};
 		};
 
 		partition@1800000 {
@@ -119,9 +130,14 @@
 
 		partition@1b00000 {
 			/*
-			 * Slot B rootfs (raw squashfs at start; mtd-split creates
-			 * "rootfs_data" sub-partition for the post-squashfs area
-			 * that we provision as UBI from running OpenWrt).
+			 * Slot B rootfs (raw squashfs).
+			 * linux,rootfs marca esta partition como root device para
+			 * mount_root. mtd-split-squashfs sigue creando una sub
+			 * "rootfs_data" automáticamente post-squashfs end, pero a
+			 * partir de iter35 NO la usamos: el overlay UBI vive en
+			 * partition propia "openwrt_ubi" en el área libre
+			 * 0x3000000-0x7000000 (confirmada vacía con dump completo).
+			 * El preinit hook 79_ubi_attach ahora apunta a openwrt_ubi.
 			 */
 			label = "rootfs1";
 			reg = <0x1b00000 0x1000000>;
@@ -139,20 +155,27 @@
 		};
 
 		/*
-		 * NOTE: OpenWrt UBI partition NOT defined for PoC scope.
-		 * The unused 0x3000000-0x7000000 (64MB) on the NAND likely
-		 * contains BMT (Bad Block Table) and other bldr-managed data.
-		 * Defining a UBI partition there without verifying could
-		 * overwrite BMT and brick the device. Revisit in Phase 2+
-		 * once we dump and analyze the actual contents.
+		 * iter35: dedicated UBI partition in the unused free area.
 		 *
-		 * partition@3000000 {
-		 *	label = "openwrt_ubi";
-		 *	reg = <0x3000000 0x3ec0000>;
-		 * };
+		 * El stock OEM expone /dev/mtd0 = "ALL" de 0x07000000 (112MB)
+		 * — eso es el espacio "user" del en75_bmt antes de su reserve
+		 * area (922 user blocks * 128KB = ~115MB, OEM reporta 112MB).
+		 * Las 9 particiones existentes suman 0x3000000 (48MB), dejando
+		 * 0x3000000-0x7000000 (64MB) disponibles. Confirmado erased
+		 * con dump completo el 2026-05-08 (16 chunks de 4MB todos
+		 * hash md5 = 4MB de 0xff puro).
+		 *
+		 * Esta partition se provisiona con ubiformat/ubiattach/ubimkvol
+		 * desde running OpenWrt (one-time per device); el preinit hook
+		 * 79_ubi_attach la atachea cada boot.
 		 */
+		partition@3000000 {
+			label = "openwrt_ubi";
+			reg = <0x3000000 0x4000000>;
+		};
 	};
 };
+
 
 &gmac0 {
 	status = "okay";
@@ -161,15 +184,63 @@
 };
 
 /*
- * Phase 2 task 3: re-enabling PCIe incrementally.
- * iter1-iter2 (early in development) crashed at EPC=0x81fb91a8 BADVADDR=0xc0000000
- * when pcie0+pcie1 enabled with mt76 child nodes. Codex hypothesis (later partly
- * disproven) was PCIe init touching unmapped KSEG2. The actual iter1 crash was
- * the bldr post-LZMA code path, not PCIe — fixed by the tplink-v2-header patcher.
- * Now retrying PCIe with header fixed, BBT clean, overlay stable.
+ * iter57: switch0 ahora es un platform device separado en 0x1fb58000
+ * con compatible "econet,en751221-switch" (driver econet-gsw-mmio.ko del
+ * branch dsa-switch-feb13-3035 de cjdelisle/econet_eth, commit c2f855c).
+ * Reemplaza al upstream mt7530.c (deshabilitado en config-6.12).
  *
- * iter30: enable pcie0 controller only, no slot child, see if PCIe controller
- * driver (econet,en7528-pcie) probes without crashing.
+ * Habilitamos los 4 ports físicos (port@0..3 = lan1..4).
+ * port@4 lo dejamos disabled (XR500v solo tiene 4 RJ45).
+ * port@5 (rgmii) y port@6 (CPU) heredan defaults del dtsi base.
+ *
+ * Las PHYs están en mdio addresses 8, 9, 10, 11 (switch0phy0..3) según
+ * documentación econet-linux.pkt.wiki.
  */
-&pcie0 { status = "okay"; };
-&pcie1 { status = "disabled"; };
+
+&switch0port0 {
+	phy-mode = "internal";
+	status = "okay";
+	label = "lan1";
+};
+
+&switch0port1 {
+	phy-mode = "internal";
+	status = "okay";
+	label = "lan2";
+};
+
+&switch0port2 {
+	phy-mode = "internal";
+	status = "okay";
+	label = "lan3";
+};
+
+&switch0port3 {
+	phy-mode = "internal";
+	status = "okay";
+	label = "lan4";
+};
+
+/*
+ * iter57 v2: Enable PCIe (perdió status=okay al rewrite del dts)
+ * pcie0 = port0 (no slot ahí)
+ * pcie1 + slot1 = MT7662 WiFi card
+ */
+
+&pcie0 {
+	status = "okay";
+};
+
+&pcie1 {
+	status = "okay";
+};
+
+&slot1 {
+	wifi@0,0 {
+		/* MT7662 dual-band 802.11ac */
+		compatible = "mediatek,mt76";
+		reg = <0x0000 0 0 0 0>;
+		nvmem-cells = <&eeprom_misc_e0000>, <&macaddr_misc_f100>;
+		nvmem-cell-names = "eeprom", "mac-address";
+	};
+};

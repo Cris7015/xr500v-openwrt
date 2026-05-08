@@ -40,11 +40,18 @@ def patch(data: bytearray, entry: int, kernel_size_hint: int,
     # tplink-v2-header writes KERNEL_LOADADDR there in BE, which already
     # matches what the bldr should use to place the wrapper.
     decompress_addr = struct.unpack(">I", bytes(data[0x68:0x6c]))[0]
+    # kernel entry: keep whatever tplink-v2-header wrote (KERNEL_LOADADDR).
+    # The LZMA wrapper's _start lives at the load address and decompresses
+    # the real kernel itself, so jumping to load addr is correct.
+    # The --entry override is only used if explicitly requested.
+    existing_entry = struct.unpack(">I", bytes(data[0x6c:0x70]))[0]
+    if entry == 0:
+        entry = existing_entry
 
     # TrendChip magic at 0x60.
     data[0x60:0x68] = STOCK_MAGIC
     # 0x68 already correct (kept from tplink-v2).
-    # 0x6c kernel entry — overwrite tplink-v2's load-addr-as-entry default.
+    # 0x6c kernel entry — keep existing unless --entry given.
     data[0x6c:0x70] = struct.pack(">I", entry)
     # 0x70 kernel size hint.
     data[0x70:0x74] = struct.pack(">I", kernel_size_hint)
@@ -73,8 +80,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("input")
     p.add_argument("output")
-    p.add_argument("--entry", type=lambda s: int(s, 0), default=0x8176d140,
-                   help="kernel entry point virtual address (default: OpenWrt 6.12 kernel_entry)")
+    p.add_argument("--entry", type=lambda s: int(s, 0), default=0,
+                   help="kernel entry point virtual address; default 0 = keep tplink-v2-header value")
     p.add_argument("--kernel-size", type=lambda s: int(s, 0), default=0x01300000,
                    help="kernel size hint at @0x70 (default: stock value 0x01300000)")
     p.add_argument("--rootfs-offset", type=lambda s: int(s, 0), default=0x00300000,

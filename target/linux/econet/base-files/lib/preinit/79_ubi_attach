@@ -1,21 +1,23 @@
 #!/bin/sh
-# 79_ubi_attach — attach UBI to rootfs_data partition AND pre-mount the UBIFS
-# volume at /tmp/overlay before mount_root runs.
+# 79_ubi_attach — attach UBI to openwrt_ubi partition (iter35+) AND
+# pre-mount the UBIFS volume at /tmp/overlay before mount_root runs.
+#
+# Pre-iter35: la UBI vivía en sub-partition "rootfs_data" auto-derivada
+# de rootfs1 (tras squashfs-split). Solo había 13MB.
+# iter35+: UBI propia en partition "openwrt_ubi" (64MB en área libre
+# 0x3000000-0x7000000). El nombre del volumen UBI sigue siendo
+# "rootfs_data" para compatibilidad con fstools/mount_root sin
+# patches.
 #
 # Kernel-time UBI auto-attach via `ubi.mtd=` cmdline triggers OOB-marker
 # misinterpretation under en75_bmt-without-BBT and breaks subsequent userspace
 # ubiformat. Userspace ubiattach via this hook is consistent.
-#
-# The pre-mount at /tmp/overlay sidesteps a bug where fstools mount_root
-# fails to mount UBIFS with -EINVAL post-reboot, even though
-# `mount -t ubifs ubi0:rootfs_data /target` works manually. With /tmp/overlay
-# already mounted by us, mount_root proceeds to the overlayfs pivot.
 
 attach_and_premount_ubifs_overlay() {
 	local mtdnum
-	mtdnum=$(grep '"rootfs_data"' /proc/mtd | cut -d: -f1 | tr -d 'mtd:')
-	[ -n "$mtdnum" ] || { echo "[ubi-hook] no mtdnum" >/dev/console; return 0; }
-	echo "[ubi-hook] mtdnum=$mtdnum" >/dev/console
+	mtdnum=$(grep '"openwrt_ubi"' /proc/mtd | cut -d: -f1 | tr -d 'mtd:')
+	[ -n "$mtdnum" ] || { echo "[ubi-hook] no mtdnum (openwrt_ubi missing)" >/dev/console; return 0; }
+	echo "[ubi-hook] mtdnum=$mtdnum (openwrt_ubi)" >/dev/console
 
 	# Attach UBI if not already attached
 	if [ ! -e /dev/ubi0_0 ]; then
