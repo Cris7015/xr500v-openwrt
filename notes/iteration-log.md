@@ -136,3 +136,52 @@ La imagen sysupgrade.bin usa la receta `tclinux-trx` (decidida en Task 9), que g
 2. Kernel entry must be the WRAPPER start (= KERNEL_LOADADDR = 0x80020000), not the final vmlinux entry — wrapper does inner LZMA decompress before jumping to real kernel
 3. `linux,rootfs` must be on mtd7 (slot B rootfs1) since stock mtd3 has unsupported LZMA squashfs
 4. flash-from-wsl.sh had a bug: assumed rootfs at offset 0x400000 but tplink-v2 recipe puts it at 0x300200 (header 0x200 + KERNEL_SIZE 0x300000)
+
+## 2026-05-10: Task R — RX bug deep dive iter97-iter108 (path A + Op 2)
+
+Massive 12+ hour session attacking the community-unresolved RX bug on lan1-4. WAN+WiFi worked; user ports had carrier UP but RXU=0 (no frames reach switch fabric MAC). Final state: PMCR exact match with OEM stock, but RX still 0 — confirmed bug is at PHY↔MAC hardware-internal level, invisible from MMIO registers.
+
+### Iterations
+
+| iter | change | result |
+|------|--------|--------|
+| iter97 | Codex round 1 (PHY 9-12) — broke econet_eth probe with -EINVAL | Source corruption from partial patch state |
+| iter98a-d | DTS PHY remap 1-4 (per OEM ethphxcmd miir) + /delete-node/ &switch0port4 + &switch0phy4 | DSA enumerates 4 user ports, link UP 1Gbps |
+| iter99 | DSA_TAG_PROTO_MTK → 8021Q (naive switch) | Fail silently — kernel sin CONFIG_NET_DSA_TAG_8021Q standalone |
+| iter100 | Revert iter99 → baseline iter98d | Stable |
+| iter101 | port0.regs.stag_en = 1 (enable HW STAG insertion on RX) | Frames empiezan a llegar a CPU pero con fport=13 (unexpected) |
+| iter102 | Full OEM macEN7512STagEnable: CDMA_VLAN_CTRL[0]=1 + fwd_cfg[24]=1 + stag_en=1 + vlan=0x81000001 | Hex dump revela MTK STAG inline format 00 05 00 00 (port=5 = WAN, never 0-3) |
+| iter103-104 | Debug log sp_tag + skb hex dump primeros 32 bytes | sp_tag=0 (descriptor empty); STAG está inline post-srcMAC. tag_mtk decodea correcto, sólo WAN frames llegan |
+| iter105 | REMOVE iter84 PCR forcing 0x00ff (était L2-bridging LAN↔WAN bypass CPU); deja DSA programar PCR=0x004d | PC vía LAN no tiene internet (L2 bridge cortado), pero RXU sigue 0 |
+| iter106 | Codex round 1 fix: PMCR bits 13/14 (PMCR_MAC_RX_EN/TX_EN) + bits 4/5 (FORCE_RX/TX_FC_EN) | Bits set OK (PMCR=0x5e330 cuando link UP) pero RXU=0 todavía |
+| iter107 | Codex round 2 + DeepSeek-V4 Pro: PVID per port 1..7, MFC=0x404040e0, CPU PVC bit 5 PORT_SPEC_TAG → 0x81008120 | All registers match OEM, RX persists 0 |
+| iter108 | Clear PMCR bit 15 MT7530_FORCE_MODE → PMCR=0x56330 (**exact match OEM**) | **Perfect register-level OEM match. RXU=0 STILL.** Bug confirmed sub-register layer |
+
+### Hard wall conclusions
+
+1. **All visible registers replicated**: PMCR (0x56330), PCR (0x004d DSA matrix), PVC (0x81008100 user + 0x81008120 CPU with PORT_SPEC_TAG), PVID (1..7 per port), MFC (0x404040e0), TPID (0x8100 all ports), stag_en=1, fwd_cfg l2lu_stag_2cpu set, vlan reg=0x81000001 — all byte-for-byte identical to OEM stock dump.
+2. **ethtool -S lan1 shows ZERO RX activity** in any direction. Even RxCrcErr/RxAlignErr/RxFragErr = 0 → switch MAC never sees frames from PHY.
+3. **TX same problem**: 19 packets sent from Linux → TxBytes counter on switch = 0. MAC neither RX nor TX on user ports.
+4. **WAN port (port@5 RGMII fixed-link)** works perfectly because RGMII bypasses internal PHY-MAC pipeline entirely.
+5. **Bug is at PHY-MAC switch fabric interface** — invisible from MDIO/MMIO. Calibration values, clock gating, or hidden reset sequence the OEM eth.ko binary blob does.
+
+### Other key findings
+
+- **Port labeling carcasa ↔ Linux invertido**: jack LAN1 = Linux lan4, LAN2 = lan3, LAN3 = lan2, LAN4 = lan1 (confirmed via OEM  + live cable-plug tests)
+- **PHY MDIO addresses real**: 1, 2, 3, 4 (NOT 0-3 from base dtsi, NOT 9-12 from econet-linux wiki). Confirmed via OEM .
+- **MTK STAG format**: standard 4-byte inline header after src MAC:  (port 5 = WAN in our captures). Decoded correctly by mainline  with .
+- **patch_trendchip_header.py default entry**: changed from 0x8176d140 (iter91-specific) to 0x80020000 (= KERNEL_LOADADDR, always correct for OpenWrt MIPS pipeline).
+- **OEM uses 802.1Q VLAN model, NOT STAG**: stock OEM creates eth0 + eth0.1..eth0.4 sub-interfaces via Linux 802.1Q stack.  flag in OEM eth.ko enables this mode.
+
+### Path forward (not implemented, ideas for next session)
+
+1. **JTAG hardware tracing** — capture OEM init register write sequence with exact timing
+2. **Port OEM eth.ko as out-of-tree platform driver** — abandon DSA, replicate  model exactly  
+3. **Exhaustive disasm** — analyze , , calibration value loading from factory partition
+4. **Clock controller comparison** — diff MFD_SYSCON regs vs OEM pre-init state
+5. **SDK_tcetherphy_7512.c reading** — 315KB vendor SDK reference source has function definitions for , ,  that may reveal missing init step
+
+### Regressions in iter108
+
+- WiFi PCIe binding broken (mt76 modules loaded, /sys/class/ieee80211/ empty, no PCIe enumeration in dmesg). Likely  dropped a kernel CONFIG. Fixable next session.
+
