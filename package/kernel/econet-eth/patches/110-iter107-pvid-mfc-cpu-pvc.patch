@@ -1,0 +1,34 @@
+--- a/gsw/mt7530.c	2026-05-10 15:28:51.978531110 +0000
++++ b/gsw/mt7530.c	2026-05-10 15:28:52.081368707 +0000
+@@ -1091,15 +1091,25 @@
+ 	if (0) en751221_trgmii_init(priv); /* iter87 skip iter76+77 */
+ 	if (0) en751221_p6_rx_cal(priv); /* iter86 skip */
+ 	en751221_fix_gdma1_fwd(priv);
+-	/* iter84: force PCR/PSC for all user ports (1..4) — fabric-level enable */
++	/* iter107: codex r2 + AI insight - PVID per port + MFC + CPU PVC PORT_SPEC_TAG.
++	 * Removed PCR/PSC forcing (was causing L2 bridge LAN<->WAN).
++	 * Added PVID and CPU port PVC PORT_SPEC_TAG bit per OEM macEN7512STagEnable.
++	 */
+ 	{
+ 		int p;
+-		for (p = 1; p <= 4; p++) {
+-			mt7530_write(priv, 0x2004 + p * 0x100, 0x00ff0003); /* iter91: stock matrix=0xff (all ports) instead of 0x41 */
+-			mt7530_write(priv, 0x200c + p * 0x100, 0x000fff10); /* PSC: enable SA learning + drop unknown */
+-			mt7530_write(priv, 0x2010 + p * 0x100, 0x81008100); /* iter91: stock TPID both halves (was 0x81000000) */
++		u32 cpu_pvc;
++		for (p = 0; p <= 6; p++) {
++			mt7530_write(priv, 0x2010 + p * 0x100, 0x81008100); /* TPID */
++			mt7530_write(priv, 0x2014 + p * 0x100, 0x00010001 + p); /* PVID */
+ 		}
+-		dev_warn(priv->dev, "ITER84: forced PCR/PSC/PVC on user ports 1-4\n");
++		mt7530_write(priv, 0x0010, 0x404040e0); /* MFC: BC/MC/UC FFP -> CPU port 6 */
++		/* CPU port 6 PVC: clear bits 6:7, set bit 5 (PORT_SPEC_TAG). */
++		cpu_pvc = mt7530_read(priv, 0x2610);
++		cpu_pvc = (cpu_pvc & ~0xC0u) | 0x20u;
++		mt7530_write(priv, 0x2610, cpu_pvc);
++		dev_warn(priv->dev,
++			"ITER107: PVID/MFC/CPU_PVC=0x%08x (codex r2 + AI hint)\n",
++			cpu_pvc);
+ 	}
+ 	en751221_start_dbg_timer(priv);
+ }

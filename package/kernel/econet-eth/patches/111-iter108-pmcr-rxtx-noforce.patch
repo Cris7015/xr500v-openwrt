@@ -1,0 +1,22 @@
+--- a/gsw/mt7530.c	2026-05-10 17:21:14.183218007 +0000
++++ b/gsw/mt7530.c	2026-05-10 17:21:14.195325044 +0000
+@@ -1278,6 +1278,19 @@
+ 	phy_write(phy, MII_CTRL1000, 0x1E00);
+ 	dev_warn(ds->dev, "ITER90: setup_port port=%d MII_CTRL1000=0x1E00\n", port);
+ 	phy_write(phy, MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
++
++	/* iter106 + iter108: enable MAC RX/TX + clear FORCE_MODE.
++	 * OEM PMCR=0x56330 (FORCE_MODE=0). Setting MAC_TX/RX_EN + FC bits, clearing FORCE_MODE
++	 * lets MAC follow PHY auto-neg result instead of forcing to a possibly-wrong state.
++	 */
++	{
++		struct mt7530_priv *priv = ds->priv;
++		u32 set_bits = PMCR_MAC_TX_EN | PMCR_MAC_RX_EN |
++			       PMCR_FORCE_RX_FC_EN | PMCR_FORCE_TX_FC_EN;
++		u32 clear_bits = MT7530_FORCE_MODE;
++		mt7530_rmw(priv, MT753X_PMCR_P(port), set_bits | clear_bits, set_bits);
++		dev_warn(ds->dev, "ITER108: PMCR set MAC RX/TX + cleared FORCE_MODE port=%d\n", port);
++	}
+ }
+ 
+ static void
