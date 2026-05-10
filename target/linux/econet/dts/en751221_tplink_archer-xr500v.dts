@@ -244,3 +244,34 @@
 		nvmem-cell-names = "eeprom", "mac-address";
 	};
 };
+
+/* iter93: port@5 = WAN port (rgmii to physical WAN jack) */
+&switch0port5 {
+	status = "okay";
+	label = "wan";
+};
+
+
+/*
+ * iter98: PHY MDIO addresses match real OEM stock (recon 2026-05-10).
+ * Live ethphxcmd miir N 0 reading on stock OEM:
+ *   PHY 0 = BMCR 0x1800 (switch internal, power-down)
+ *   PHY 1..4 = BMCR 0x1040 (active user PHYs!)
+ *   PHY 5..6 = 0 (unused)
+ * Wiki econet-linux dijo 9-12 (probablemente para otro device EN751221).
+ * Base dtsi tiene 9-12 (default Caleb). XR500v real es 1-4.
+ */
+&switch0phy0 { reg = <1>; };
+&switch0phy1 { reg = <2>; };
+&switch0phy2 { reg = <3>; };
+&switch0phy3 { reg = <4>; };
+
+/*
+ * iter98b: switch0phy4 (port@4) en el dtsi base usa reg=4 para un 5to puerto
+ * que XR500v NO tiene (solo 4 LAN). Conflicta con nuestro switch0phy3=4.
+ * Borramos el nodo zombie. port@4 ya está status=disabled.
+ */
+
+/* port@4 also references switch0phy4 — borrar ambos para resolver phandle */
+/delete-node/ &switch0port4;
+/delete-node/ &switch0phy4;
