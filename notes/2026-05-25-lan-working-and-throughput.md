@@ -59,3 +59,19 @@ the OpenWrt driver leaves unset) — instead of more trial patches. Caleb's comm
 - OEM TRGMII cal: `oem_src/tcphy/mtkswitch_api_krl.c:5038` (`macMT7530doP6Cal`).
 - OEM QDMA init: `oem_src/ether/en7512/eth_lan.c` (`qdma_reg_init`).
 - Build VM, flash flow, recovery: `scripts/`.
+
+## ADDENDUM — ROOT CAUSE del TX ~5M: QDMA per-channel TX rate limiter
+Disasm RE (`phase2-disasm/qdma-lan.disasm.reloc.txt`) + OEM source confirman:
+- El QDMA tiene un **rate-limiter de TX por canal**. El OEM lo programa a 1Gbps por
+  canal en `eth_lan.c::downstermToQdmaTxRateLimitInit()` (llamado en `eth_mac_init`,
+  antes del qdma init); `perChannelRateLimitSwitch()` lo toggle por QoS/WAN.
+- **Caleb (econet_qdma.c) NUNCA lo programa** → default de HW throttlea (~5M).
+- Reg de cfg global: `QDMA_base+0x98` ([31]=enable, [15:0]=clock, tick=8000/clock).
+  Confirmado enabled en vivo: `tx_meter_cfg=0x80020fa0`.
+- Los valores per-canal están en registros separados que programa `qdma_set_tx_ratelimit`
+  (func ~400B: usa `qdmaGetLimitRateMax`, mul/div, hooks FWC/MT7530LanPortMap, canal<8).
+- Patch 260 (zero del reg global) NO alcanzó → faltan los registros per-canal.
+
+**FIX pendiente:** replicar `downstermToQdmaTxRateLimitInit` (setear cada canal a 1Gbps,
+o disable) en el driver, post DMA-enable. Requiere decodificar el encoding per-canal de
+`qdma_set_tx_ratelimit` o la librería QDMA del SDK. Root cause CONFIRMADO; falta el encoding.
