@@ -1,0 +1,15 @@
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -920,8 +920,10 @@
+ 	en75_wreg(0U, &qdma->regs->rx_int_delay);
+ 
+ 	struct qregs_tx_congest_cfg cngst_cfg = {0};
+-	set_qregs_tx_congest_cfg_tail_drop_en(&cngst_cfg, true);
+-	set_qregs_tx_congest_cfg_dei_drop_en(&cngst_cfg, true);
++	/* XR500v test: thresholds were never programmed, so tail-drop fires at
++	 * 0 buffers and craters TX throughput. Disable the drops to confirm. */
++	set_qregs_tx_congest_cfg_tail_drop_en(&cngst_cfg, false);
++	set_qregs_tx_congest_cfg_dei_drop_en(&cngst_cfg, false);
+ 	en75_wreg(cngst_cfg, &qdma->regs->tx_congest_cfg);
+ 
+ 	return 0;

@@ -1,0 +1,20 @@
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -926,6 +926,17 @@
+ 	set_qregs_tx_congest_cfg_dei_drop_en(&cngst_cfg, false);
+ 	en75_wreg(cngst_cfg, &qdma->regs->tx_congest_cfg);
+ 
++	/* XR500v: the QDMA egress rate limiter/meter is left at its power-on /
++	 * bootloader value and appears to throttle TX to ~5 Mbps. Log + disable. */
++	dev_info(qdma->dev,
++		 "qdma egress ratelimit before: meter=0x%08x limit=0x%08x param=0x%08x\n",
++		 en75_rreg(&qdma->regs->tx_meter_cfg),
++		 en75_rreg(&qdma->regs->tx_limit_cfg),
++		 en75_rreg(&qdma->regs->tx_limit_param));
++	en75_wreg(0U, &qdma->regs->tx_meter_cfg);
++	en75_wreg(0U, &qdma->regs->tx_limit_cfg);
++	en75_wreg(0U, &qdma->regs->tx_limit_param);
++
+ 	return 0;
+ }
+ 

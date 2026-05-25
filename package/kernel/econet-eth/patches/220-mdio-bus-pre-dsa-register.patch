@@ -1,0 +1,35 @@
+From: cris <cris@example.com>
+Date: 2026-05-24
+Subject: [PATCH] mt7530-mdio: register MDIO bus (PHYs) BEFORE dsa_register_switch
+
+For the EN751221 MCM switch (mt7530-mdio @ phy 0x1f), the internal PHYs live
+in the switch's <mdio> sub-node and are registered by mt7530_post_register()
+via devm_of_mdiobus_register(). That was called AFTER dsa_register_switch(),
+so when DSA connected each user port to its phy-handle the PHY device did not
+exist yet -> "failed to connect to PHY: -ENODEV" on every lanN.
+
+Register the MDIO bus first so the PHY devices exist before DSA port setup.
+Mirrors the same fix applied to the mt7530-mmio probe path.
+---
+ gsw/mt7530-mdio.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+--- a/gsw/mt7530-mdio.c
++++ b/gsw/mt7530-mdio.c
+@@ -212,11 +212,15 @@ mt7530_probe(struct mdio_device *mdiodev)
+ 	if (priv->id == ID_MT7531)
+ 		priv->create_sgmii = mt7531_create_sgmii;
+
++	ret = mt7530_post_register(priv);
++	if (ret)
++		return ret;
++
+ 	ret = dsa_register_switch(priv->ds);
+ 	if (ret)
+ 		return ret;
+
+-	return mt7530_post_register(priv);
++	return 0;
+ }
+
+ static void

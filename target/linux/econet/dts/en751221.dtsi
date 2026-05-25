@@ -54,6 +54,18 @@
 		reg = <0x1fa20000 0x388>;
 	};
 
+	pcie_phy1: pcie-phy@1fac0000 {
+		compatible = "econet,en751221-pcie-phy1";
+		reg = <0x1fac0000 0x1000>;
+		#phy-cells = <0>;
+	};
+
+	pcie_phy0: pcie-phy@1faf2000 {
+		compatible = "econet,en751221-pcie-phy0";
+		reg = <0x1faf2000 0x1000>;
+		#phy-cells = <0>;
+	};
+
 	intc: interrupt-controller@1fb40000 {
 		compatible = "econet,en751221-intc";
 		reg = <0x1fb40000 0x100>;
@@ -74,6 +86,8 @@
 
 	ethernet: ethernet@1fb50000 {
 		compatible = "econet,en751221-eth";
+		/* 0x8000 (not 0x10000): 0x1fb58000 is the on-die switch region, now
+		 * owned by mt7530-mmio. switch_regs already removed in econet_eth.c. */
 		reg = <0x1fb50000 0x8000>;
 
 		resets = <&scuclk EN751221_FE_RST>,
@@ -109,70 +123,44 @@
 			status = "disabled";
 			phy-mode = "rgmii-rxid";
 		};
+
 	};
 
-	switch0: switch@1fb58000 {
+	/* Nested dual-DSA-switch model (Caleb's confirmed EN751221 topology):
+	 * - On-die MT7530 (mt7530-mmio @ 0x1fb58000, ID_EN751221): only the
+	 *   cascade port5 (to MCM) and the CPU port6 (to gmac0) are used.
+	 * - It creates an MDIO master via devm_of_mdiobus_register; the MCM
+	 *   MT7530 (mt7530-mdio @ phy 0x1f, ID_EN751221_EXT, mediatek,mcm) is a
+	 *   child of that bus and carries the 4 user GE ports + their PHYs (9-12).
+	 * This avoids needing an MDIO master in econet_eth.c (which it lacks).
+	 */
+	switch_ondie: switch@1fb58000 {
 		compatible = "econet,en751221-switch";
 		reg = <0x1fb58000 0x8000>;
-
 		resets = <&scuclk EN751221_GSW_RST>;
-		reset-names = "gsw";
-
-		interrupt-controller;
-		#interrupt-cells = <1>;
-		interrupt-parent = <&intc>;
-		interrupts = <15>;
-
 		#address-cells = <1>;
 		#size-cells = <0>;
-
 		dsa,member = <0 0>;
 
 		ports {
-			switch0port0: port@0 {
-				reg = <0>;
-				phy-handle = <&switch0phy0>;
-				status = "disabled";
-			};
+			#address-cells = <1>;
+			#size-cells = <0>;
 
-			switch0port1: port@1 {
-				reg = <1>;
-				phy-handle = <&switch0phy1>;
-				status = "disabled";
-			};
-
-			switch0port2: port@2 {
-				reg = <2>;
-				phy-handle = <&switch0phy2>;
-				status = "disabled";
-			};
-
-			switch0port3: port@3 {
-				reg = <3>;
-				phy-handle = <&switch0phy3>;
-				status = "disabled";
-			};
-
-			switch0port4: port@4 {
-				reg = <4>;
-				phy-handle = <&switch0phy4>;
-				status = "disabled";
-			};
-
-			switch0port5: port@5 {
+			ondie_port5: port@5 {
 				reg = <5>;
-				phy-mode = "rgmii";
+				phy-mode = "trgmii";
+				link = <&mcm_port6>;
 				fixed-link {
 					speed = <1000>;
 					full-duplex;
 				};
 			};
 
-			switch0port6: port@6 {
+			port@6 {
 				reg = <6>;
 				label = "cpu";
 				ethernet = <&gmac0>;
-				phy-mode = "internal";
+				phy-mode = "trgmii";
 				fixed-link {
 					speed = <1000>;
 					full-duplex;
@@ -181,47 +169,103 @@
 		};
 
 		mdio {
-			switch0phy0: ethernet-phy@0 {
-				compatible = "ethernet-phy-ieee802.3-c22";
-				reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			switch0: switch@1f {
+				compatible = "econet,en751221-switch";
+				reg = <0x1f>;
+				mediatek,mcm;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				dsa,member = <0 1>;
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					switch0port0: port@0 {
+						reg = <0>;
+						phy-mode = "gmii";
+						phy-handle = <&mcmphy0>;
+						status = "disabled";
+					};
+
+					switch0port1: port@1 {
+						reg = <1>;
+						phy-mode = "gmii";
+						phy-handle = <&mcmphy1>;
+						status = "disabled";
+					};
+
+					switch0port2: port@2 {
+						reg = <2>;
+						phy-mode = "gmii";
+						phy-handle = <&mcmphy2>;
+						status = "disabled";
+					};
+
+					switch0port3: port@3 {
+						reg = <3>;
+						phy-mode = "gmii";
+						phy-handle = <&mcmphy3>;
+						status = "disabled";
+					};
+
+					switch0port4: port@4 {
+						reg = <4>;
+						phy-mode = "gmii";
+						phy-handle = <&mcmphy4>;
+						status = "disabled";
+					};
+
+					mcm_port6: port@6 {
+						reg = <6>;
+						phy-mode = "trgmii";
+						link = <&ondie_port5>;
+						fixed-link {
+							speed = <1000>;
+							full-duplex;
+						};
+					};
+				};
+
+				mdio {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					mcmphy0: ethernet-phy@0 {
+						compatible = "ethernet-phy-ieee802.3-c22";
+						reg = <0>;
+					};
+
+					mcmphy1: ethernet-phy@1 {
+						compatible = "ethernet-phy-ieee802.3-c22";
+						reg = <1>;
+					};
+
+					mcmphy2: ethernet-phy@2 {
+						compatible = "ethernet-phy-ieee802.3-c22";
+						reg = <2>;
+					};
+
+					mcmphy3: ethernet-phy@3 {
+						compatible = "ethernet-phy-ieee802.3-c22";
+						reg = <3>;
+					};
+					mcmphy4: ethernet-phy@4 {
+						compatible = "ethernet-phy-ieee802.3-c22";
+						reg = <4>;
+					};
+				};
 			};
-
-			switch0phy1: ethernet-phy@1 {
-				compatible = "ethernet-phy-ieee802.3-c22";
-				reg = <1>;
-			};
-
-			switch0phy2: ethernet-phy@2 {
-				compatible = "ethernet-phy-ieee802.3-c22";
-				reg = <2>;
-			};
-
-			switch0phy3: ethernet-phy@3 {
-				compatible = "ethernet-phy-ieee802.3-c22";
-				reg = <3>;
-			};
-
-			switch0phy4: ethernet-phy@4 {
-				compatible = "ethernet-phy-ieee802.3-c22";
-				reg = <4>;
-			};
-
-
 		};
 	};
 
-	pcie_phy1: pcie-phy@1fac0000 {
-		compatible = "econet,en751221-pcie-phy1";
-		reg = <0x1fac0000 0x1000>;
-		#phy-cells = <0>;
+	pciecfg: pciecfg@1fb80000 {
+		compatible = "mediatek,generic-pciecfg", "syscon";
+		reg = <0x1fb80000 0x1000>;
 	};
-
-	pcie_phy0: pcie-phy@1faf2000 {
-		compatible = "econet,en751221-pcie-phy0";
-		reg = <0x1faf2000 0x1000>;
-		#phy-cells = <0>;
-	};
-
 
 	pcie0: pcie@1fb81000 {
 		compatible = "econet,en7528-pcie";

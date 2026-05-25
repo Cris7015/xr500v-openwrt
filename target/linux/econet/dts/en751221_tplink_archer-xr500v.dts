@@ -184,41 +184,35 @@
 };
 
 /*
- * iter57: switch0 ahora es un platform device separado en 0x1fb58000
- * con compatible "econet,en751221-switch" (driver econet-gsw-mmio.ko del
- * branch dsa-switch-feb13-3035 de cjdelisle/econet_eth, commit c2f855c).
- * Reemplaza al upstream mt7530.c (deshabilitado en config-6.12).
- *
- * Habilitamos los 4 ports físicos (port@0..3 = lan1..4).
- * port@4 lo dejamos disabled (XR500v solo tiene 4 RJ45).
- * port@5 (rgmii) y port@6 (CPU) heredan defaults del dtsi base.
- *
- * Las PHYs están en mdio addresses 8, 9, 10, 11 (switch0phy0..3) según
- * documentación econet-linux.pkt.wiki.
+ * Plan B (correct model, Caleb's dual-switch MDIO/MCM):
+ * switch0 is the MCM MT7530 (mediatek,mt7530 + mediatek,mcm) hanging off the
+ * SoC ethernet's MDIO bus at address 0x1f. It has 4 user GE ports (port@0..3)
+ * and port@6 = CPU (trgmii to gmac0). The on-die switch is configured by
+ * the bootloader for the cascade and is NOT a DSA device.
+ * Internal PHYs of the MCM switch are auto-detected by the mt7530 driver.
  */
-
 &switch0port0 {
-	phy-mode = "internal";
-	status = "okay";
-	label = "lan1";
+	status = "disabled";
 };
 
 &switch0port1 {
-	phy-mode = "internal";
 	status = "okay";
-	label = "lan2";
+	label = "lan4";
 };
 
 &switch0port2 {
-	phy-mode = "internal";
 	status = "okay";
 	label = "lan3";
 };
 
 &switch0port3 {
-	phy-mode = "internal";
 	status = "okay";
-	label = "lan4";
+	label = "lan2";
+};
+
+&switch0port4 {
+	status = "okay";
+	label = "lan1";
 };
 
 /*
@@ -245,33 +239,6 @@
 	};
 };
 
-/* iter93: port@5 = WAN port (rgmii to physical WAN jack) */
-&switch0port5 {
-	status = "okay";
-	label = "wan";
-};
-
-
-/*
- * iter98: PHY MDIO addresses match real OEM stock (recon 2026-05-10).
- * Live ethphxcmd miir N 0 reading on stock OEM:
- *   PHY 0 = BMCR 0x1800 (switch internal, power-down)
- *   PHY 1..4 = BMCR 0x1040 (active user PHYs!)
- *   PHY 5..6 = 0 (unused)
- * Wiki econet-linux dijo 9-12 (probablemente para otro device EN751221).
- * Base dtsi tiene 9-12 (default Caleb). XR500v real es 1-4.
+/* Plan B dual-switch: no port@5/phy overrides — the MCM switch auto-detects
+ * its internal PHYs and the on-die cascade is bootloader-configured.
  */
-&switch0phy0 { reg = <1>; };
-&switch0phy1 { reg = <2>; };
-&switch0phy2 { reg = <3>; };
-&switch0phy3 { reg = <4>; };
-
-/*
- * iter98b: switch0phy4 (port@4) en el dtsi base usa reg=4 para un 5to puerto
- * que XR500v NO tiene (solo 4 LAN). Conflicta con nuestro switch0phy3=4.
- * Borramos el nodo zombie. port@4 ya está status=disabled.
- */
-
-/* port@4 also references switch0phy4 — borrar ambos para resolver phandle */
-/delete-node/ &switch0port4;
-/delete-node/ &switch0phy4;

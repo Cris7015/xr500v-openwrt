@@ -1,0 +1,118 @@
+--- a/gsw/mt7530.c
++++ b/gsw/mt7530.c
+@@ -2465,10 +2465,115 @@
+ 	return 0;
+ }
+ 
++/* --- XR500v: TRGMII cascade calibration (ported from OEM macMT7530doP6Cal) --- */
++static struct mt7530_priv *g_en751221_ondie;
++static struct mt7530_priv *g_en751221_mcm;
++static int g_en751221_cal_sysfs;
++
++static u32 en751221_trgmii_errchk(struct mt7530_priv *rx, u32 reg)
++{
++	u32 v = mt7530_read(rx, reg);
++
++	mt7530_write(rx, reg, v | 0x40000000);
++	mt7530_write(rx, reg, v & ~0x40000000);
++	return (mt7530_read(rx, reg) & 0x00000F00) >> 8;
++}
++
++static void en751221_trgmii_cal(struct mt7530_priv *ondie, struct mt7530_priv *mcm)
++{
++	static const u32 rd_reg[5] = { 0x7a10, 0x7a18, 0x7a20, 0x7a28, 0x7a30 };
++	static const u32 td_reg[5] = { 0x7a50, 0x7a58, 0x7a60, 0x7a68, 0x7a70 };
++	int dir, ch, dac;
++
++	dev_info(ondie->dev, "TRGMII cascade calibration start\n");
++	for (dir = 0; dir < 2; dir++) {
++		/* dir0 SOC_TO_EXT: tx=on-die rx=MCM; dir1 EXT_TO_SOC: tx=MCM rx=on-die */
++		struct mt7530_priv *tx = dir ? mcm : ondie;
++		struct mt7530_priv *rx = dir ? ondie : mcm;
++		u32 v;
++
++		v = mt7530_read(tx, 0x7a40);
++		mt7530_write(tx, 0x7a40, v | 0x80000000);
++
++		for (ch = 0; ch < 5; ch++) {
++			int win0 = 0, win1 = 0, state = 0; /* 0 HEAD 1 TAIL 2 FINISH */
++			u32 tap;
++
++			for (dac = 1; dac <= 127; dac++) {
++				u32 val, err;
++
++				v = mt7530_read(tx, td_reg[ch]);
++				mt7530_write(tx, td_reg[ch], (v & 0xFFFFFF00) | 0x55);
++
++				v = mt7530_read(rx, rd_reg[ch]);
++				mt7530_write(rx, rd_reg[ch], (v & 0xFFFFFF80) | dac);
++
++				err = en751221_trgmii_errchk(rx, rd_reg[ch]);
++				val = (mt7530_read(rx, rd_reg[ch]) & 0x00FF0000) >> 16;
++
++				if (state == 0) {
++					if (val == 0x55 && err == 0) {
++						win0 = dac;
++						state = 1;
++					}
++				} else if (state == 1) {
++					if (val == 0x55 && err == 0)
++						win1 = dac;
++					else
++						state = 2;
++				}
++			}
++
++			v = mt7530_read(rx, rd_reg[ch]) & 0xFFFFFF80;
++			if (state == 2 && win0 != win1) {
++				tap = (win0 + win1) >> 1;
++				dev_info(rx->dev, "trgmii cal dir%d ch%d window 0x%x~0x%x tap=0x%x\n",
++					 dir, ch, win0, win1, tap);
++				mt7530_write(rx, rd_reg[ch], v | tap);
++			} else {
++				/* no clean window: keep existing tap (safe, no zeroing) */
++				dev_info(rx->dev, "trgmii cal dir%d ch%d FAIL (win 0x%x~0x%x), keep tap\n",
++					 dir, ch, win0, win1);
++			}
++		}
++
++		v = mt7530_read(tx, 0x7a40);
++		mt7530_write(tx, 0x7a40, v & ~0x80000000);
++	}
++	dev_info(ondie->dev, "TRGMII cascade calibration done\n");
++}
++
++static ssize_t en751221_trgmii_cal_store(struct device *d,
++					 struct device_attribute *a,
++					 const char *buf, size_t n)
++{
++	if (g_en751221_ondie && g_en751221_mcm)
++		en751221_trgmii_cal(g_en751221_ondie, g_en751221_mcm);
++	else
++		pr_warn("en751221 trgmii cal: switches not ready\n");
++	return n;
++}
++static DEVICE_ATTR_WO(en751221_trgmii_cal);
++/* --- end XR500v TRGMII cascade calibration --- */
++
+ static int
+ mt7530_setup(struct dsa_switch *ds)
+ {
+ 	struct mt7530_priv *priv = ds->priv;
++
++	/* XR500v: stash privs + expose the TRGMII cascade calibration trigger.
++	 * EN751221 switches use mt7530_setup as sw_setup; on-die probes before
++	 * the MCM, so the second one to arrive creates the sysfs attr. */
++	if (priv->id == ID_EN751221)
++		g_en751221_ondie = priv;
++	else if (priv->id == ID_EN751221_EXT)
++		g_en751221_mcm = priv;
++	if (g_en751221_ondie && g_en751221_mcm && !g_en751221_cal_sysfs) {
++		if (device_create_file(priv->dev, &dev_attr_en751221_trgmii_cal) == 0)
++			g_en751221_cal_sysfs = 1;
++		dev_info(priv->dev, "en751221: trgmii_cal sysfs %sready\n",
++			 g_en751221_cal_sysfs ? "" : "NOT ");
++	}
+ 	struct device_node *dn = NULL;
+ 	struct device_node *phy_node;
+ 	struct device_node *mac_np;

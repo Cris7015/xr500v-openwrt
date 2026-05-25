@@ -25,12 +25,16 @@ define KernelPackage/econet-eth
   SUBMENU:=Network Devices
   TITLE:=EcoNet EN751221 Ethernet Driver (eth+DSA bundle)
   DEPENDS:=@TARGET_econet +kmod-libphy +kmod-of-mdio +kmod-mdio-devres \
-           +kmod-dsa +kmod-dsa-mt7530
+           +kmod-dsa
   FILES:=$(PKG_BUILD_DIR)/econet-eth.ko \
          $(PKG_BUILD_DIR)/econet-gsw.ko \
          $(PKG_BUILD_DIR)/econet-gsw-mmio.ko \
-         $(PKG_BUILD_DIR)/mtk-tag.ko
-  AUTOLOAD:=$(call AutoLoad,90,econet-eth econet-gsw econet-gsw-mmio mtk-tag)
+         $(PKG_BUILD_DIR)/econet-gsw-mdio.ko \
+         $(PKG_BUILD_DIR)/mtk-tag.ko \
+         $(LINUX_DIR)/drivers/net/pcs/pcs-mtk-lynxi.ko \
+	 $(LINUX_DIR)/drivers/net/phy/mediatek/mtk-phy-lib.ko \
+	 $(LINUX_DIR)/drivers/net/phy/mediatek/mtk-ge.ko
+  AUTOLOAD:=$(call AutoLoad,89,mtk-phy-lib mtk-ge,1) $(call AutoLoad,90,econet-eth)
 endef
 
 define KernelPackage/econet-eth/description
@@ -44,6 +48,14 @@ endef
 
 define Build/Compile
 	$(KERNEL_MAKE) M=$(PKG_BUILD_DIR) modules
+endef
+
+
+define KernelPackage/econet-eth/install
+	$(INSTALL_DIR) $(1)/etc/init.d
+	$(INSTALL_BIN) ./files/etc/init.d/econet-switch $(1)/etc/init.d/
+	$(INSTALL_DIR) $(1)/etc/rc.d
+	ln -sf ../init.d/econet-switch $(1)/etc/rc.d/S99econet-switch
 endef
 
 $(eval $(call KernelPackage,econet-eth))
