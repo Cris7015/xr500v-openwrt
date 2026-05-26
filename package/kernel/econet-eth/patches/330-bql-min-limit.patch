@@ -1,0 +1,22 @@
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -479,6 +479,19 @@
+ 	if (err)
+ 		goto free_metadata_dst;
+ 
++#ifdef CONFIG_BQL
++	/* XR500v: el QDMA senaliza TX-done por paquete (done-queue
++	 * int_threshold=1), asi que BQL/dql auto-tunea su limit a ~1 paquete
++	 * (~86 bytes) y el XOFF/XON por paquete serializa el TX a ~5 Mbps.
++	 * Un piso de 256K mantiene la tuberia llena (~160 Mbps, rodilla del
++	 * barrido) sin bufferbloat excesivo. */
++	{
++		unsigned int __i;
++		for (__i = 0; __i < ndev->num_tx_queues; __i++)
++			netdev_get_tx_queue(ndev, __i)->dql.min_limit = 262144;
++	}
++#endif
++
+ 	dev_info(eth->dev, "port %d%s registered with %pM\n",
+ 		fport,
+ 		(fport == ETX_FPORT_GDM1) ? " (LAN)" :
