@@ -1,0 +1,17 @@
+#!/bin/sh /etc/rc.common
+# Late-load EN751221 switch driver to avoid autoload-time crash
+# (setup_port hits bus=NULL race when loaded right after econet-eth).
+# iter85: added mtk-tag.ko (DSA tag protocol) — without it dsa_register_switch
+# returns -ENOPROTOOPT and switch never comes up → RX=0.
+START=99
+USE_PROCD=1
+
+start_service() {
+	sleep 2
+	modprobe pcs-mtk-lynxi 2>/dev/null
+	modprobe dsa_core 2>/dev/null
+	insmod /lib/modules/6.12.80/mtk-tag.ko 2>/dev/null
+	insmod /lib/modules/6.12.80/econet-gsw.ko 2>/dev/null
+	insmod /lib/modules/6.12.80/econet-gsw-mmio.ko 2>/dev/null
+	insmod /lib/modules/6.12.80/econet-gsw-mdio.ko 2>/dev/null
+}

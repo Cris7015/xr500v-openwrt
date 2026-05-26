@@ -41,7 +41,7 @@ define Device/tplink_archer-vr1200v-v2
   TPLINK_HWREVADD := 0x0
   TPLINK_HVERSION := 3
   DEVICE_DTS := en751221_tplink_archer-vr1200v-v2
-  DEVICE_PACKAGES := kmod-mt7603 kmod-mt7615e kmod-mt7663-firmware-ap
+  DEVICE_PACKAGES := kmod-mt76x2 wpad-basic-mbedtls luci
   IMAGES := sysupgrade.bin
   IMAGE/sysupgrade.bin := append-kernel | lzma | pad-to 4193792 | append-rootfs | \
     tplink-v2-header -R 0x400000
@@ -66,6 +66,7 @@ define Device/tplink_archer-xr500v
   KERNEL_SIZE := 3072k
   IMAGE_SIZE := 16384k
   BLOCKSIZE := 128k
+  DEVICE_PACKAGES := kmod-mt76x2 wpad-basic-mbedtls luci
   IMAGES := sysupgrade.bin
   # raw squashfs in slot B; mtd-split creates rootfs_data; UBI is provisioned
   # from running OpenWrt (see chosen.bootargs ubi.mtd=rootfs_data).
