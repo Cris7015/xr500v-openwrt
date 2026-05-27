@@ -2,6 +2,7 @@
 /dts-v1/;
 
 #include "en751221.dtsi"
+#include <dt-bindings/gpio/gpio.h>
 
 / {
 	model = "TP-Link Archer XR500v v1";
@@ -21,6 +22,20 @@
 		 * mismark OOB on this NAND via en75_bmt, breaking subsequent
 		 * userspace ubiformat. Userspace ubiattach is consistent.
 		 */
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led-2  { label = "green:gpon";     gpios = <&gpio 2  GPIO_ACTIVE_LOW>; linux,default-trigger = "default-on"; };
+		led-7  { label = "green:wps";      gpios = <&gpio 7  GPIO_ACTIVE_LOW>; };
+		led-11 { label = "green:usb";      gpios = <&gpio 11 GPIO_ACTIVE_LOW>; };
+		led-12 { label = "green:wlan2g";   gpios = <&gpio 12 GPIO_ACTIVE_LOW>; };
+		led-13 { label = "green:wlan5g";   gpios = <&gpio 13 GPIO_ACTIVE_LOW>; };
+		led-24 { label = "red:alarm";      gpios = <&gpio 24 GPIO_ACTIVE_LOW>; };
+		led-25 { label = "green:phone1";   gpios = <&gpio 25 GPIO_ACTIVE_LOW>; };
+		led-26 { label = "green:phone2";   gpios = <&gpio 26 GPIO_ACTIVE_LOW>; };
+		led-28 { label = "green:internet"; gpios = <&gpio 28 GPIO_ACTIVE_LOW>; };
 	};
 };
 

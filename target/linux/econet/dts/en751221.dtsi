@@ -384,6 +384,14 @@
 		clock-frequency = <1843200>;
 	};
 
+	gpio: gpio@1fbf0200 {
+		compatible = "tplink,tc3162-gpio";
+		reg = <0x1fbf0200 0x80>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <64>;
+	};
+
 	timer_hpt: timer@1fbf0400 {
 		compatible = "econet,en751221-timer";
 		reg = <0x1fbf0400 0x100>;
