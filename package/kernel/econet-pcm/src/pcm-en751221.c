@@ -14,11 +14,13 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/io.h>
+#include <linux/bitfield.h>
 #include <linux/dma-mapping.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
+#include <linux/mutex.h>
 
 #include "pcm-en751221.h"
 
@@ -26,8 +28,10 @@ struct pcm_dev {
 	struct device *dev;
 	void __iomem *base;	/* PCM register block (DT reg) */
 	void __iomem *scu;	/* SoC SCU @ 0x1fb00000 (chip-id + reset) */
+	void __iomem *chip_scu;	/* Chip SCU @ 0x1fa20000 (PCM pinmux/clock) */
 	int irq;
 	struct dentry *dbg;
+	struct mutex selftest_lock;
 
 	/* DMA descriptor rings (phase 2): PCM_DESC_NUM x struct pcm_desc each */
 	struct pcm_desc *tx_ring;
@@ -89,6 +93,211 @@ static void pcm_load_defaults(struct pcm_dev *p)
 }
 
 /*
+ * Minimum PCM clock/pinmux sequence from pcm1.ko init_module():
+ *   0x434..0x440: CHIP_SCU+0x104 |= 0x2000
+ *   0x444..0x44c: CHIP_SCU+0x0d8 |= 0x1
+ *   0x450..0x458: CHIP_SCU+0x148 |= 0x0c
+ *   0x474..0x480: non-EN7526C additionally writes 0x8 to +0x0d4 and
+ *                  0x00a00301 to +0x0d8.
+ *
+ * BACK_TO_BACK is internal to INTFACE_CTRL bit 25, so external SLIC pads are
+ * not needed for data return. The OEM still enables the PCM/ZSI mux and clock
+ * before pcmConfig(); keep that clock sequence for real hardware safety.
+ */
+static void pcm_enable_clock_iomux(struct pcm_dev *p)
+{
+	u32 chip = readl(p->scu + SCU_CHIP_ID) & SCU_CHIP_ID_MASK;
+	u32 v;
+
+	v = readl(p->chip_scu + CHIP_SCU_IOMUX_CONTROL1);
+	writel(v | CHIP_SCU_GPIO_ZSI_ISI, p->chip_scu + CHIP_SCU_IOMUX_CONTROL1);
+
+	v = readl(p->chip_scu + CHIP_SCU_PCM_CLK_OUTPUT);
+	writel(v | CHIP_SCU_PCM_CLK_OUT_EN, p->chip_scu + CHIP_SCU_PCM_CLK_OUTPUT);
+
+	v = readl(p->chip_scu + CHIP_SCU_PCM_CLK_SRC_SEL);
+	writel(v | FIELD_PREP(CHIP_SCU_PCM_ZSI_CLK_SRC,
+			      CHIP_SCU_PCM_ZSI_CLK_SRC_VAL),
+	       p->chip_scu + CHIP_SCU_PCM_CLK_SRC_SEL);
+
+	if (chip != SCU_CHIP_EN7526C) {
+		writel(0x00000008, p->chip_scu + CHIP_SCU_PCM_CLK_DIV);
+		writel(0x00a00301, p->chip_scu + CHIP_SCU_PCM_CLK_OUTPUT);
+	}
+}
+
+static u32 pcm_selftest_iface_ctrl(struct pcm_dev *p)
+{
+	(void)p;
+
+	return 0x87071306;
+}
+
+static void pcm_selftest_fill_desc(struct pcm_desc *d, dma_addr_t dma,
+				   u32 ch_valid, u32 samples)
+{
+	u32 offset = 0;
+	int ch;
+
+	memset(d, 0, sizeof(*d));
+	for (ch = 0; ch < PCM_SELFTEST_CHANS; ch++) {
+		d->buf_addr[ch] = (u32)((dma + offset) & PCM_DMA_ADDR_MASK);
+		offset += samples * (ch_valid & BIT(ch) ? 2 : 1);
+	}
+
+	dma_wmb();
+	d->status = PCM_DESC_OWN |
+		    FIELD_PREP(PCM_DESC_CH_VALID, ch_valid) |
+		    FIELD_PREP(PCM_DESC_SAMPLE_SIZE, samples);
+}
+
+/*
+ * Minimal polled BACK_TO_BACK self-test.
+ *
+ * Descriptor ownership follows the OEM flow:
+ *   SW sets status bit31=1 before enabling DMA (rxDescSet() 0x12e4,
+ *   pcmSend() 0x7c0). HW clears bit31 when the descriptor is complete; ISR
+ *   checks cleared ownership with bgez/bltz in pcm_lb.ko .text.pcmIsr 0x98
+ *   and 0x1c0.
+ */
+static int pcm_loopback_selftest(struct pcm_dev *p)
+{
+	const size_t buf_sz = PCM_SELFTEST_BUF_BYTES;
+	static const u32 slot_cfg[4] = {
+		0x10101000, 0x10301020, 0x00480040, 0x00580050,
+	};
+	dma_addr_t tx_dma, rx_dma;
+	void *tx_buf, *rx_buf;
+	u32 old_imr, old_dma, old_iface, old_ring_size, dma_ctrl, iface;
+	u32 old_tx_slots[4], old_rx_slots[4];
+	u32 *tx_words, *rx_words;
+	int i, ret = 0;
+
+	mutex_lock(&p->selftest_lock);
+
+	tx_buf = dma_alloc_coherent(p->dev, buf_sz, &tx_dma, GFP_KERNEL);
+	if (!tx_buf) {
+		ret = -ENOMEM;
+		goto out_unlock;
+	}
+
+	rx_buf = dma_alloc_coherent(p->dev, buf_sz, &rx_dma, GFP_KERNEL);
+	if (!rx_buf) {
+		ret = -ENOMEM;
+		goto out_free_tx;
+	}
+
+	if ((tx_dma | rx_dma) & ~PCM_DMA_ADDR_MASK) {
+		ret = -EOVERFLOW;
+		goto out_free_rx;
+	}
+
+	old_imr = pcm_rd(p, PCM_IMR);
+	old_dma = pcm_rd(p, PCM_TX_RX_DMA_CTRL);
+	old_iface = pcm_rd(p, PCM_INTFACE_CTRL);
+	old_ring_size = pcm_rd(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET);
+	for (i = 0; i < 4; i++) {
+		old_tx_slots[i] = pcm_rd(p, PCM_TX_TIME_SLOT_CFG0 + i);
+		old_rx_slots[i] = pcm_rd(p, PCM_RX_TIME_SLOT_CFG0 + i);
+	}
+
+	pcm_wr(p, PCM_IMR, 0);
+	dma_ctrl = old_dma & ~PCM_DMA_RX_EN;
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL, dma_ctrl);
+	dma_ctrl &= ~PCM_DMA_TX_EN;
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL, dma_ctrl);
+	pcm_wr(p, PCM_ISR, pcm_rd(p, PCM_ISR));
+
+	memset(p->tx_ring, 0, PCM_DESC_NUM * sizeof(*p->tx_ring));
+	memset(p->rx_ring, 0, PCM_DESC_NUM * sizeof(*p->rx_ring));
+	memset(rx_buf, 0, buf_sz);
+
+	tx_words = tx_buf;
+	for (i = 0; i < buf_sz / sizeof(u32); i++)
+		tx_words[i] = PCM_LOOPBACK_HEADER_PATTERN;
+
+	pcm_enable_clock_iomux(p);
+	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)(p->tx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x0000009f);
+	for (i = 0; i < 4; i++) {
+		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + i, slot_cfg[i]);
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + i, slot_cfg[i]);
+	}
+
+	iface = pcm_selftest_iface_ctrl(p);
+	pcm_wr(p, PCM_INTFACE_CTRL, iface);
+	pcm_wr(p, PCM_INTFACE_CTRL, iface & ~BIT(26));
+	usleep_range(5000, 6000);
+	pcm_wr(p, PCM_INTFACE_CTRL, iface);
+	pcm_wr(p, PCM_IMR, 0x00000028);
+
+	dma_ctrl = old_dma & ~(PCM_DMA_CH_VALID_MASK | PCM_DMA_TX_EN |
+			       PCM_DMA_RX_EN);
+	dma_ctrl |= FIELD_PREP(PCM_DMA_CH_VALID_MASK, PCM_SELFTEST_CH_VALID);
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL, dma_ctrl);
+
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL, dma_ctrl | PCM_DMA_TX_EN);
+	pcm_selftest_fill_desc(&p->rx_ring[0], rx_dma, PCM_SELFTEST_CH_VALID,
+			       PCM_SELFTEST_SAMPLES);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       dma_ctrl | PCM_DMA_TX_EN | PCM_DMA_RX_EN);
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+	pcm_selftest_fill_desc(&p->tx_ring[0], tx_dma, PCM_SELFTEST_CH_VALID,
+			       PCM_SELFTEST_SAMPLES);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+
+	for (i = 0; i < 500; i++) {
+		dma_rmb();
+		if (!(READ_ONCE(p->rx_ring[0].status) & PCM_DESC_OWN))
+			break;
+		usleep_range(1000, 2000);
+	}
+	if (i == 500) {
+		ret = -ETIMEDOUT;
+		goto out_restore;
+	}
+
+	dma_rmb();
+	rx_words = rx_buf;
+	for (i = 0; i < buf_sz / sizeof(u32); i++) {
+		if (rx_words[i] != PCM_LOOPBACK_HEADER_PATTERN) {
+			ret = -EIO;
+			break;
+		}
+	}
+
+out_restore:
+	dma_rmb();
+	dev_info(p->dev,
+		 "loopback diag: ret=%d isr=0x%08x dma_ctrl=0x%08x txdesc=0x%08x rxdesc=0x%08x rx[0]=0x%08x\n",
+		 ret, pcm_rd(p, PCM_ISR), pcm_rd(p, PCM_TX_RX_DMA_CTRL),
+		 p->tx_ring[0].status, p->rx_ring[0].status, ((u32 *)rx_buf)[0]);
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL, old_dma & ~(PCM_DMA_TX_EN | PCM_DMA_RX_EN));
+	pcm_wr(p, PCM_INTFACE_CTRL, old_iface);
+	for (i = 0; i < 4; i++) {
+		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + i, old_tx_slots[i]);
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + i, old_rx_slots[i]);
+	}
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, old_ring_size);
+	pcm_wr(p, PCM_IMR, old_imr);
+	pcm_wr(p, PCM_ISR, pcm_rd(p, PCM_ISR));
+	memset(p->tx_ring, 0, PCM_DESC_NUM * sizeof(*p->tx_ring));
+	memset(p->rx_ring, 0, PCM_DESC_NUM * sizeof(*p->rx_ring));
+
+out_free_rx:
+	dma_free_coherent(p->dev, buf_sz, rx_buf, rx_dma);
+out_free_tx:
+	dma_free_coherent(p->dev, buf_sz, tx_buf, tx_dma);
+out_unlock:
+	mutex_unlock(&p->selftest_lock);
+	return ret;
+}
+
+/*
  * Allocate the TX/RX DMA descriptor rings and program their physical base
  * addresses. From descInit() in pcm1.ko: each ring is PCM_DESC_NUM entries of
  * sizeof(struct pcm_desc) (36 B -> 540 B), zeroed, base written (as a physical
@@ -142,6 +351,20 @@ static int pcm_regs_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(pcm_regs);
 
+static int pcm_loopback_selftest_show(struct seq_file *s, void *unused)
+{
+	struct pcm_dev *p = s->private;
+	int ret = pcm_loopback_selftest(p);
+
+	if (ret)
+		seq_printf(s, "BACK_TO_BACK loopback: failed (%d)\n", ret);
+	else
+		seq_puts(s, "BACK_TO_BACK loopback: ok\n");
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(pcm_loopback_selftest);
+
 static int pcm_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -161,6 +384,12 @@ static int pcm_probe(struct platform_device *pdev)
 	p->scu = devm_ioremap(dev, SCU_PHYS_BASE, 0x970);
 	if (!p->scu)
 		return -ENOMEM;
+
+	p->chip_scu = devm_ioremap(dev, CHIP_SCU_PHYS_BASE, 0x388);
+	if (!p->chip_scu)
+		return -ENOMEM;
+
+	mutex_init(&p->selftest_lock);
 
 	chip = readl(p->scu + SCU_CHIP_ID) & SCU_CHIP_ID_MASK;
 	if (chip != SCU_CHIP_EN751221 && chip != SCU_CHIP_EN7526C)
@@ -187,6 +416,8 @@ static int pcm_probe(struct platform_device *pdev)
 
 	p->dbg = debugfs_create_dir("pcm-en751221", NULL);
 	debugfs_create_file("regs", 0444, p->dbg, p, &pcm_regs_fops);
+	debugfs_create_file("loopback_selftest", 0444, p->dbg, p,
+			    &pcm_loopback_selftest_fops);
 
 	platform_set_drvdata(pdev, p);
 	dev_info(dev, "PCM/TDM controller ready (phase 1: reset + defaults)\n");

@@ -46,6 +46,8 @@ enum pcm_reg {
 /* DMA control bits (PCM_TX_RX_DMA_CTRL @ 0x40), from disassembly of dmaEnable() */
 #define PCM_DMA_TX_EN		BIT(0)
 #define PCM_DMA_RX_EN		BIT(1)
+#define PCM_DMA_CH_VALID_MASK	GENMASK(31, 24)
+#define PCM_DMA_CH_VALID_SHIFT	24
 
 /* Interrupt bits (PCM_ISR / PCM_IMR) */
 #define PCM_INT_TX_RX_FRAME_BOUNDARY	BIT(0)
@@ -76,12 +78,72 @@ enum pcm_reg {
  */
 #define CHIP_SCU_PHYS_BASE	0x1fa20000
 #define CHIP_SCU_IOMUX_CONTROL1	0x104
+#define CHIP_SCU_PCM_CLK_DIV	0x0d4
 #define CHIP_SCU_PCM_CLK_OUTPUT	0x0d8
 #define CHIP_SCU_PCM_CLK_SRC_SEL 0x148
+
+#define CHIP_SCU_PCM_PIN_MODE	BIT(12)
+#define CHIP_SCU_GPIO_ZSI_ISI	BIT(13)
+#define CHIP_SCU_PCM_CLK_OUT_EN	BIT(0)
+#define CHIP_SCU_PCM_ZSI_CLK_SRC GENMASK(3, 2)
+#define CHIP_SCU_PCM_ZSI_CLK_SRC_VAL 0x3
 
 #define MAX_BUF_NUM		8
 #define MAX_CH_NUM		8
 #define PCM_DESC_NUM		15	/* MAX_TX/RX_DESC_NUM (ring depth) */
+#define PCM_DMA_ADDR_MASK	0x1fffffffULL
+
+/*
+ * PCM_INTFACE_CTRL @ 0x00, reconstructed from pcmConfigSetup().
+ *
+ * Claimed fields and backing instructions:
+ *   bit 31    CONFIG_VALID/latch: set to 1 at pcm1.ko 0x2bfc
+ *   bit 25    LOOPBACK_EN: loopbackMode < 2 copied at pcm1.ko 0x2c98/0x2c9c.
+ *             BACK_TO_BACK is loopbackMode=1, therefore bit 25 = 1.
+ *   bits 22:18 FRAME_COUNT: configNode.frameCount, pcm1.ko 0x2c18
+ *   bit 17    BYTE_ORDER: configNode.byteOrder, pcm1.ko 0x2c4c
+ *   bit 16    BIT_ORDER: configNode.bitOrder, pcm1.ko 0x2ca4
+ *   bit 12    BIT_DELAY: forced to 1, pcm1.ko 0x2c00
+ *   bit 11    DATA_EDGE: forced to 0, pcm1.ko 0x2c08
+ *   bit 10    FS_EDGE: configNode.fsEdge, pcm1.ko 0x2cc4
+ *   bits 9:8  FS_LEN: configNode.fsLen 0/2/3, pcm1.ko 0x2d50/0x2e28
+ *   bit 4     SAMPLE_CLOCK: configNode.sampleClock, pcm1.ko 0x2ce4
+ *   bits 3:1  BIT_CLOCK: configNode.bitClock, pcm1.ko 0x2cf0
+ *   bit 0     PCM_MODE: configNode.pcmMode, pcm1.ko 0x2d24
+ *
+ * chNum is not in INTFACE_CTRL. pcmConfigSetup() writes ((1 << chNum) - 1)
+ * into TX_RX_DMA_CTRL[31:24] at pcm1.ko 0x2d74..0x2da0.
+ *
+ * UNCONFIRMED: OEM pcm_ext_conf.h names bit 31 lbGarbageEnable and bit 26
+ * cfgValid due C bitfield ordering, but the blob itself toggles bit 31 as the
+ * configuration latch. Hardware naming should be checked against a datasheet.
+ */
+#define PCM_IFACE_CONFIG_VALID	BIT(31)
+#define PCM_IFACE_LOOPBACK_EN	BIT(25)
+#define PCM_IFACE_FRAME_COUNT	GENMASK(22, 18)
+#define PCM_IFACE_BYTE_ORDER	BIT(17)
+#define PCM_IFACE_BIT_ORDER	BIT(16)
+#define PCM_IFACE_BIT_DELAY	BIT(12)
+#define PCM_IFACE_DATA_EDGE	BIT(11)
+#define PCM_IFACE_FS_EDGE	BIT(10)
+#define PCM_IFACE_FS_LEN	GENMASK(9, 8)
+#define PCM_IFACE_SAMPLE_CLOCK	BIT(4)
+#define PCM_IFACE_BIT_CLOCK	GENMASK(3, 1)
+#define PCM_IFACE_PCM_MODE	BIT(0)
+
+#define PCM_LOOPBACK_NONE	0
+#define PCM_LOOPBACK_BACK_TO_BACK 1
+#define PCM_LOOPBACK_ONE_BY_ONE	2
+#define PCM_LOOPBACK_HEADER_PATTERN 0x12345678
+
+#define PCM_SELFTEST_CHANS	4
+#define PCM_SELFTEST_CH_VALID	GENMASK(PCM_SELFTEST_CHANS - 1, 0)
+#define PCM_SELFTEST_SAMPLES	80
+#define PCM_SELFTEST_BYTES_PER_SAMPLE 2
+#define PCM_SELFTEST_CH_BYTES \
+	(PCM_SELFTEST_SAMPLES * PCM_SELFTEST_BYTES_PER_SAMPLE)
+#define PCM_SELFTEST_BUF_BYTES \
+	(PCM_SELFTEST_CHANS * PCM_SELFTEST_CH_BYTES)
 
 /* TX descriptor status word (PCM_TX/RX_DESC_RING_BASE entries). */
 union pcm_desc_status {
@@ -100,6 +162,10 @@ struct pcm_desc {
 	u32 status;
 	u32 buf_addr[MAX_BUF_NUM];
 };
+
+#define PCM_DESC_OWN		BIT(31)
+#define PCM_DESC_CH_VALID	GENMASK(23, 16)
+#define PCM_DESC_SAMPLE_SIZE	GENMASK(9, 0)
 
 /* Time-slot config register layout (PCM_TX/RX_TIME_SLOT_CFGn). */
 union pcm_slot_cfg {
