@@ -135,6 +135,10 @@ static int zsi_write_byte(u8 v)
 	if (ret)
 		return ret;
 	writel(ZSI_CTL_TX_ACK, sd.zsi + ZSI_CTL);	/* W1C the ack */
+	/* the wrapper ack only means the wrapper sent; the SLIC needs time to
+	 * clock the byte over the PCM bus (8 kHz frames). Without this gap the
+	 * SLIC replies garbage (0xf1). 5 ms verified live; ~125 us/frame so safe. */
+	usleep_range(5000, 6000);
 	return 0;
 }
 
@@ -149,6 +153,7 @@ static int zsi_read_byte(u8 *out)
 		return ret;
 	*out = readl(sd.zsi + ZSI_RX) & 0xff;
 	writel(ZSI_CTL_RX_READY, sd.zsi + ZSI_CTL);	/* W1C the ready */
+	usleep_range(5000, 6000);			/* inter-byte gap (see zsi_write_byte) */
 	return 0;
 }
 
