@@ -92,6 +92,9 @@ struct slic_dev {
 
 static struct slic_dev sd;
 
+/* phase 3a instrumentation: which phase we're in, for timeout reporting. */
+static const char *slic_where = "idle";
+
 /* poll a *_busy style register: wait until it reads 0. */
 static int slic_wait_clear(u32 off)
 {
@@ -102,6 +105,8 @@ static int slic_wait_clear(u32 off)
 			return 0;
 		udelay(1);
 	}
+	pr_err(DRV_NAME ": TIMEOUT wait_clear @%s reg[0x%03x]=0x%08x\n",
+	       slic_where, off, readl(sd.spi + off));
 	return -ETIMEDOUT;
 }
 
@@ -115,6 +120,8 @@ static int slic_wait_done(void)
 			return 0;
 		udelay(1);
 	}
+	pr_err(DRV_NAME ": TIMEOUT wait_done @%s reg[0x024]=0x%08x\n",
+	       slic_where, readl(sd.spi + SLIC_DONE));
 	return -ETIMEDOUT;
 }
 
@@ -135,6 +142,7 @@ static int slic_xfer_begin(bool read)
 {
 	int ret;
 
+	slic_where = read ? "begin/rd" : "begin/wr";
 	writel(0, sd.spi + SLIC_GLOBAL);
 	ret = slic_wait_clear(SLIC_INIT_BUSY);
 	if (ret)
@@ -164,6 +172,7 @@ static int slic_tx_byte(u8 v)
 {
 	int ret;
 
+	slic_where = "tx_byte";
 	ret = slic_wait_clear(SLIC_TX_BUSY);
 	if (ret)
 		return ret;
@@ -180,6 +189,7 @@ static int slic_data_write(u8 v)
 {
 	int ret;
 
+	slic_where = "data_wr";
 	ret = slic_ctl(CTL_PREP);
 	if (ret)
 		return ret;
@@ -197,6 +207,7 @@ static int slic_data_read(u8 *out)
 {
 	int ret;
 
+	slic_where = "data_rd";
 	ret = slic_ctl(CTL_PREP);
 	if (ret)
 		return ret;
@@ -355,8 +366,21 @@ static int slic_detect_show(struct seq_file *s, void *unused)
 	else
 		seq_puts(s, "Le9641 detect: FAILED\n");
 
-	pr_info(DRV_NAME ": detect ret=%d rcn=0x%02x pcn=0x%02x\n",
-		ret, id[0], id[1]);
+	seq_printf(s, "last_phase=%s\n", slic_where);
+	seq_printf(s,
+		   "spi post-regs: global=0x%x mode=0x%x init_busy=0x%x enable=0x%x done=0x%x ctl=0x%x ctl_busy=0x%x tx_busy=0x%x rx_busy=0x%x newblk=0x%x cs=0x%x\n",
+		   readl(sd.spi + SLIC_GLOBAL), readl(sd.spi + SLIC_MODE),
+		   readl(sd.spi + SLIC_INIT_BUSY), readl(sd.spi + SLIC_ENABLE),
+		   readl(sd.spi + SLIC_DONE), readl(sd.spi + SLIC_CTL),
+		   readl(sd.spi + SLIC_CTL_BUSY), readl(sd.spi + SLIC_TX_BUSY),
+		   readl(sd.spi + SLIC_RX_BUSY), readl(sd.spi + SLIC_NEWBLK_EN),
+		   readl(sd.spi + SLIC_CS_SELECT));
+	seq_printf(s, "sys: spi_mode[0x94]=0x%x gpio[0x834]=0x%x  iomux[0x104]=0x%x\n",
+		   readl(sd.sys + SYS_SPI_MODE), readl(sd.sys + SYS_GPIO_DATA),
+		   readl(sd.chip_scu + SCU_IOMUX_CONTROL1));
+
+	pr_info(DRV_NAME ": detect ret=%d rcn=0x%02x pcn=0x%02x last_phase=%s\n",
+		ret, id[0], id[1], slic_where);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(slic_detect);
