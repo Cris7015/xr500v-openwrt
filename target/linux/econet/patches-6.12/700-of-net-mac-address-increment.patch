@@ -1,0 +1,29 @@
+From: Cris7015 <pcristian292@gmail.com>
+Subject: [PATCH] of: net: support mac-address-increment(-byte)
+
+The cjdelisle econet 6.12 tree lacks OpenWrt of_get_mac_address support
+for mac-address-increment / mac-address-increment-byte. Add it so per-radio
+MACs can be derived from a single base MAC in flash (used by the XR500v
+MT7603 2.4GHz radio: base 0xf100 + 1).
+
+Signed-off-by: Cris7015 <pcristian292@gmail.com>
+--- a/net/core/of_net.c
++++ b/net/core/of_net.c
+@@ -168,6 +168,17 @@
+ 		return ret;
+ 
+ found:
++	{
++		u32 inc_idx = 5;
++		u32 mac_inc = 0;
++
++		of_property_read_u32(np, "mac-address-increment-byte", &inc_idx);
++		if (inc_idx > 5)
++			inc_idx = 5;
++		of_property_read_u32(np, "mac-address-increment", &mac_inc);
++		if (mac_inc)
++			addr[inc_idx] += mac_inc;
++	}
+ 	ret = of_add_mac_address(np, addr);
+ 	return ret;
+ }
