@@ -1,0 +1,181 @@
+From: Cris7015 <pcristian292@gmail.com>
+Subject: [PATCH] econet: en7528-pcie: enable MT7603 (2.4GHz) endpoint on port0
+
+The en7528 PCIe path enumerates the MT7662 (5GHz, port1) but the MT7603
+(2.4GHz, port0) endpoint returned UR to every config TLP, so it never
+enumerated. Root cause: the en7528 startup uses a simple per-port reset,
+but the EN751221 MT7603 needs the OEM global PCIe reset sequence.
+
+This replicates the OEM kernel mt7512_pcie_reset() + mt7512_pcie_set_mac()
+(arch/mips/pci/pci-tc3162u.c) at boot, for port0:
+ - SCU 0x1fb00088 |= BIT(22) (enable port)
+ - SCU 0x1fb00834 assert/release/assert bits 26,27,29 (controller reset)
+ - SCU 0x1fb00088 device reset bits 26,29 assert/release
+ - 250 ms settle
+ - RC0 MAC setup: 0x1fb8111c &= ~BIT(5) (MSI off), 0x1fb81420 &= ~BIT(16)
+   (INTx on), pciecfg 0x40 |= 0x03 (error ints)
+Plus: keep PCIE_LINKDOWN_RST_EN clear (link was flapping), config TLP tag
+0x070f in CFG_HEADER1, exact APP_CFG_REQ write, clear RDATA before read.
+The SCU writes are safe at boot (they crash only at runtime).
+
+Result: pci 0000:01:00.0: [14c3:7603] enumerates. (mt7603e still needs a
+valid EEPROM/cal blob via nvmem to not hang in mt7603_mcu_set_eeprom.)
+
+NOTE: contains diagnostic dev_info + the en7528_mt7603_cfg_ready probe;
+the phy-en7528-pcie port0 analog deltas are likely unnecessary (to bisect).
+
+Signed-off-by: Cris7015 <pcristian292@gmail.com>
+--- a/drivers/pci/controller/pcie-mediatek.c
++++ b/drivers/pci/controller/pcie-mediatek.c
+@@ -78,6 +78,7 @@
+ #define PCIE_CONF_DEVICE_ID	0x102
+ #define PCIE_CONF_REV_CLASS	0x104
+ #define PCIE_CONF_CLASS_ID	0x106
++#define PCIE_CONF_BUS_NUM	(PCIE_CONF_VEND_ID + 0x18)
+ 
+ #define PCIE_INT_MASK		0x420
+ #define INTX_MASK		GENMASK(19, 16)
+@@ -289,19 +290,16 @@
+ static int mtk_pcie_hw_rd_cfg(struct mtk_pcie_port *port, u32 bus, u32 devfn,
+ 			      int where, int size, u32 *val)
+ {
+-	u32 tmp;
+-
+ 	/* Write PCIe configuration transaction header for Cfgrd */
++	writel(0xffffffff, port->base + PCIE_CFG_RDATA); /* OEM: clear rdata */
+ 	writel(CFG_HEADER_DW0(CFG_WRRD_TYPE_0, CFG_RD_FMT),
+ 	       port->base + PCIE_CFG_HEADER0);
+-	writel(CFG_HEADER_DW1(where, size), port->base + PCIE_CFG_HEADER1);
++	writel(CFG_HEADER_DW1(where, size) | 0x700, port->base + PCIE_CFG_HEADER1); /* OEM tag 0x07 */
+ 	writel(CFG_HEADER_DW2(where, PCI_FUNC(devfn), PCI_SLOT(devfn), bus),
+ 	       port->base + PCIE_CFG_HEADER2);
+ 
+-	/* Trigger h/w to transmit Cfgrd TLP */
+-	tmp = readl(port->base + PCIE_APP_TLP_REQ);
+-	tmp |= APP_CFG_REQ;
+-	writel(tmp, port->base + PCIE_APP_TLP_REQ);
++	/* Trigger h/w to transmit Cfgrd TLP (OEM: write exact APP_CFG_REQ) */
++	writel(APP_CFG_REQ, port->base + PCIE_APP_TLP_REQ);
+ 
+ 	/* Check completion status */
+ 	if (mtk_pcie_check_cfg_cpld(port))
+@@ -324,7 +322,7 @@
+ 	/* Write PCIe configuration transaction header for Cfgwr */
+ 	writel(CFG_HEADER_DW0(CFG_WRRD_TYPE_0, CFG_WR_FMT),
+ 	       port->base + PCIE_CFG_HEADER0);
+-	writel(CFG_HEADER_DW1(where, size), port->base + PCIE_CFG_HEADER1);
++	writel(CFG_HEADER_DW1(where, size) | 0x700, port->base + PCIE_CFG_HEADER1); /* OEM tag 0x07 */
+ 	writel(CFG_HEADER_DW2(where, PCI_FUNC(devfn), PCI_SLOT(devfn), bus),
+ 	       port->base + PCIE_CFG_HEADER2);
+ 
+@@ -756,6 +754,26 @@
+ 	return 0;
+ }
+ 
++static bool en7528_mt7603_cfg_ready(struct mtk_pcie_port *port)
++{
++	struct mtk_pcie *pcie = port->pcie;
++	u32 old_bus, rcid, app, link = 0, vid = 0xffffffff;
++	int ret;
++
++	rcid = readl(port->base + PCIE_CONF_VEND_ID);
++	old_bus = readl(port->base + PCIE_CONF_BUS_NUM);
++	/* primary=0, secondary=1, subordinate=0xff; preserve latency byte */
++	writel((old_bus & 0xff000000) | 0x00ff0100, port->base + PCIE_CONF_BUS_NUM);
++	ret = mtk_pcie_hw_rd_cfg(port, 1, 0, 0, 4, &vid);
++	app = readl(port->base + PCIE_APP_TLP_REQ);
++	regmap_read(pcie->cfg, EN7528_LINKUP_REG, &link);
++	dev_info(pcie->dev,
++		 "EN7528: slot%d rcid=%08x busold=%08x link=%08x ret=%d app=%08x ep=%08x\n",
++		 port->slot, rcid, old_bus, link, ret, app, vid);
++	writel(old_bus, port->base + PCIE_CONF_BUS_NUM);
++	return !ret && (vid & 0xffff) == 0x14c3 && (vid >> 16) == 0x7603;
++}
++
+ static int mtk_pcie_startup_port_en7528(struct mtk_pcie_port *port)
+ {
+ 	struct mtk_pcie *pcie = port->pcie;
+@@ -776,6 +794,46 @@
+ 		return -EINVAL;
+ 	}
+ 
++	/* XR500v: enable MT7603 (port0) PCIe clock + gpio before link training */
++	if (port->slot == 0) {
++		void __iomem *scu = ioremap(0x1fb00084, 8);
++		void __iomem *g = ioremap(0x1fbf0200, 0x80);
++		void __iomem *mx = ioremap(0x1fa20104, 4);
++		if (scu) { u32 c = ioread32(scu); iowrite32(c | 0x2, scu); c = ioread32(scu + 4); iowrite32(c | 0x40000000, scu + 4); iounmap(scu); }
++		if (mx) { iowrite32(0xa0ad, mx); iounmap(mx); }
++		if (g) {
++			u32 t;
++			t = ioread32(g + 0x20); t |= 0x00400001; iowrite32(t, g + 0x20);
++			t = ioread32(g + 0x14); t |= 0x08010000; iowrite32(t, g + 0x14);
++			t = ioread32(g + 0x04); t |= 0x00010000; t &= ~0x08000000; iowrite32(t, g + 0x04);
++			iounmap(g);
++		}
++		dev_info(pcie->dev, "EN7528: XR500v MT7603 port0: SCU clk(0x84|2) + gpio16/27\n");
++		msleep(20);
++	}
++
++	if (port->slot == 0) {
++		/* OEM mt7512_pcie_reset global reset (pci-tc3162u.c) -- en7528 lo omite */
++		void __iomem *s88 = ioremap(0x1fb00088, 4);
++		void __iomem *s834 = ioremap(0x1fb00834, 4);
++		u32 t;
++		if (s88) { t = ioread32(s88); iowrite32(t | (1 << 22), s88); }
++		msleep(1);
++		if (s834) { t = ioread32(s834); iowrite32(t & ~((1 << 26) | (1 << 27) | (1 << 29)), s834); }
++		msleep(1);
++		if (s834) { t = ioread32(s834); iowrite32(t |  ((1 << 26) | (1 << 27) | (1 << 29)), s834); }
++		msleep(100);
++		if (s834) { t = ioread32(s834); iowrite32(t & ~((1 << 26) | (1 << 27) | (1 << 29)), s834); }
++		msleep(5);
++		if (s88) { t = ioread32(s88); iowrite32(t & ~((1 << 29) | (1 << 26)), s88); }
++		msleep(1);
++		if (s88) { t = ioread32(s88); iowrite32(t |  ((1 << 29) | (1 << 26)), s88); }
++		if (s88) iounmap(s88);
++		if (s834) iounmap(s834);
++		msleep(250);
++		dev_info(pcie->dev, "EN7528: XR500v MT7603 OEM global reset done\n");
++	}
++
+ 	/* Assert all reset signals */
+ 	writel(0, port->base + PCIE_RST_CTRL);
+ 
+@@ -815,6 +873,22 @@
+ 		return -ETIMEDOUT;
+ 	}
+ 
++	/* XR500v MT7603 reset-retry: si el endpoint no responde config tras el link-up,
++	 * re-pulsar el reset completo + re-entrenar (estilo OEM pcie_reset_link) para forzar
++	 * mejor convergencia del PHY. Early-exit si ya responde (no arruinar boot afortunado). */
++	if (port->slot == 0) {
++		val = readl(port->base + PCIE_RST_CTRL);
++		val &= ~PCIE_LINKDOWN_RST_EN;
++		writel(val, port->base + PCIE_RST_CTRL);
++		/* OEM mt7512_pcie_set_mac (pci-tc3162u.c) */
++		val = readl(port->base + 0x11c); writel(val & ~BIT(5), port->base + 0x11c); msleep(1);
++		val = readl(port->base + PCIE_INT_MASK); writel(val & ~BIT(16), port->base + PCIE_INT_MASK); msleep(1);
++		regmap_update_bits(pcie->cfg, 0x40, 0x03, 0x03); msleep(1);
++		dev_info(pcie->dev, "EN7528: XR500v MT7603 OEM-MAC-setup probing...\n");
++		msleep(30);
++		en7528_mt7603_cfg_ready(port);
++		en7528_mt7603_cfg_ready(port);
++	}
+ 	/* Set INTx mask */
+ 	val = readl(port->base + PCIE_INT_MASK);
+ 	val &= ~INTX_MASK;
+--- a/drivers/phy/phy-en7528-pcie.c
++++ b/drivers/phy/phy-en7528-pcie.c
+@@ -25,6 +25,11 @@
+ 
+ /* Port 0 PHY: set LCDDS_CLK_PH_INV for PLL operation */
+ static const struct en7528_pcie_phy_op en7528_phy_port0[] = {
++	/* XR500v MT7603 diagnostic: force stock-observed port0 analog deltas. */
++	{ .reg = 0x0a0, .mask = 0x00000100, .val = 0x00000100 },
++	{ .reg = 0x0b0, .mask = 0x00002ee2, .val = 0x00000e60 },
++	{ .reg = 0x0c4, .mask = 0x00004400, .val = 0x00004000 },
++	{ .reg = 0x0c8, .mask = 0x01100000, .val = 0x01100000 },
+ 	{
+ 		.reg = 0x4a0,
+ 		.mask = BIT(5),
