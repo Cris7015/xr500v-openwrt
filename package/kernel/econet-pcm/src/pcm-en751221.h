@@ -81,6 +81,7 @@ enum pcm_reg {
 
 #define MAX_BUF_NUM		8
 #define MAX_CH_NUM		8
+#define PCM_DESC_NUM		15	/* MAX_TX/RX_DESC_NUM (ring depth) */
 
 /* TX descriptor status word (PCM_TX/RX_DESC_RING_BASE entries). */
 union pcm_desc_status {

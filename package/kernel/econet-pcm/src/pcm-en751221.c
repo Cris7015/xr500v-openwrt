@@ -14,6 +14,7 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/io.h>
+#include <linux/dma-mapping.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/debugfs.h>
@@ -27,6 +28,12 @@ struct pcm_dev {
 	void __iomem *scu;	/* SoC SCU @ 0x1fb00000 (chip-id + reset) */
 	int irq;
 	struct dentry *dbg;
+
+	/* DMA descriptor rings (phase 2): PCM_DESC_NUM x struct pcm_desc each */
+	struct pcm_desc *tx_ring;
+	struct pcm_desc *rx_ring;
+	dma_addr_t tx_dma;
+	dma_addr_t rx_dma;
 };
 
 static inline u32 pcm_rd(struct pcm_dev *p, enum pcm_reg r)
@@ -81,6 +88,35 @@ static void pcm_load_defaults(struct pcm_dev *p)
 	pcm_wr(p, PCM_ISR, pcm_rd(p, PCM_ISR));	/* W1C any pending */
 }
 
+/*
+ * Allocate the TX/RX DMA descriptor rings and program their physical base
+ * addresses. From descInit() in pcm1.ko: each ring is PCM_DESC_NUM entries of
+ * sizeof(struct pcm_desc) (36 B -> 540 B), zeroed, base written (as a physical
+ * address) to PCM_TX/RX_DESC_RING_BASE. The rings are not yet armed or the DMA
+ * enabled here - that is phase 2b.
+ */
+static int pcm_alloc_rings(struct pcm_dev *p)
+{
+	size_t sz = PCM_DESC_NUM * sizeof(struct pcm_desc);
+
+	p->tx_ring = dmam_alloc_coherent(p->dev, sz, &p->tx_dma, GFP_KERNEL);
+	if (!p->tx_ring)
+		return -ENOMEM;
+	p->rx_ring = dmam_alloc_coherent(p->dev, sz, &p->rx_dma, GFP_KERNEL);
+	if (!p->rx_ring)
+		return -ENOMEM;
+
+	memset(p->tx_ring, 0, sz);
+	memset(p->rx_ring, 0, sz);
+
+	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)p->tx_dma);
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)p->rx_dma);
+
+	dev_info(p->dev, "DMA rings: tx=%pad rx=%pad (%u desc x %zu B)\n",
+		 &p->tx_dma, &p->rx_dma, PCM_DESC_NUM, sizeof(struct pcm_desc));
+	return 0;
+}
+
 static irqreturn_t pcm_irq(int irq, void *data)
 {
 	struct pcm_dev *p = data;
@@ -111,6 +147,7 @@ static int pcm_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct pcm_dev *p;
 	u32 chip;
+	int ret;
 
 	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
 	if (!p)
@@ -134,11 +171,15 @@ static int pcm_probe(struct platform_device *pdev)
 	pcm_soft_reset(p);
 	pcm_load_defaults(p);
 
+	ret = pcm_alloc_rings(p);
+	if (ret)
+		return ret;
+
 	/* IRQ is optional in phase 1: a wrong DT number must not block bring-up */
 	p->irq = platform_get_irq_optional(pdev, 0);
 	if (p->irq > 0) {
-		int ret = devm_request_irq(dev, p->irq, pcm_irq, 0,
-					   dev_name(dev), p);
+		ret = devm_request_irq(dev, p->irq, pcm_irq, 0,
+				       dev_name(dev), p);
 		if (ret)
 			dev_warn(dev, "could not request IRQ %d: %d\n",
 				 p->irq, ret);
