@@ -95,6 +95,13 @@ static struct slic_dev sd;
 /* phase 3a instrumentation: which phase we're in, for timeout reporting. */
 static const char *slic_where = "idle";
 
+/*
+ * IOMUX_CONTROL1 value OR'd in for the SPI-SLIC pins (after masking 0x7d00).
+ * OEM slic3.ko init_module uses 0x7500 for devNum 0 (GPIO_SPI_SLIC_1st|2nd);
+ * debugfs-writable so pinmux variants can be swept without reflashing.
+ */
+static u32 slic_iomux_set = 0x7500;
+
 /* poll a *_busy style register: wait until it reads 0. */
 static int slic_wait_clear(u32 off)
 {
@@ -277,7 +284,7 @@ static void slic_spi_cfg(void)
 	u32 v;
 
 	v = readl(sd.chip_scu + SCU_IOMUX_CONTROL1);
-	writel((v & ~IOMUX1_SPI_SLIC_MASK) | IOMUX1_GPIO_SPI_SLIC,
+	writel((v & ~IOMUX1_SPI_SLIC_MASK) | (slic_iomux_set & IOMUX1_SPI_SLIC_MASK),
 	       sd.chip_scu + SCU_IOMUX_CONTROL1);
 
 	v = readl(sd.chip_scu + SCU_PCM_CLK_SRC_SEL);
@@ -341,25 +348,30 @@ static int slic_mpi_read(u8 ec, u8 reg, u8 *buf, u8 len)
 	return slic_spi_read(reg, buf, len);
 }
 
-static int slic_detect(u8 id[VP886_R_RCNPCN_LEN])
+#define SLIC_DETECT_NBYTES	8	/* phase-3a: over-read to expose dummy/offset */
+
+static int slic_detect(u8 *buf, u8 n)
 {
 	int ret;
 
 	mutex_lock(&sd.lock);
 	slic_spi_cfg();
 	slic_reset();
-	ret = slic_mpi_read(VP886_EC_1, VP886_R_RCNPCN_RD, id, VP886_R_RCNPCN_LEN);
+	ret = slic_mpi_read(VP886_EC_1, VP886_R_RCNPCN_RD, buf, n);
 	mutex_unlock(&sd.lock);
 	return ret;
 }
 
 static int slic_detect_show(struct seq_file *s, void *unused)
 {
-	u8 id[VP886_R_RCNPCN_LEN] = { 0xff, 0xff };
-	int ret = slic_detect(id);
+	u8 id[SLIC_DETECT_NBYTES];
+	int ret;
 
-	seq_printf(s, "RCNPCN read ret=%d rcn=0x%02x pcn=0x%02x (expect rcn=0x%02x pcn=0x%02x)\n",
-		   ret, id[0], id[1], VP886_R_RCNPCN_RCN, VP886_R_RCNPCN_PCN_LE9641);
+	memset(id, 0xee, sizeof(id));
+	ret = slic_detect(id, sizeof(id));
+
+	seq_printf(s, "RCNPCN read ret=%d bytes= %*ph (expect 0x08 0x49 ...)\n",
+		   ret, (int)sizeof(id), id);
 	if (!ret && id[0] == VP886_R_RCNPCN_RCN &&
 	    id[1] == VP886_R_RCNPCN_PCN_LE9641)
 		seq_puts(s, "Le9641 detected: OK\n");
@@ -379,8 +391,8 @@ static int slic_detect_show(struct seq_file *s, void *unused)
 		   readl(sd.sys + SYS_SPI_MODE), readl(sd.sys + SYS_GPIO_DATA),
 		   readl(sd.chip_scu + SCU_IOMUX_CONTROL1));
 
-	pr_info(DRV_NAME ": detect ret=%d rcn=0x%02x pcn=0x%02x last_phase=%s\n",
-		ret, id[0], id[1], slic_where);
+	pr_info(DRV_NAME ": detect ret=%d bytes=%*ph last_phase=%s\n",
+		ret, (int)sizeof(id), id, slic_where);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(slic_detect);
@@ -399,6 +411,7 @@ static int __init econet_slic_init(void)
 	sd.dbg = debugfs_create_dir(DRV_NAME, NULL);
 	debugfs_create_file("slic_detect", 0444, sd.dbg, NULL, &slic_detect_fops);
 	debugfs_create_u8("cs", 0644, sd.dbg, &sd.cs);
+	debugfs_create_x32("iomux_set", 0644, sd.dbg, &slic_iomux_set);
 
 	pr_info(DRV_NAME ": loaded (cat /sys/kernel/debug/%s/slic_detect to probe Le9641)\n",
 		DRV_NAME);
