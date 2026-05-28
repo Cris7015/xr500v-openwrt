@@ -84,6 +84,14 @@
 		#reset-cells = <1>;
 	};
 
+	pcm0: pcm@1fbd0000 {
+		compatible = "econet,en751221-pcm";
+		reg = <0x1fbd0000 0x1000>;
+		interrupt-parent = <&intc>;
+		interrupts = <12>;	/* OEM PCM_INT=12 for PCM0; verify on HW */
+		status = "disabled";
+	};
+
 	ethernet: ethernet@1fb50000 {
 		compatible = "econet,en751221-eth";
 		/* 0x8000 (not 0x10000): 0x1fb58000 is the on-die switch region, now

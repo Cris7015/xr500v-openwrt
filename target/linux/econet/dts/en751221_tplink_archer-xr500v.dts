@@ -336,3 +336,8 @@
 /* Plan B dual-switch: no port@5/phy overrides — the MCM switch auto-detects
  * its internal PHYs and the on-die cascade is bootloader-configured.
  */
+
+/* VoIP/FXS phase 1: enable the PCM/TDM controller (Le9641 SLIC bring-up). */
+&pcm0 {
+	status = "okay";
+};
