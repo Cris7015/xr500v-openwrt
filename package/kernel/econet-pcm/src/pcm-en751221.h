@@ -182,4 +182,11 @@ union pcm_slot_cfg {
 	u32 value;
 };
 
+/*
+ * Bring the PCM up generating continuous PCLK/FSYNC (DMA armed) for a ZSI SLIC.
+ * Exported by the PCM driver, called by the SLIC (ZSI) driver.
+ */
+int pcm_en751221_zsi_clock_run(u32 intface, const u32 *tx_slots,
+			       const u32 *rx_slots);
+
 #endif /* _PCM_EN751221_H */

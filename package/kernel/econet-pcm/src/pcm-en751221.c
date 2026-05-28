@@ -326,6 +326,77 @@ static int pcm_alloc_rings(struct pcm_dev *p)
 	return 0;
 }
 
+/*
+ * Exported for the SLIC (ZSI) driver: bring the PCM engine up so it generates
+ * continuous PCLK/FSYNC on the external pins, which a ZSI SLIC clocks off.
+ *
+ * The OEM stock device (voip running) shows the PCM with DMA TX+RX enabled
+ * (DMA_CTRL=0x0f000003), INTFACE_CTRL=0xf5071306 and a specific timeslot table;
+ * the bit clock only free-runs once DMA is armed. So we arm all descriptors
+ * (with dummy buffers), program the caller's timeslots + INTFACE_CTRL, and
+ * enable DMA. Left running (not torn down) so the SLIC keeps its clock.
+ */
+static struct pcm_dev *g_pcm;
+
+int pcm_en751221_zsi_clock_run(u32 intface, const u32 *tx_slots,
+			       const u32 *rx_slots)
+{
+	struct pcm_dev *p = g_pcm;
+	static void *txb, *rxb;
+	static dma_addr_t txb_dma, rxb_dma;
+	const u32 samples = 80, chv = 0xf;
+	int i, ch;
+
+	if (!p)
+		return -ENODEV;
+
+	if (!txb) {
+		txb = dmam_alloc_coherent(p->dev, 1024, &txb_dma, GFP_KERNEL);
+		rxb = dmam_alloc_coherent(p->dev, 1024, &rxb_dma, GFP_KERNEL);
+		if (!txb || !rxb)
+			return -ENOMEM;
+	}
+
+	for (i = 0; i < PCM_DESC_NUM; i++) {
+		memset(&p->tx_ring[i], 0, sizeof(struct pcm_desc));
+		memset(&p->rx_ring[i], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < 4; ch++) {
+			p->tx_ring[i].buf_addr[ch] =
+				(u32)((txb_dma + ch * 160) & PCM_DMA_ADDR_MASK);
+			p->rx_ring[i].buf_addr[ch] =
+				(u32)((rxb_dma + ch * 160) & PCM_DMA_ADDR_MASK);
+		}
+		p->tx_ring[i].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, chv) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, samples);
+		p->rx_ring[i].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, chv) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, samples);
+	}
+
+	for (i = 0; i < 4; i++) {
+		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + i, tx_slots[i]);
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + i, rx_slots[i]);
+	}
+	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)(p->tx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
+	pcm_wr(p, PCM_INTFACE_CTRL, intface);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, chv) |
+	       PCM_DMA_TX_EN | PCM_DMA_RX_EN);
+	/* kick the DMA engine -- without the polling demand it never starts
+	 * (this is what the 2b loopback self-test needed; ISR stayed 0 without it) */
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+
+	dev_info(p->dev, "ZSI clock run: intface=0x%08x dma_ctrl=0x%08x isr=0x%08x\n",
+		 intface, pcm_rd(p, PCM_TX_RX_DMA_CTRL), pcm_rd(p, PCM_ISR));
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_zsi_clock_run);
+
 static irqreturn_t pcm_irq(int irq, void *data)
 {
 	struct pcm_dev *p = data;
@@ -420,6 +491,7 @@ static int pcm_probe(struct platform_device *pdev)
 			    &pcm_loopback_selftest_fops);
 
 	platform_set_drvdata(pdev, p);
+	g_pcm = p;	/* for pcm_en751221_zsi_clock_run() (SLIC ZSI clock) */
 	dev_info(dev, "PCM/TDM controller ready (phase 1: reset + defaults)\n");
 	return 0;
 }

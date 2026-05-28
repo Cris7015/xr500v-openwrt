@@ -8,15 +8,16 @@ include $(INCLUDE_DIR)/package.mk
 
 define KernelPackage/econet-pcm
   SUBMENU:=Other modules
-  TITLE:=EN751221 PCM/TDM controller driver
+  TITLE:=EN751221 PCM/TDM + Le9642 SLIC (ZSI) drivers
   DEPENDS:=@TARGET_econet
-  FILES:=$(PKG_BUILD_DIR)/pcm-en751221.ko
-  AUTOLOAD:=$(call AutoLoad,35,pcm-en751221,1)
+  FILES:=$(PKG_BUILD_DIR)/pcm-en751221.ko $(PKG_BUILD_DIR)/econet-slic.ko
+  AUTOLOAD:=$(call AutoLoad,35,pcm-en751221 econet-slic,1)
 endef
 
 define KernelPackage/econet-pcm/description
-  PCM/TDM controller driver for the EcoNet/TrendChip EN751221 SoC register
-  block at 0x1fbd0000. Foundation for VoIP/FXS support (Le9641 SLIC).
+  PCM/TDM controller driver for the EcoNet/TrendChip EN751221 SoC (0x1fbd0000)
+  plus the Le9642 SLIC ZSI driver (0x1fbd1000). Built together so the SLIC can
+  use the PCM's exported clock function. Foundation for VoIP/FXS support.
 endef
 
 define Build/Prepare
