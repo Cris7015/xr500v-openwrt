@@ -78,7 +78,7 @@
 #define VP886_R_RCNPCN_RD	0x73
 #define VP886_R_RCNPCN_LEN	2
 #define VP886_R_RCNPCN_RCN	0x08
-#define VP886_R_RCNPCN_PCN_LE9641 0x49
+#define VP886_R_RCNPCN_PCN_LE9642 0x75	/* le9662.c: le9642 = rcn 0x08 / pcn 0x75 */
 
 #define ZSI_POLL_ITERS		20000	/* x1us = up to 20ms per wait */
 
@@ -186,6 +186,11 @@ static int zsi_read(u8 cmd, u8 *buf, u8 len)
 	ret = zsi_write_byte(cmd);
 	if (ret)
 		return ret;
+	/* ZSI read sub-command: consumes the framing byte so the first read
+	 * byte is the real register data (verified live: 0x06 aligns RCN=0x08). */
+	ret = zsi_write_byte(0x06);
+	if (ret)
+		return ret;
 	for (i = 0; i < len; i++) {
 		ret = zsi_read_byte(&buf[i]);
 		if (ret)
@@ -195,20 +200,30 @@ static int zsi_read(u8 cmd, u8 *buf, u8 len)
 }
 
 /*
- * Bring the PCM engine up (DMA running) so it generates continuous PCLK/FSYNC,
- * which a ZSI SLIC clocks off. Implemented in econet-pcm (it owns the DMA
- * device + the HW-validated ring/descriptor logic).
+ * Enable the PCM clock output (SCU 0x1fa200d8). The ZSI control read does NOT
+ * need the PCM DMA -- the ZSI wrapper self-clocks. Live testing showed that
+ * arming the DMA actually PREVENTED the SLIC from answering (the SLIC replied
+ * only with NO DMA running). So we just enable the PCLK output; no rings.
  */
-extern int pcm_en751221_zsi_clock_run(u32 intface, const u32 *tx_slots,
-				      const u32 *rx_slots);
+#define SCU_PCM_CLK_OUTPUT	0x0d8
+#define SCU_PCM_CLK_OUTPUT_VAL	0x00a00301	/* OEM-stock value */
 
-static int pcm_zsi_clock_setup(void)
+/*
+ * Configure the PCM as master so it generates PCLK/FSYNC for the SLIC:
+ * clock output enable + the OEM timeslot table + INTFACE_CTRL (0xf5071306,
+ * master mode, no loopback). NO DMA -- arming the DMA was what blocked the
+ * SLIC; only this clock-master config is needed for the ZSI control channel.
+ */
+static void pcm_zsi_clock_setup(void)
 {
-	int ret = pcm_en751221_zsi_clock_run(pcm_intface_ctrl,
-					     pcm_tx_slots, pcm_rx_slots);
-	if (ret)
-		pr_warn(DRV_NAME ": pcm clock run failed: %d\n", ret);
-	return ret;
+	int i;
+
+	writel(SCU_PCM_CLK_OUTPUT_VAL, sd.chip_scu + SCU_PCM_CLK_OUTPUT);
+	for (i = 0; i < 4; i++) {
+		writel(pcm_tx_slots[i], sd.pcm + PCM_TX_TIME_SLOT_CFG0 + i * 4);
+		writel(pcm_rx_slots[i], sd.pcm + PCM_RX_TIME_SLOT_CFG0 + i * 4);
+	}
+	writel(pcm_intface_ctrl, sd.pcm + PCM_INTFACE_CTRL);
 }
 
 /* type=ZSI init from slic3_main.c: route, iomux GPIO_ZSI_ISI, ZSI clock src. */
@@ -291,10 +306,10 @@ static int slic_detect_show(struct seq_file *s, void *unused)
 	memset(id, 0xee, sizeof(id));
 	ret = slic_detect(id, sizeof(id));
 
-	seq_printf(s, "RCNPCN(ZSI) ret=%d bytes= %*ph (expect 0x08 0x49)\n",
+	seq_printf(s, "RCNPCN(ZSI) ret=%d bytes= %*ph (expect 0x08 0x75)\n",
 		   ret, (int)sizeof(id), id);
 	if (!ret && id[0] == VP886_R_RCNPCN_RCN &&
-	    id[1] == VP886_R_RCNPCN_PCN_LE9641)
+	    id[1] == VP886_R_RCNPCN_PCN_LE9642)
 		seq_puts(s, "Le9642 detected: OK\n");
 	else
 		seq_puts(s, "Le9642 detect: FAILED\n");
