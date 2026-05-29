@@ -308,41 +308,62 @@ static int slic_detect(u8 *buf, u8 n)
  * state with NO HWRESET, the SLIC survives and the Device Mode reads back the
  * written value. The 0xf6/0xe4/0xe6 commands start the buck-boost switcher.
  */
-struct mpi_cmd {
-	u8 op;
-	u8 len;
-	u8 data[6];
+/*
+ * Raw MPI sections of the ZLR964124_Le9641 BB profiles (ZSI mode), written
+ * straight over ZSI. Each opcode self-delimits (the SLIC parses the stream),
+ * so we just stream the bytes. All validated by poking (SLIC survives, device
+ * mode reads back, AC 80-byte command accepted).
+ */
+static const u8 dev_mpi[] = {	/* DEV_PROFILE_100V_BB_124_ZSI: PCLK, slot, dev mode, switcher */
+	0x46, 0x02, 0x44, 0x46, 0x5e, 0x14, 0x00, 0xf6, 0x95, 0x00,
+	0x58, 0x30, 0x5c, 0x30, 0xe4, 0x44, 0x92, 0x0a, 0xe6, 0x60,
+};
+static const u8 dc_mpi[] = {	/* DC_FXS_miSLIC_BB_DEF: DC feed */
+	0xc6, 0x92, 0x27,
+};
+static const u8 ac_mpi[] = {	/* AC_FXS_RF14_600R_DEF_LE9641: AC impedance coeffs */
+	0xa4, 0x00, 0xf4, 0x4c, 0x01, 0x49, 0xca, 0xf5, 0x98, 0xaa, 0x7b, 0xab,
+	0x2c, 0xa3, 0x25, 0xa5, 0x24, 0xb2, 0x3d, 0x9a, 0x2a, 0xaa, 0xa6, 0x9f,
+	0x01, 0x8a, 0x1d, 0x01, 0xa3, 0xa0, 0x2e, 0xb2, 0xb2, 0xba, 0xac, 0xa2,
+	0xa6, 0xcb, 0x3b, 0x45, 0x88, 0x2a, 0x20, 0x3c, 0xbc, 0x4e, 0xa6, 0x2b,
+	0xa5, 0x2b, 0x3e, 0xba, 0x8f, 0x82, 0xa8, 0x71, 0x80, 0xa9, 0xf0, 0x50,
+	0x00, 0x86, 0x2a, 0x42, 0xa1, 0xcb, 0x1b, 0xa3, 0xa8, 0xfb, 0x87, 0xaa,
+	0xfb, 0x9f, 0xa9, 0xf0, 0x96, 0x2e, 0x01, 0x00,
+};
+static const u8 ring_mpi[] = {	/* RING_ZL880_BB90V_DEF: ringing generator */
+	0xc0, 0x08, 0x00, 0x00, 0x00, 0x44, 0x3a, 0x9d, 0x00, 0x00, 0x00, 0x00,
 };
 
-static const struct mpi_cmd dev_profile_mpi[] = {
-	{ 0x46, 1, { 0x02 } },				/* PCLK = 2.048 MHz; INTM */
-	{ 0x44, 1, { 0x46 } },				/* PCM clock slot 6 TX / 0 RX */
-	{ 0x5e, 2, { 0x14, 0x00 } },			/* Device Mode Register */
-	{ 0xf6, 6, { 0x95, 0x00, 0x58, 0x30, 0x5c, 0x30 } }, /* SW Reg Timing */
-	{ 0xe4, 3, { 0x44, 0x92, 0x0a } },		/* SW Reg Params */
-	{ 0xe6, 1, { 0x60 } },				/* SW Reg Control */
-};
-
-/* Write the device profile commands in one ZSI session (cfg once, then bytes). */
-static int slic_load_dev_profile(void)
+/* Stream one raw MPI section to the SLIC in a single ZSI session. */
+static int slic_write_mpi(const char *what, const u8 *b, int n)
 {
-	int i, j, ret;
+	int i, ret;
 
-	sd.where = "dev_profile";
+	sd.where = what;
 	zsi_begin();
-	for (i = 0; i < ARRAY_SIZE(dev_profile_mpi); i++) {
-		const struct mpi_cmd *c = &dev_profile_mpi[i];
-
-		ret = zsi_write_byte(c->op);
+	for (i = 0; i < n; i++) {
+		ret = zsi_write_byte(b[i]);
 		if (ret)
 			return ret;
-		for (j = 0; j < c->len; j++) {
-			ret = zsi_write_byte(c->data[j]);
-			if (ret)
-				return ret;
-		}
 	}
 	return 0;
+}
+
+/* Load device + DC + AC + ring profiles (Raw MPI sections). */
+static int slic_load_profiles(void)
+{
+	int ret;
+
+	ret = slic_write_mpi("dev", dev_mpi, sizeof(dev_mpi));
+	if (ret)
+		return ret;
+	ret = slic_write_mpi("dc", dc_mpi, sizeof(dc_mpi));
+	if (ret)
+		return ret;
+	ret = slic_write_mpi("ac", ac_mpi, sizeof(ac_mpi));
+	if (ret)
+		return ret;
+	return slic_write_mpi("ring", ring_mpi, sizeof(ring_mpi));
 }
 
 /* Full 3b init: bring-up (3a) + verify + load device profile. */
@@ -358,7 +379,7 @@ static int slic_init(u8 id[2], u8 *devmode_out)
 	ret = zsi_mpi_read(VP886_EC_1, VP886_R_RCNPCN_RD, id, 2);
 	if (ret)
 		goto out;
-	ret = slic_load_dev_profile();
+	ret = slic_load_profiles();
 	if (ret)
 		goto out;
 	/* read the Device Mode register back to confirm the profile took */
@@ -378,7 +399,7 @@ static int slic_init_show(struct seq_file *s, void *unused)
 		   ret, id[0], id[1], devmode);
 	if (!ret && id[0] == VP886_R_RCNPCN_RCN &&
 	    id[1] == VP886_R_RCNPCN_PCN_LE9642 && devmode == 0x14)
-		seq_puts(s, "Le9642 init + device profile loaded: OK\n");
+		seq_puts(s, "Le9642 init + device/DC/AC/ring profiles loaded: OK\n");
 	else
 		seq_puts(s, "init: FAILED\n");
 	return 0;
