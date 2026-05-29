@@ -301,6 +301,90 @@ static int slic_detect(u8 *buf, u8 n)
 	return ret;
 }
 
+/*
+ * Phase 3b: device profile (Raw MPI section of DEV_PROFILE_100V_BB_124_ZSI).
+ * Each entry is an MPI command (opcode + data bytes) written straight to the
+ * SLIC over ZSI. Validated by poking: written from the good (post-detect)
+ * state with NO HWRESET, the SLIC survives and the Device Mode reads back the
+ * written value. The 0xf6/0xe4/0xe6 commands start the buck-boost switcher.
+ */
+struct mpi_cmd {
+	u8 op;
+	u8 len;
+	u8 data[6];
+};
+
+static const struct mpi_cmd dev_profile_mpi[] = {
+	{ 0x46, 1, { 0x02 } },				/* PCLK = 2.048 MHz; INTM */
+	{ 0x44, 1, { 0x46 } },				/* PCM clock slot 6 TX / 0 RX */
+	{ 0x5e, 2, { 0x14, 0x00 } },			/* Device Mode Register */
+	{ 0xf6, 6, { 0x95, 0x00, 0x58, 0x30, 0x5c, 0x30 } }, /* SW Reg Timing */
+	{ 0xe4, 3, { 0x44, 0x92, 0x0a } },		/* SW Reg Params */
+	{ 0xe6, 1, { 0x60 } },				/* SW Reg Control */
+};
+
+/* Write the device profile commands in one ZSI session (cfg once, then bytes). */
+static int slic_load_dev_profile(void)
+{
+	int i, j, ret;
+
+	sd.where = "dev_profile";
+	zsi_begin();
+	for (i = 0; i < ARRAY_SIZE(dev_profile_mpi); i++) {
+		const struct mpi_cmd *c = &dev_profile_mpi[i];
+
+		ret = zsi_write_byte(c->op);
+		if (ret)
+			return ret;
+		for (j = 0; j < c->len; j++) {
+			ret = zsi_write_byte(c->data[j]);
+			if (ret)
+				return ret;
+		}
+	}
+	return 0;
+}
+
+/* Full 3b init: bring-up (3a) + verify + load device profile. */
+static int slic_init(u8 id[2], u8 *devmode_out)
+{
+	int ret;
+
+	mutex_lock(&sd.lock);
+	zsi_hw_init();
+	zsi_slic_reset();
+	writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+
+	ret = zsi_mpi_read(VP886_EC_1, VP886_R_RCNPCN_RD, id, 2);
+	if (ret)
+		goto out;
+	ret = slic_load_dev_profile();
+	if (ret)
+		goto out;
+	/* read the Device Mode register back to confirm the profile took */
+	ret = zsi_mpi_read(VP886_EC_1, 0x5f, devmode_out, 1);
+out:
+	mutex_unlock(&sd.lock);
+	return ret;
+}
+
+static int slic_init_show(struct seq_file *s, void *unused)
+{
+	u8 id[2] = { 0xee, 0xee };
+	u8 devmode = 0xee;
+	int ret = slic_init(id, &devmode);
+
+	seq_printf(s, "init ret=%d  RCNPCN=%02x %02x (expect 08 75)  devmode=0x%02x (expect 0x14)\n",
+		   ret, id[0], id[1], devmode);
+	if (!ret && id[0] == VP886_R_RCNPCN_RCN &&
+	    id[1] == VP886_R_RCNPCN_PCN_LE9642 && devmode == 0x14)
+		seq_puts(s, "Le9642 init + device profile loaded: OK\n");
+	else
+		seq_puts(s, "init: FAILED\n");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_init);
+
 #define SLIC_DETECT_NBYTES	4
 
 static int slic_detect_show(struct seq_file *s, void *unused)
@@ -347,6 +431,7 @@ static int __init econet_slic_init(void)
 
 	sd.dbg = debugfs_create_dir(DRV_NAME, NULL);
 	debugfs_create_file("slic_detect", 0444, sd.dbg, NULL, &slic_detect_fops);
+	debugfs_create_file("slic_init", 0444, sd.dbg, NULL, &slic_init_fops);
 	debugfs_create_u8("cs", 0644, sd.dbg, &sd.cs);
 	debugfs_create_x32("pcm_intface", 0644, sd.dbg, &pcm_intface_ctrl);
 	debugfs_create_x32("zsi_cfg", 0644, sd.dbg, &zsi_cfg_val);
