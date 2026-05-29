@@ -21,6 +21,7 @@
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/mutex.h>
+#include <linux/slab.h>
 
 #include "pcm-en751221.h"
 
@@ -538,6 +539,158 @@ int pcm_en751221_capture_allch(u8 *out)
 	return (i < 500) ? 0 : -ETIMEDOUT;
 }
 EXPORT_SYMBOL_GPL(pcm_en751221_capture_allch);
+
+/* G.711 mu-law encode of a signed 16-bit linear sample (no FPU). */
+static u8 lin2ulaw(s16 sample)
+{
+	const s16 BIAS = 0x84, CLIP = 32635;
+	int sign = (sample < 0);
+	u16 mag, t;
+	int exp, mant;
+
+	if (sign)
+		sample = -sample;
+	if (sample > CLIP)
+		sample = CLIP;
+	mag = (u16)sample + BIAS;
+	t = mag >> 7;
+	exp = 0;
+	while (t) {		/* exp = floor(log2(mag >> 7)), clamps to 0..7 */
+		exp++;
+		t >>= 1;
+	}
+	if (exp)
+		exp--;
+	mant = (mag >> (exp + 3)) & 0x0f;
+	return (u8)(~((sign ? 0x80 : 0) | (exp << 4) | mant));
+}
+
+/*
+ * Build a recognisable square-wave melody ("Twinkle Twinkle") as 8 kHz mu-law
+ * samples. Square wave (chiptune style) so it synthesises with pure integer
+ * math. Returns a kmalloc'd buffer (caller kfree's), length rounded to 80.
+ */
+static u8 *pcm_build_melody(int *out_len)
+{
+	static const u16 notes[][2] = {	/* { freq Hz (0 = rest), ms } */
+		{ 523, 280 }, { 523, 280 }, { 784, 280 }, { 784, 280 },
+		{ 880, 280 }, { 880, 280 }, { 784, 520 }, {   0,  60 },
+		{ 698, 280 }, { 698, 280 }, { 659, 280 }, { 659, 280 },
+		{ 587, 280 }, { 587, 280 }, { 523, 520 },
+	};
+	int n = ARRAY_SIZE(notes), i, j, idx = 0, total = 0;
+	u16 phase = 0;
+	u8 *buf;
+
+	for (i = 0; i < n; i++)
+		total += notes[i][1] * 8;	/* 8 samples per ms @ 8 kHz */
+	buf = kmalloc(total + 80, GFP_KERNEL);
+	if (!buf)
+		return NULL;
+
+	for (i = 0; i < n; i++) {
+		u16 f = notes[i][0];
+		int samp = notes[i][1] * 8;
+		u32 inc = f ? (u32)f * 65536 / 8000 : 0;
+
+		for (j = 0; j < samp; j++) {
+			s16 s = 0;
+
+			if (f) {
+				phase += inc;
+				s = (phase & 0x8000) ? 7000 : -7000;
+			}
+			buf[idx++] = lin2ulaw(s);
+		}
+	}
+	while (idx % 80)		/* pad final partial frame with silence */
+		buf[idx++] = lin2ulaw(0);
+	*out_len = idx;
+	return buf;
+}
+
+/*
+ * Play the melody out the PCM TX path, broadcast to all 8 channels (chValid
+ * 0xff) so it lands on whichever bus slot the SLIC earpiece (RXSLOT) reads.
+ * Software-recycles the 15-descriptor ring for the whole tune. Blocks for the
+ * duration of the melody (~4 s); meant to be driven from a debugfs read.
+ */
+int pcm_en751221_play_melody(void)
+{
+	struct pcm_dev *p = g_pcm;
+	static const u32 oem_slots[4] = {
+		0x10301020, 0x10501040, 0x10701060, 0x10901080,
+	};
+	static void *txb;
+	static dma_addr_t txb_dma;
+	u8 *mel;
+	int mel_len = 0, pos = 0, d, ch, guard = 0;
+
+	if (!p)
+		return -ENODEV;
+	if (!txb) {
+		txb = dmam_alloc_coherent(p->dev, PCM_DESC_NUM * 80 + 64,
+					  &txb_dma, GFP_KERNEL);
+		if (!txb)
+			return -ENOMEM;
+	}
+	mel = pcm_build_melody(&mel_len);
+	if (!mel)
+		return -ENOMEM;
+
+	for (d = 0; d < 4; d++)
+		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+
+	/* prime the ring with the first PCM_DESC_NUM frames */
+	for (d = 0; d < PCM_DESC_NUM && pos < mel_len; d++) {
+		memset(&p->tx_ring[d], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < 8; ch++)
+			p->tx_ring[d].buf_addr[ch] =
+				(u32)((txb_dma + d * 80) & PCM_DMA_ADDR_MASK);
+		memcpy((u8 *)txb + d * 80, mel + pos, 80);
+		pos += 80;
+		p->tx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
+	}
+
+	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)(p->tx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
+	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0xff) | PCM_DMA_TX_EN);
+	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+
+	/* refill descriptors as the engine releases them, until the tune ends */
+	while (pos < mel_len && guard < 200000) {
+		int progressed = 0;
+
+		for (d = 0; d < PCM_DESC_NUM && pos < mel_len; d++) {
+			dma_rmb();
+			if (READ_ONCE(p->tx_ring[d].status) & PCM_DESC_OWN)
+				continue;
+			memcpy((u8 *)txb + d * 80, mel + pos, 80);
+			pos += 80;
+			dma_wmb();
+			p->tx_ring[d].status = PCM_DESC_OWN |
+				FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+				FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
+			pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+			progressed = 1;
+		}
+		if (!progressed) {
+			usleep_range(2000, 4000);
+			guard++;
+		}
+	}
+	msleep(220);		/* let the last queued frames drain */
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~PCM_DMA_TX_EN);
+	kfree(mel);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_play_melody);
 
 static irqreturn_t pcm_irq(int irq, void *data)
 {

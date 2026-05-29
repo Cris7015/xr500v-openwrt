@@ -195,4 +195,7 @@ int pcm_en751221_capture_rx(u8 *out, int nbytes);
 /* Diagnostic: capture all 8 RX channels (OEM slot map) into out[8*80]. */
 int pcm_en751221_capture_allch(u8 *out);
 
+/* Play a mu-law melody out the TX path (broadcast to all 8 slots). Blocks. */
+int pcm_en751221_play_melody(void);
+
 #endif /* _PCM_EN751221_H */
