@@ -473,27 +473,41 @@ int pcm_en751221_capture_allch(u8 *out)
 	};
 	static void *cap;
 	static dma_addr_t cap_dma;
-	int i, ch;
+	int i, ch, d, done = -1;
 
 	if (!p)
 		return -ENODEV;
+	/* one 8ch*80 slab per descriptor so the engine can land on any of them */
 	if (!cap) {
-		cap = dmam_alloc_coherent(p->dev, 8 * 80 + 64, &cap_dma, GFP_KERNEL);
+		cap = dmam_alloc_coherent(p->dev, PCM_DESC_NUM * 8 * 80 + 64,
+					  &cap_dma, GFP_KERNEL);
 		if (!cap)
 			return -ENOMEM;
 	}
-	memset(cap, 0, 8 * 80);
+	memset(cap, 0, PCM_DESC_NUM * 8 * 80);
 
 	for (i = 0; i < 4; i++)
 		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + i, oem_slots[i]);
 
-	memset(p->rx_ring, 0, PCM_DESC_NUM * sizeof(struct pcm_desc));
-	for (ch = 0; ch < 8; ch++)
-		p->rx_ring[0].buf_addr[ch] =
-			(u32)((cap_dma + ch * 80) & PCM_DMA_ADDR_MASK);
-	p->rx_ring[0].status = PCM_DESC_OWN |
-		FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
-		FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
+	/*
+	 * Arm ALL descriptors valid (OWN + 8ch + own buffer slab). After a
+	 * previous capture the DMA engine's internal descriptor pointer is
+	 * left advanced; re-writing RING_BASE does not always rewind it, so if
+	 * only desc0 were valid the engine could resume on a non-OWN descriptor
+	 * and stall forever (-ETIMEDOUT on every call after the first). With
+	 * every descriptor valid the engine completes wherever it resumes and
+	 * we read back whichever one it filled.
+	 */
+	for (d = 0; d < PCM_DESC_NUM; d++) {
+		memset(&p->rx_ring[d], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < 8; ch++)
+			p->rx_ring[d].buf_addr[ch] =
+				(u32)((cap_dma + (d * 8 + ch) * 80) &
+				      PCM_DMA_ADDR_MASK);
+		p->rx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
+	}
 
 	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
 	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
@@ -505,12 +519,20 @@ int pcm_en751221_capture_allch(u8 *out)
 
 	for (i = 0; i < 500; i++) {
 		dma_rmb();
-		if (!(READ_ONCE(p->rx_ring[0].status) & PCM_DESC_OWN))
+		for (d = 0; d < PCM_DESC_NUM; d++) {
+			if (!(READ_ONCE(p->rx_ring[d].status) & PCM_DESC_OWN)) {
+				done = d;
+				break;
+			}
+		}
+		if (done >= 0)
 			break;
 		usleep_range(1000, 2000);
 	}
 	dma_rmb();
-	memcpy(out, cap, 8 * 80);
+	if (done < 0)
+		done = 0;
+	memcpy(out, (u8 *)cap + done * 8 * 80, 8 * 80);
 	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
 	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~PCM_DMA_RX_EN);
 	return (i < 500) ? 0 : -ETIMEDOUT;
