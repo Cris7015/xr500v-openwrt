@@ -470,6 +470,59 @@ static int slic_audio_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(slic_audio);
 
+extern int pcm_en751221_capture_allch(u8 *out);
+
+/* Persistent line-up: do it once, then rx_scan captures without re-resetting. */
+static bool slic_audio_up;
+
+static int slic_audio_setup_show(struct seq_file *s, void *unused)
+{
+	int ret;
+	u8 tx = 0xff, st = 0xff, sig = 0xff;
+
+	mutex_lock(&sd.lock);
+	zsi_hw_init();
+	zsi_slic_reset();
+	writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+	slic_load_profiles();
+	ret = slic_audio_setup();
+	zsi_mpi_read(VP886_EC_1, 0x41, &tx, 1);
+	zsi_mpi_read(VP886_EC_1, 0x57, &st, 1);
+	zsi_mpi_read(VP886_EC_1, 0x4d, &sig, 1);
+	mutex_unlock(&sd.lock);
+	slic_audio_up = (ret == 0);
+	seq_printf(s, "audio setup ret=%d  txslot=0x%02x state=0x%02x hook=%d\n",
+		   ret, tx, st, sig & 1);
+	seq_puts(s, slic_audio_up ? "line UP -- now: cat rx_scan (with noise)\n"
+				  : "setup FAILED\n");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_audio_setup);
+
+/* Scan all 8 RX channels -- show which one carries the SLIC mic audio. */
+static int rx_scan_show(struct seq_file *s, void *unused)
+{
+	static u8 buf[8 * 80];
+	int ret, ch, i, mn, mx;
+
+	ret = pcm_en751221_capture_allch(buf);
+	seq_printf(s, "capture_allch ret=%d\n", ret);
+	for (ch = 0; ch < 8; ch++) {
+		u8 *b = buf + ch * 80;
+
+		mn = 255; mx = 0;
+		for (i = 0; i < 80; i++) {
+			if (b[i] < mn) mn = b[i];
+			if (b[i] > mx) mx = b[i];
+		}
+		seq_printf(s, " ch%d slot? min=0x%02x max=0x%02x spread=%3d %s  %8ph\n",
+			   ch, mn, mx, mx - mn,
+			   (mx - mn > 4) ? "<== SIGNAL" : "         ", b);
+	}
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(rx_scan);
+
 static int slic_init_show(struct seq_file *s, void *unused)
 {
 	u8 id[2] = { 0xee, 0xee };
@@ -535,6 +588,8 @@ static int __init econet_slic_init(void)
 	debugfs_create_file("slic_detect", 0444, sd.dbg, NULL, &slic_detect_fops);
 	debugfs_create_file("slic_init", 0444, sd.dbg, NULL, &slic_init_fops);
 	debugfs_create_file("audio_capture", 0444, sd.dbg, NULL, &slic_audio_fops);
+	debugfs_create_file("audio_setup", 0444, sd.dbg, NULL, &slic_audio_setup_fops);
+	debugfs_create_file("rx_scan", 0444, sd.dbg, NULL, &rx_scan_fops);
 	debugfs_create_u8("cs", 0644, sd.dbg, &sd.cs);
 	debugfs_create_x32("pcm_intface", 0644, sd.dbg, &pcm_intface_ctrl);
 	debugfs_create_x32("zsi_cfg", 0644, sd.dbg, &zsi_cfg_val);

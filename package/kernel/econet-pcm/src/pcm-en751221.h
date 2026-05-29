@@ -192,4 +192,7 @@ int pcm_en751221_zsi_clock_run(u32 intface, const u32 *tx_slots,
 /* Capture one ~10ms voice frame (slot 6 = SLIC mic) into out (max 80 bytes). */
 int pcm_en751221_capture_rx(u8 *out, int nbytes);
 
+/* Diagnostic: capture all 8 RX channels (OEM slot map) into out[8*80]. */
+int pcm_en751221_capture_allch(u8 *out);
+
 #endif /* _PCM_EN751221_H */

@@ -460,6 +460,63 @@ int pcm_en751221_capture_rx(u8 *out, int nbytes)
 }
 EXPORT_SYMBOL_GPL(pcm_en751221_capture_rx);
 
+/*
+ * Diagnostic: capture ALL 8 RX channels at once (chValid 0xff, OEM timeslot
+ * map) into out[8*80]. Lets us scan which channel/slot the SLIC mic audio
+ * actually lands on. Does NOT touch the SLIC -- assumes line already set up.
+ */
+int pcm_en751221_capture_allch(u8 *out)
+{
+	struct pcm_dev *p = g_pcm;
+	static const u32 oem_slots[4] = {
+		0x10301020, 0x10501040, 0x10701060, 0x10901080,
+	};
+	static void *cap;
+	static dma_addr_t cap_dma;
+	int i, ch;
+
+	if (!p)
+		return -ENODEV;
+	if (!cap) {
+		cap = dmam_alloc_coherent(p->dev, 8 * 80 + 64, &cap_dma, GFP_KERNEL);
+		if (!cap)
+			return -ENOMEM;
+	}
+	memset(cap, 0, 8 * 80);
+
+	for (i = 0; i < 4; i++)
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + i, oem_slots[i]);
+
+	memset(p->rx_ring, 0, PCM_DESC_NUM * sizeof(struct pcm_desc));
+	for (ch = 0; ch < 8; ch++)
+		p->rx_ring[0].buf_addr[ch] =
+			(u32)((cap_dma + ch * 80) & PCM_DMA_ADDR_MASK);
+	p->rx_ring[0].status = PCM_DESC_OWN |
+		FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+		FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
+
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
+	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0xff) | PCM_DMA_RX_EN);
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+
+	for (i = 0; i < 500; i++) {
+		dma_rmb();
+		if (!(READ_ONCE(p->rx_ring[0].status) & PCM_DESC_OWN))
+			break;
+		usleep_range(1000, 2000);
+	}
+	dma_rmb();
+	memcpy(out, cap, 8 * 80);
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~PCM_DMA_RX_EN);
+	return (i < 500) ? 0 : -ETIMEDOUT;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_capture_allch);
+
 static irqreturn_t pcm_irq(int irq, void *data)
 {
 	struct pcm_dev *p = data;
