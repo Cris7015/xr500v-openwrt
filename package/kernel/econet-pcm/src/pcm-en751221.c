@@ -397,6 +397,67 @@ int pcm_en751221_zsi_clock_run(u32 intface, const u32 *tx_slots,
 }
 EXPORT_SYMBOL_GPL(pcm_en751221_zsi_clock_run);
 
+/*
+ * Capture one ~10ms voice frame from the SLIC over the PCM bus. The SLIC puts
+ * its mic audio on timeslot 6 (SLIC TXSLOT=6); the SoC PCM RX DMA grabs it.
+ * RX timeslot cfg3 selects slot 6 (0x00380030), descriptor chValid=0x40 (ch6),
+ * sampleSize=80 (80 samples = 10ms @ 8kHz u-law). Copies the bytes to `out`.
+ * Used by the SLIC driver to prove audio capture works.
+ */
+int pcm_en751221_capture_rx(u8 *out, int nbytes)
+{
+	struct pcm_dev *p = g_pcm;
+	static void *cap;
+	static dma_addr_t cap_dma;
+	int i;
+
+	if (!p)
+		return -ENODEV;
+	if (nbytes > 80)
+		nbytes = 80;
+
+	if (!cap) {
+		cap = dmam_alloc_coherent(p->dev, 256, &cap_dma, GFP_KERNEL);
+		if (!cap)
+			return -ENOMEM;
+	}
+	memset(cap, 0, 256);
+
+	/* RX timeslots: defaults + slot 6 in CFG3 */
+	pcm_wr(p, PCM_RX_TIME_SLOT_CFG0, 0x00080000);
+	pcm_wr(p, PCM_RX_TIME_SLOT_CFG1, 0x00180010);
+	pcm_wr(p, PCM_RX_TIME_SLOT_CFG2, 0x00280020);
+	pcm_wr(p, PCM_RX_TIME_SLOT_CFG3, 0x00380030);
+
+	/* arm RX descriptor 0: own | chValid ch6 (0x40) | 80 samples */
+	memset(p->rx_ring, 0, PCM_DESC_NUM * sizeof(struct pcm_desc));
+	p->rx_ring[0].buf_addr[0] = (u32)(cap_dma & PCM_DMA_ADDR_MASK);
+	p->rx_ring[0].status = PCM_DESC_OWN |
+		FIELD_PREP(PCM_DESC_CH_VALID, 0x40) |
+		FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
+
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
+	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0x40) | PCM_DMA_RX_EN);
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+
+	for (i = 0; i < 500; i++) {
+		dma_rmb();
+		if (!(READ_ONCE(p->rx_ring[0].status) & PCM_DESC_OWN))
+			break;
+		usleep_range(1000, 2000);
+	}
+	dma_rmb();
+	memcpy(out, cap, nbytes);
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~PCM_DMA_RX_EN);
+	return (i < 500) ? 0 : -ETIMEDOUT;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_capture_rx);
+
 static irqreturn_t pcm_irq(int irq, void *data)
 {
 	struct pcm_dev *p = data;

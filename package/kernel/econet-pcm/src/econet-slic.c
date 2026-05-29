@@ -389,6 +389,87 @@ out:
 	return ret;
 }
 
+extern int pcm_en751221_capture_rx(u8 *out, int nbytes);
+
+/* SLIC line up for voice: switcher HP + feed + slots (TX6/RX0) + u-law codec + active. */
+static int slic_audio_setup(void)
+{
+	u8 v;
+	int ret;
+
+	/* switcher HP (simple direct write -- the robust CALCTRL sequence breaks it) */
+	{ static const u8 sw[] = { 0xe6, 0x6f }; ret = slic_write_mpi("sw-hp", sw, sizeof(sw)); if (ret) return ret; }
+	/* feed active (no codec yet) */
+	ret = zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	if (ret) return ret;
+	{ static const u8 st[] = { 0x56, 0x03 }; slic_write_mpi("active", st, sizeof(st)); }
+
+	/* TX slot 6 (mic -> bus), RX slot 0 (earpiece <- bus) */
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ static const u8 tx[] = { 0x40, 0x06 }; slic_write_mpi("txslot", tx, sizeof(tx)); }
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ static const u8 rx[] = { 0x42, 0x00 }; slic_write_mpi("rxslot", rx, sizeof(rx)); }
+
+	/* G.711 u-law: OPFUNC = (old & ~0xC0) | 0x40 */
+	ret = zsi_mpi_read(VP886_EC_1, 0x61, &v, 1);
+	if (ret) return ret;
+	v = (v & ~0xc0) | 0x40;
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ u8 of[2] = { 0x60, v }; slic_write_mpi("opfunc", of, 2); }
+
+	/* OPCOND: clear CUT_TX|CUT_RX|TSA_LOOPBACK */
+	ret = zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+	if (ret) return ret;
+	v &= ~0xc4;
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ u8 oc[2] = { 0x70, v }; slic_write_mpi("opcond", oc, 2); }
+
+	/* STATE = active + codec (0x23) */
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ static const u8 st[] = { 0x56, 0x23 }; slic_write_mpi("active+codec", st, sizeof(st)); }
+	return 0;
+}
+
+static int slic_audio_show(struct seq_file *s, void *unused)
+{
+	u8 buf[80];
+	u8 txslot = 0xff, opfunc = 0xff, st = 0xff;
+	int ret, i, mn = 255, mx = 0, nonzero = 0;
+
+	mutex_lock(&sd.lock);
+	zsi_hw_init();
+	zsi_slic_reset();
+	writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+	/* load profiles, then audio line-up */
+	slic_load_profiles();
+	ret = slic_audio_setup();
+	zsi_mpi_read(VP886_EC_1, 0x41, &txslot, 1);
+	zsi_mpi_read(VP886_EC_1, 0x61, &opfunc, 1);
+	zsi_mpi_read(VP886_EC_1, 0x57, &st, 1);
+	mutex_unlock(&sd.lock);
+
+	memset(buf, 0, sizeof(buf));
+	if (!ret)
+		ret = pcm_en751221_capture_rx(buf, sizeof(buf));
+
+	for (i = 0; i < (int)sizeof(buf); i++) {
+		if (buf[i] < mn) mn = buf[i];
+		if (buf[i] > mx) mx = buf[i];
+		if (buf[i] != buf[0]) nonzero++;
+	}
+	seq_printf(s, "slic: txslot=0x%02x opfunc=0x%02x state=0x%02x  capture ret=%d\n",
+		   txslot, opfunc, st, ret);
+	seq_printf(s, "rx samples min=0x%02x max=0x%02x spread=%d varying=%d/80\n",
+		   mn, mx, mx - mn, nonzero);
+	seq_printf(s, "first16: %16ph\n", buf);
+	if (mx - mn > 4)
+		seq_puts(s, "AUDIO present (samples vary -- mic signal captured)\n");
+	else
+		seq_puts(s, "no audio variation (silence / phone on-hook / wrong slot)\n");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_audio);
+
 static int slic_init_show(struct seq_file *s, void *unused)
 {
 	u8 id[2] = { 0xee, 0xee };
@@ -453,6 +534,7 @@ static int __init econet_slic_init(void)
 	sd.dbg = debugfs_create_dir(DRV_NAME, NULL);
 	debugfs_create_file("slic_detect", 0444, sd.dbg, NULL, &slic_detect_fops);
 	debugfs_create_file("slic_init", 0444, sd.dbg, NULL, &slic_init_fops);
+	debugfs_create_file("audio_capture", 0444, sd.dbg, NULL, &slic_audio_fops);
 	debugfs_create_u8("cs", 0644, sd.dbg, &sd.cs);
 	debugfs_create_x32("pcm_intface", 0644, sd.dbg, &pcm_intface_ctrl);
 	debugfs_create_x32("zsi_cfg", 0644, sd.dbg, &zsi_cfg_val);
