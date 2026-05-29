@@ -391,7 +391,17 @@ out:
 
 extern int pcm_en751221_capture_rx(u8 *out, int nbytes);
 
-/* SLIC line up for voice: switcher HP + feed + slots (TX6/RX0) + u-law codec + active. */
+/*
+ * SLIC line up for voice. Values are the OEM ground truth (le9641.c) + what
+ * Codex proved live to make the earpiece audible:
+ *   - switcher HP (0x6f), feed active
+ *   - TX slot 4, RX slot 4: OEM uses timeSlotIdx 2 << 1 = 4 for 16-bit LINEAR
+ *     (16-bit = 2 8-bit slots). With slot 6 the PCM TX never reaches the bus
+ *     (TSA loopback all-zero); slot 4 lands the audio on DMA ch0.
+ *   - OPFUNC codec = LINEAR (0x80), NOT u-law -- OEM logs "CODEC_LINEAR".
+ *   - GR (receive/earpiece gain, MPI 0x82) = 0x4000 unity; without it the
+ *     earpiece RX path is muted.
+ */
 static int slic_audio_setup(void)
 {
 	u8 v;
@@ -404,18 +414,22 @@ static int slic_audio_setup(void)
 	if (ret) return ret;
 	{ static const u8 st[] = { 0x56, 0x03 }; slic_write_mpi("active", st, sizeof(st)); }
 
-	/* TX slot 6 (mic -> bus), RX slot 0 (earpiece <- bus) */
+	/* TX slot 4 (mic -> bus, DMA ch0), RX slot 4 (earpiece <- bus) */
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
-	{ static const u8 tx[] = { 0x40, 0x06 }; slic_write_mpi("txslot", tx, sizeof(tx)); }
+	{ static const u8 tx[] = { 0x40, 0x04 }; slic_write_mpi("txslot", tx, sizeof(tx)); }
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
-	{ static const u8 rx[] = { 0x42, 0x00 }; slic_write_mpi("rxslot", rx, sizeof(rx)); }
+	{ static const u8 rx[] = { 0x42, 0x04 }; slic_write_mpi("rxslot", rx, sizeof(rx)); }
 
-	/* G.711 u-law: OPFUNC = (old & ~0xC0) | 0x40 */
+	/* 16-bit LINEAR codec: OPFUNC = (old & ~0xC0) | 0x80 */
 	ret = zsi_mpi_read(VP886_EC_1, 0x61, &v, 1);
 	if (ret) return ret;
-	v = (v & ~0xc0) | 0x40;
+	v = (v & ~0xc0) | 0x80;
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
 	{ u8 of[2] = { 0x60, v }; slic_write_mpi("opfunc", of, 2); }
+
+	/* GR receive (earpiece) gain = 0x4000 unity (MPI write opcode 0x82) */
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ static const u8 gr[] = { 0x82, 0x40, 0x00 }; slic_write_mpi("gr", gr, sizeof(gr)); }
 
 	/* OPCOND: clear CUT_TX|CUT_RX|TSA_LOOPBACK */
 	ret = zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
@@ -526,13 +540,14 @@ static int rx_scan_show(struct seq_file *s, void *unused)
 DEFINE_SHOW_ATTRIBUTE(rx_scan);
 
 /*
- * Play a melody out the earpiece. Line the SLIC up if needed, then point the
- * earpiece RXSLOT at bus slot 6 (symmetric to the mic TXSLOT=6 -> DMA ch2) and
- * broadcast the tune to all 8 TX slots so it reaches the earpiece regardless.
+ * Play the melody out the earpiece. Line up the SLIC if needed (audio_setup
+ * now bakes the working slot-4 / linear / GR values) then loop the tune ~27s.
+ * Does NOT re-poke TXSLOT/RXSLOT/OPFUNC after setup, so live poke experiments
+ * survive a play.
  */
 static int slic_play_show(struct seq_file *s, void *unused)
 {
-	int ret;
+	int i, ret = 0;
 
 	mutex_lock(&sd.lock);
 	if (!slic_audio_up) {
@@ -542,13 +557,15 @@ static int slic_play_show(struct seq_file *s, void *unused)
 		slic_load_profiles();
 		slic_audio_up = (slic_audio_setup() == 0);
 	}
-	/* earpiece reads bus slot 6 */
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
-	{ static const u8 rx[] = { 0x42, 0x06 }; slic_write_mpi("rxslot6", rx, sizeof(rx)); }
 	mutex_unlock(&sd.lock);
 
-	ret = pcm_en751221_play_melody();
-	seq_printf(s, "play_melody ret=%d (escuchá el auricular)\n", ret);
+	for (i = 0; i < 6; i++) {
+		ret = pcm_en751221_play_melody();
+		if (ret)
+			break;
+	}
+	seq_printf(s, "play_melody loops=%d ret=%d (escuchá el auricular)\n",
+		   i, ret);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(slic_play);
