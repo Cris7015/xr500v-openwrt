@@ -621,8 +621,8 @@ int pcm_en751221_play_melody(void)
 	static const u32 oem_slots[4] = {
 		0x10301020, 0x10501040, 0x10701060, 0x10901080,
 	};
-	static void *txb;
-	static dma_addr_t txb_dma;
+	static void *txb, *rxb;
+	static dma_addr_t txb_dma, rxb_dma;
 	u8 *mel;
 	int mel_len = 0, pos = 0, d, ch, guard = 0;
 
@@ -631,17 +631,21 @@ int pcm_en751221_play_melody(void)
 	if (!txb) {
 		txb = dmam_alloc_coherent(p->dev, PCM_DESC_NUM * 80 + 64,
 					  &txb_dma, GFP_KERNEL);
-		if (!txb)
+		rxb = dmam_alloc_coherent(p->dev, 8 * 80 + 64, &rxb_dma,
+					  GFP_KERNEL);
+		if (!txb || !rxb)
 			return -ENOMEM;
 	}
 	mel = pcm_build_melody(&mel_len);
 	if (!mel)
 		return -ENOMEM;
 
-	for (d = 0; d < 4; d++)
+	for (d = 0; d < 4; d++) {
 		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+	}
 
-	/* prime the ring with the first PCM_DESC_NUM frames */
+	/* prime the TX ring with the first PCM_DESC_NUM frames */
 	for (d = 0; d < PCM_DESC_NUM && pos < mel_len; d++) {
 		memset(&p->tx_ring[d], 0, sizeof(struct pcm_desc));
 		for (ch = 0; ch < 8; ch++)
@@ -654,16 +658,36 @@ int pcm_en751221_play_melody(void)
 			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
 	}
 
+	/*
+	 * The full-duplex frame engine only advances the TX descriptors when
+	 * RX is also enabled (TX-only leaves OWN bits set forever -- ISR shows
+	 * frame boundaries but no TX descriptor updates). Arm a throwaway RX
+	 * ring into a scratch buffer so the engine clocks, mirroring the
+	 * known-good zsi_clock_run dual-direction setup.
+	 */
+	for (d = 0; d < PCM_DESC_NUM; d++) {
+		memset(&p->rx_ring[d], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < 8; ch++)
+			p->rx_ring[d].buf_addr[ch] =
+				(u32)((rxb_dma + ch * 80) & PCM_DMA_ADDR_MASK);
+		p->rx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
+	}
+
 	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)(p->tx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
 	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
 	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
 	dma_wmb();
 	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
-	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0xff) | PCM_DMA_TX_EN);
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0xff) |
+	       PCM_DMA_TX_EN | PCM_DMA_RX_EN);
 	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
 
 	/* refill descriptors as the engine releases them, until the tune ends */
-	while (pos < mel_len && guard < 200000) {
+	while (pos < mel_len && guard < 2000) {	/* ~6s no-progress bail-out */
 		int progressed = 0;
 
 		for (d = 0; d < PCM_DESC_NUM && pos < mel_len; d++) {
@@ -679,6 +703,15 @@ int pcm_en751221_play_melody(void)
 			pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
 			progressed = 1;
 		}
+		/* keep the RX side clocking so TX keeps advancing */
+		for (d = 0; d < PCM_DESC_NUM; d++) {
+			if (READ_ONCE(p->rx_ring[d].status) & PCM_DESC_OWN)
+				continue;
+			p->rx_ring[d].status = PCM_DESC_OWN |
+				FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+				FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
+		}
+		pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
 		if (!progressed) {
 			usleep_range(2000, 4000);
 			guard++;
