@@ -860,42 +860,56 @@ static int pcm_voice_thread(void *data)
 {
 	struct pcm_dev *p = g_pcm;
 	u8 frame[VOICE_FB];
-	int d;
+	int rx_head = 0, tx_head = 0;
 
 	while (!kthread_should_stop()) {
 		int progressed = 0;
+		int nxt;
 
-		for (d = 0; d < PCM_DESC_NUM; d++) {
+		/*
+		 * RX in strict completion order, with a 1-descriptor margin: only
+		 * read rx_head once BOTH rx_head and rx_head+1 have completed (OWN
+		 * cleared). That guarantees the DMA has moved >=2 descriptors past
+		 * rx_head, so rx_head's buffer write is fully settled (no
+		 * read-during-write glitch). Reading in order avoids the scrambling
+		 * the all-scan version produced.
+		 */
+		for (;;) {
+			nxt = (rx_head + 1) % PCM_DESC_NUM;
+			if ((READ_ONCE(p->rx_ring[rx_head].status) & PCM_DESC_OWN) ||
+			    (READ_ONCE(p->rx_ring[nxt].status) & PCM_DESC_OWN))
+				break;
 			dma_rmb();
-			/* RX captured: push mic to capture FIFO */
-			if (!(READ_ONCE(p->rx_ring[d].status) & PCM_DESC_OWN)) {
-				dma_rmb();
-				if (kfifo_avail(&vs.cap) >= VOICE_FB)
-					kfifo_in(&vs.cap,
-						 (u8 *)vs.rxb + (d * VOICE_CHANS + VOICE_RX_CH) * VOICE_FB,
-						 VOICE_FB);
-				dma_wmb();
-				p->rx_ring[d].status = PCM_DESC_OWN |
-					FIELD_PREP(PCM_DESC_CH_VALID, VOICE_RX_CH_VALID) |
-					FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
-				progressed = 1;
-			}
-			/* TX played: pull a frame from playback FIFO (else silence) */
-			if (!(READ_ONCE(p->tx_ring[d].status) & PCM_DESC_OWN)) {
-				int n = 0;
-
-				if (kfifo_len(&vs.play) >= VOICE_FB)
-					n = kfifo_out(&vs.play, frame, VOICE_FB);
-				if (n < VOICE_FB)
-					memset(frame + n, 0, VOICE_FB - n);
-				memcpy((u8 *)vs.txb + d * VOICE_FB, frame, VOICE_FB);
-				dma_wmb();
-				p->tx_ring[d].status = PCM_DESC_OWN |
-					FIELD_PREP(PCM_DESC_CH_VALID, VOICE_TX_CH_VALID) |
-					FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
-				progressed = 1;
-			}
+			if (kfifo_avail(&vs.cap) >= VOICE_FB)
+				kfifo_in(&vs.cap,
+					 (u8 *)vs.rxb + (rx_head * VOICE_CHANS + VOICE_RX_CH) * VOICE_FB,
+					 VOICE_FB);
+			dma_wmb();
+			p->rx_ring[rx_head].status = PCM_DESC_OWN |
+				FIELD_PREP(PCM_DESC_CH_VALID, VOICE_RX_CH_VALID) |
+				FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+			rx_head = nxt;
+			progressed = 1;
 		}
+
+		/* TX in strict completion order (write buffer before arming, so no
+		 * read-during-write concern on the TX side). */
+		while (!(READ_ONCE(p->tx_ring[tx_head].status) & PCM_DESC_OWN)) {
+			int n = 0;
+
+			if (kfifo_len(&vs.play) >= VOICE_FB)
+				n = kfifo_out(&vs.play, frame, VOICE_FB);
+			if (n < VOICE_FB)
+				memset(frame + n, 0, VOICE_FB - n);
+			memcpy((u8 *)vs.txb + tx_head * VOICE_FB, frame, VOICE_FB);
+			dma_wmb();
+			p->tx_ring[tx_head].status = PCM_DESC_OWN |
+				FIELD_PREP(PCM_DESC_CH_VALID, VOICE_TX_CH_VALID) |
+				FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+			tx_head = (tx_head + 1) % PCM_DESC_NUM;
+			progressed = 1;
+		}
+
 		pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
 		pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
 		if (progressed) {
