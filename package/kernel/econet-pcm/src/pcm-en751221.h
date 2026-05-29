@@ -198,6 +198,9 @@ int pcm_en751221_capture_allch(u8 *out);
 /* Play a mu-law melody out the TX path (broadcast to all 8 slots). Blocks. */
 int pcm_en751221_play_melody(void);
 
+/* Real-time full-duplex sidetone loopback (mic -> earpiece) for `seconds`. */
+int pcm_en751221_voice_loopback(int seconds);
+
 /* Play a sustained 1 kHz signed 16-bit big-endian linear tone. Blocks. */
 int pcm_en751221_play_tone_1khz(void);
 

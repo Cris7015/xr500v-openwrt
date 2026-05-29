@@ -506,6 +506,7 @@ DEFINE_SHOW_ATTRIBUTE(slic_audio);
 extern int pcm_en751221_capture_allch(u8 *out);
 extern int pcm_en751221_play_melody(void);
 extern int pcm_en751221_play_tone_1khz(void);
+extern int pcm_en751221_voice_loopback(int seconds);
 extern int pcm_en751221_loopback_capture(u8 *out, u32 intface);
 extern int pcm_en751221_loopback_tone_capture(u8 *out, int nbytes);
 
@@ -903,6 +904,31 @@ static int slic_tone_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(slic_tone);
 
+/*
+ * Real-time full-duplex sidetone: line up for voice, then loop the mic back to
+ * the earpiece for ~15s (you hear yourself, ~150ms delayed). Proves continuous
+ * full-duplex PCM streaming -- the foundation for the voice char device.
+ */
+static int slic_voice_loopback_show(struct seq_file *s, void *unused)
+{
+	int ret;
+
+	mutex_lock(&sd.lock);
+	if (!slic_audio_up) {
+		zsi_hw_init();
+		zsi_slic_reset();
+		writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+		slic_load_profiles();
+		slic_audio_up = (slic_audio_setup() == 0);
+	}
+	mutex_unlock(&sd.lock);
+
+	ret = pcm_en751221_voice_loopback(15);
+	seq_printf(s, "voice_loopback ret=%d (hablá al mic, te escuchás en el auricular ~15s)\n", ret);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_voice_loopback);
+
 static int __init econet_slic_init(void)
 {
 	sd.chip_scu = ioremap(CHIP_SCU_PHYS, CHIP_SCU_SIZE);
@@ -928,6 +954,7 @@ static int __init econet_slic_init(void)
 	debugfs_create_file("tone_loopback", 0444, sd.dbg, NULL, &slic_tone_loopback_fops);
 	debugfs_create_file("play_tone", 0444, sd.dbg, NULL, &slic_play_tone_fops);
 	debugfs_create_file("tone", 0444, sd.dbg, NULL, &slic_tone_fops);
+	debugfs_create_file("voice_loopback", 0444, sd.dbg, NULL, &slic_voice_loopback_fops);
 	debugfs_create_u8("cs", 0644, sd.dbg, &sd.cs);
 	debugfs_create_x32("pcm_intface", 0644, sd.dbg, &pcm_intface_ctrl);
 	debugfs_create_x32("zsi_cfg", 0644, sd.dbg, &zsi_cfg_val);

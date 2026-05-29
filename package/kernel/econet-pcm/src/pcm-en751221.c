@@ -719,6 +719,115 @@ int pcm_en751221_play_melody(void)
 }
 EXPORT_SYMBOL_GPL(pcm_en751221_play_melody);
 
+/*
+ * Real-time full-duplex sidetone loopback: continuously capture the mic (RX
+ * ch0 = slot 4) and feed it back into the TX ring so it plays out the earpiece
+ * (~1 ring / 150 ms delayed). Proves continuous full-duplex streaming and
+ * exercises the descriptor-recycle logic the char device will reuse. Runs for
+ * `seconds`, then stops. Blocks.
+ */
+int pcm_en751221_voice_loopback(int seconds)
+{
+	struct pcm_dev *p = g_pcm;
+	static const u32 oem_slots[4] = {
+		0x10301020, 0x10501040, 0x10701060, 0x10901080,
+	};
+	static void *txb, *rxb;
+	static dma_addr_t txb_dma, rxb_dma;
+	const u32 ch_valid = 0x0f;
+	const int FB = PCM_BYTES_PER_FRAME;	/* 160 bytes/frame/channel */
+	unsigned long end;
+	int d, ch;
+
+	if (!p)
+		return -ENODEV;
+	if (!txb) {
+		txb = dmam_alloc_coherent(p->dev, PCM_DESC_NUM * FB + 64,
+					  &txb_dma, GFP_KERNEL);
+		rxb = dmam_alloc_coherent(p->dev, PCM_DESC_NUM * 4 * FB + 64,
+					  &rxb_dma, GFP_KERNEL);
+		if (!txb || !rxb)
+			return -ENOMEM;
+	}
+	memset(txb, 0, PCM_DESC_NUM * FB);
+	memset(rxb, 0, PCM_DESC_NUM * 4 * FB);
+
+	for (d = 0; d < 4; d++) {
+		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+	}
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~(PCM_DMA_TX_EN | PCM_DMA_RX_EN));
+	pcm_wr(p, PCM_ISR, pcm_rd(p, PCM_ISR));
+
+	for (d = 0; d < PCM_DESC_NUM; d++) {
+		memset(&p->tx_ring[d], 0, sizeof(struct pcm_desc));
+		memset(&p->rx_ring[d], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < 4; ch++) {
+			/* TX: all channels share this descriptor's TX frame */
+			p->tx_ring[d].buf_addr[ch] =
+				(u32)((txb_dma + d * FB) & PCM_DMA_ADDR_MASK);
+			/* RX: each channel its own slab (ch0 = mic) */
+			p->rx_ring[d].buf_addr[ch] =
+				(u32)((rxb_dma + (d * 4 + ch) * FB) &
+				      PCM_DMA_ADDR_MASK);
+		}
+		p->tx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, ch_valid) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+		p->rx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, ch_valid) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+	}
+
+	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)(p->tx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
+	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, ch_valid) |
+	       PCM_DMA_TX_EN | PCM_DMA_RX_EN);
+	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+
+	end = jiffies + msecs_to_jiffies(seconds * 1000);
+	while (time_before(jiffies, end)) {
+		int progressed = 0;
+
+		for (d = 0; d < PCM_DESC_NUM; d++) {
+			dma_rmb();
+			if (!(READ_ONCE(p->rx_ring[d].status) & PCM_DESC_OWN)) {
+				/* mic captured (ch0) -> this desc's TX frame */
+				memcpy((u8 *)txb + d * FB,
+				       (u8 *)rxb + (d * 4 + 0) * FB, FB);
+				dma_wmb();
+				p->rx_ring[d].status = PCM_DESC_OWN |
+					FIELD_PREP(PCM_DESC_CH_VALID, ch_valid) |
+					FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+				progressed = 1;
+			}
+			if (!(READ_ONCE(p->tx_ring[d].status) & PCM_DESC_OWN)) {
+				dma_wmb();
+				p->tx_ring[d].status = PCM_DESC_OWN |
+					FIELD_PREP(PCM_DESC_CH_VALID, ch_valid) |
+					FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+				progressed = 1;
+			}
+		}
+		pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+		pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+		if (!progressed)
+			usleep_range(1000, 2000);
+		else
+			usleep_range(500, 1000);
+	}
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~(PCM_DMA_TX_EN | PCM_DMA_RX_EN));
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_voice_loopback);
+
 static s16 pcm_tone_1khz_sample(int n)
 {
 	switch (n & 7) {
