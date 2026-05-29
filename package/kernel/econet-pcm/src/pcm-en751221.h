@@ -198,7 +198,8 @@ int pcm_en751221_capture_allch(u8 *out);
 /* Play a mu-law melody out the TX path (broadcast to all 8 slots). Blocks. */
 int pcm_en751221_play_melody(void);
 
-/* Loopback: TX a ramp + capture RX ch2 (needs SLIC TSA loopback armed). */
-int pcm_en751221_loopback_capture(u8 *out);
+/* Loopback: TX a ramp + capture RX ch2. intface picks PCM-internal loopback
+ * (bit 25 set) vs external/SLIC loopback (bit 25 clear). */
+int pcm_en751221_loopback_capture(u8 *out, u32 intface);
 
 #endif /* _PCM_EN751221_H */

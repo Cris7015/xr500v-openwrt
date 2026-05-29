@@ -732,7 +732,7 @@ EXPORT_SYMBOL_GPL(pcm_en751221_play_melody);
  * proves the SoC TX -> bus -> SoC RX digital path (DMA + slot map) works end
  * to end -- independent of the analog earpiece. Returns ch2 (80 bytes).
  */
-int pcm_en751221_loopback_capture(u8 *out)
+int pcm_en751221_loopback_capture(u8 *out, u32 intface)
 {
 	struct pcm_dev *p = g_pcm;
 	static const u32 oem_slots[4] = {
@@ -780,7 +780,7 @@ int pcm_en751221_loopback_capture(u8 *out)
 	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)(p->tx_dma & PCM_DMA_ADDR_MASK));
 	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
 	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
-	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
+	pcm_wr(p, PCM_INTFACE_CTRL, intface);
 	dma_wmb();
 	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
 	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0xff) |

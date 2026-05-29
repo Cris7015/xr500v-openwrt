@@ -472,7 +472,7 @@ DEFINE_SHOW_ATTRIBUTE(slic_audio);
 
 extern int pcm_en751221_capture_allch(u8 *out);
 extern int pcm_en751221_play_melody(void);
-extern int pcm_en751221_loopback_capture(u8 *out);
+extern int pcm_en751221_loopback_capture(u8 *out, u32 intface);
 
 /* Persistent line-up: do it once, then rx_scan captures without re-resetting. */
 static bool slic_audio_up;
@@ -559,11 +559,31 @@ DEFINE_SHOW_ATTRIBUTE(slic_play);
  * ch2. A ramp coming back proves the TX digital path/slot map works and the
  * silence is purely the analog earpiece.
  */
+static int count_ramp(const u8 *b)
+{
+	int i, n = 0;
+
+	for (i = 1; i < 80; i++)
+		if (b[i] == (u8)(b[i - 1] + 1))
+			n++;
+	return n;
+}
+
 static int slic_loopback_show(struct seq_file *s, void *unused)
 {
 	u8 out[80], v = 0xff;
-	int ret, i, ramp = 0;
+	int ret;
 
+	/* TEST 1: PCM-internal loopback (INTFACE bit25), SLIC out of the path.
+	 * Proves the TX DMA in this code path actually transmits a ramp. */
+	memset(out, 0, sizeof(out));
+	ret = pcm_en751221_loopback_capture(out, 0xf5071306 | (1u << 25));
+	seq_printf(s, "[internal] ret=%d ramp=%2d/79 %s\n", ret, count_ramp(out),
+		   (count_ramp(out) > 60) ? "TX DMA OK" : "TX DMA broken");
+	seq_printf(s, "  ch2: %32ph\n", out);
+
+	/* TEST 2: SLIC TSA loopback (INTFACE normal, OPCOND bit 0x04). Proves
+	 * the SoC TX -> bus -> SLIC -> bus -> SoC RX path. */
 	mutex_lock(&sd.lock);
 	if (!slic_audio_up) {
 		zsi_hw_init();
@@ -574,7 +594,6 @@ static int slic_loopback_show(struct seq_file *s, void *unused)
 	}
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
 	{ static const u8 rx[] = { 0x42, 0x06 }; slic_write_mpi("rxslot6", rx, sizeof(rx)); }
-	/* OPCOND |= TSA_LOOPBACK (0x04) */
 	zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
 	v |= 0x04;
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
@@ -582,7 +601,7 @@ static int slic_loopback_show(struct seq_file *s, void *unused)
 	mutex_unlock(&sd.lock);
 
 	memset(out, 0, sizeof(out));
-	ret = pcm_en751221_loopback_capture(out);
+	ret = pcm_en751221_loopback_capture(out, 0xf5071306);
 
 	mutex_lock(&sd.lock);
 	zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
@@ -591,13 +610,9 @@ static int slic_loopback_show(struct seq_file *s, void *unused)
 	{ u8 oc[2] = { 0x70, v }; slic_write_mpi("opcond-rst", oc, 2); }
 	mutex_unlock(&sd.lock);
 
-	/* count how many bytes step by +1 (ramp signature, phase-agnostic) */
-	for (i = 1; i < 80; i++)
-		if (out[i] == (u8)(out[i - 1] + 1))
-			ramp++;
-	seq_printf(s, "loopback ret=%d  ramp_steps=%d/79 %s\n", ret, ramp,
-		   (ramp > 60) ? "<== TX DIGITAL PATH OK" : "(no ramp -- TX path broken)");
-	seq_printf(s, "ch2 first32: %32ph\n", out);
+	seq_printf(s, "[slic-tsa] ret=%d ramp=%2d/79 %s\n", ret, count_ramp(out),
+		   (count_ramp(out) > 60) ? "SLIC BUS PATH OK" : "no ramp via SLIC");
+	seq_printf(s, "  ch2: %32ph\n", out);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(slic_loopback);
