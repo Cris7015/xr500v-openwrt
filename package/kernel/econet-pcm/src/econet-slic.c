@@ -571,7 +571,7 @@ static int count_ramp(const u8 *b)
 
 static int slic_loopback_show(struct seq_file *s, void *unused)
 {
-	u8 out[80], v = 0xff;
+	u8 out[160], v = 0xff;
 	int ret;
 
 	/* TEST 1: PCM-internal loopback (INTFACE bit25), SLIC out of the path.
