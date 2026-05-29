@@ -486,7 +486,9 @@ DEFINE_SHOW_ATTRIBUTE(slic_audio);
 
 extern int pcm_en751221_capture_allch(u8 *out);
 extern int pcm_en751221_play_melody(void);
+extern int pcm_en751221_play_tone_1khz(void);
 extern int pcm_en751221_loopback_capture(u8 *out, u32 intface);
+extern int pcm_en751221_loopback_tone_capture(u8 *out, int nbytes);
 
 /* Persistent line-up: do it once, then rx_scan captures without re-resetting. */
 static bool slic_audio_up;
@@ -634,6 +636,164 @@ static int slic_loopback_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(slic_loopback);
 
+static int slic_write_ec1_mpi(const u8 *b, int n)
+{
+	int ret;
+
+	ret = zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	if (ret)
+		return ret;
+	return slic_write_mpi("ec1-mpi", b, n);
+}
+
+static int slic_audio_slot4_prepare(u8 *opfunc_out, u8 *opcond_out,
+				    u8 *state_before, bool *state_written)
+{
+	u8 v, st;
+	int ret;
+
+	ret = slic_write_ec1_mpi((const u8[]){ 0x40, 0x04 }, 2);
+	if (ret)
+		return ret;
+	ret = slic_write_ec1_mpi((const u8[]){ 0x42, 0x04 }, 2);
+	if (ret)
+		return ret;
+
+	ret = zsi_mpi_read(VP886_EC_1, 0x61, &v, 1);
+	if (ret)
+		return ret;
+	v = (v & ~0xc0) | 0x80;
+	ret = slic_write_ec1_mpi((const u8[]){ 0x60, v }, 2);
+	if (ret)
+		return ret;
+	*opfunc_out = v;
+
+	ret = slic_write_ec1_mpi((const u8[]){ 0x82, 0x40, 0x00 }, 3);
+	if (ret)
+		return ret;
+
+	ret = zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+	if (ret)
+		return ret;
+	v &= ~0xc4;
+	ret = slic_write_ec1_mpi((const u8[]){ 0x70, v }, 2);
+	if (ret)
+		return ret;
+	*opcond_out = v;
+
+	ret = zsi_mpi_read(VP886_EC_1, 0x57, &st, 1);
+	if (ret)
+		return ret;
+	*state_before = st;
+	*state_written = false;
+	if (st != 0x23) {
+		ret = slic_write_ec1_mpi((const u8[]){ 0x56, 0x23 }, 2);
+		if (ret)
+			return ret;
+		*state_written = true;
+	}
+	slic_audio_up = true;
+	return 0;
+}
+
+static int slic_gr_check_show(struct seq_file *s, void *unused)
+{
+	u8 gr_before[2] = { 0xee, 0xee }, gr_after[2] = { 0xee, 0xee };
+	u8 opfunc = 0xee, tx = 0xee, rx = 0xee, opcond = 0xee, state = 0xee;
+	int ret1, ret2;
+
+	mutex_lock(&sd.lock);
+	zsi_hw_init();
+	writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+	ret1 = zsi_mpi_read(VP886_EC_1, 0x83, gr_before, 2);
+	zsi_mpi_read(VP886_EC_1, 0x61, &opfunc, 1);
+	ret2 = slic_write_ec1_mpi((const u8[]){ 0x82, 0x40, 0x00 }, 3);
+	if (!ret2)
+		ret2 = zsi_mpi_read(VP886_EC_1, 0x83, gr_after, 2);
+	zsi_mpi_read(VP886_EC_1, 0x41, &tx, 1);
+	zsi_mpi_read(VP886_EC_1, 0x43, &rx, 1);
+	zsi_mpi_read(VP886_EC_1, 0x71, &opcond, 1);
+	zsi_mpi_read(VP886_EC_1, 0x57, &state, 1);
+	mutex_unlock(&sd.lock);
+
+	seq_printf(s, "GR before ret=%d raw=%02x %02x be=0x%02x%02x le=0x%02x%02x\n",
+		   ret1, gr_before[0], gr_before[1], gr_before[0], gr_before[1],
+		   gr_before[1], gr_before[0]);
+	seq_printf(s, "GR write sequence: EC 4a 01 ; MPI 82 40 00\n");
+	seq_printf(s, "GR after ret=%d raw=%02x %02x be=0x%02x%02x le=0x%02x%02x %s\n",
+		   ret2, gr_after[0], gr_after[1], gr_after[0], gr_after[1],
+		   gr_after[1], gr_after[0],
+		   (!ret2 && gr_after[0] == 0x40 && gr_after[1] == 0x00) ?
+		   "CONFIRMED_0x4000" : "NOT_CONFIRMED");
+	seq_printf(s, "OPFUNC raw=0x%02x %s  TXSLOT=0x%02x RXSLOT=0x%02x OPCOND=0x%02x STATE=0x%02x\n",
+		   opfunc, ((opfunc & 0xc0) == 0x80) ? "LINEAR" : "NOT_LINEAR",
+		   tx, rx, opcond, state);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_gr_check);
+
+static int slic_tone_loopback_show(struct seq_file *s, void *unused)
+{
+	static u8 out[8 * 160];
+	u8 v = 0xff, opfunc = 0xff, opcond = 0xff, state = 0xff;
+	bool state_wr = false;
+	int ret, ch;
+
+	memset(out, 0, sizeof(out));
+	mutex_lock(&sd.lock);
+	zsi_hw_init();
+	writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+	ret = slic_audio_slot4_prepare(&opfunc, &opcond, &state, &state_wr);
+	if (!ret) {
+		ret = zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+		if (!ret) {
+			v = (v & ~0xc0) | 0x04;
+			ret = slic_write_ec1_mpi((const u8[]){ 0x70, v }, 2);
+		}
+	}
+	mutex_unlock(&sd.lock);
+
+	if (!ret)
+		ret = pcm_en751221_loopback_tone_capture(out, sizeof(out));
+
+	mutex_lock(&sd.lock);
+	zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+	v &= ~0x04;
+	slic_write_ec1_mpi((const u8[]){ 0x70, v }, 2);
+	mutex_unlock(&sd.lock);
+
+	seq_printf(s, "tone_loopback ret=%d setup_opfunc=0x%02x setup_opcond=0x%02x state_before=0x%02x state_write=%s\n",
+		   ret, opfunc, opcond, state, state_wr ? "56 23" : "none");
+	seq_printf(s, "sequence: EC 4a 01 ; 40 04 ; 42 04 ; 60 %02x ; 82 40 00 ; 70 %02x ; loopback 70 %02x ; restore 70 %02x\n",
+		   opfunc, opcond, (opcond & ~0xc0) | 0x04, v);
+	for (ch = 0; ch < 8; ch++)
+		seq_printf(s, "rx_ch%d_first32: %32ph\n", ch, out + ch * 160);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_tone_loopback);
+
+static int slic_play_tone_show(struct seq_file *s, void *unused)
+{
+	u8 opfunc = 0xff, opcond = 0xff, state = 0xff;
+	bool state_wr = false;
+	int ret;
+
+	mutex_lock(&sd.lock);
+	zsi_hw_init();
+	writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+	ret = slic_audio_slot4_prepare(&opfunc, &opcond, &state, &state_wr);
+	mutex_unlock(&sd.lock);
+
+	if (!ret)
+		ret = pcm_en751221_play_tone_1khz();
+
+	seq_printf(s, "play_tone_1khz ret=%d duration=10s\n", ret);
+	seq_printf(s, "sequence: EC 4a 01 ; 40 04 ; 42 04 ; 60 %02x ; 82 40 00 ; 70 %02x ; %s ; PCM TX 1kHz 16-bit BE ; TX stop\n",
+		   opfunc, opcond, state_wr ? "56 23" : "STATE already 23");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_play_tone);
+
 static int slic_init_show(struct seq_file *s, void *unused)
 {
 	u8 id[2] = { 0xee, 0xee };
@@ -682,6 +842,48 @@ static int slic_detect_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(slic_detect);
 
+/*
+ * Earpiece tone via the SLIC's analog signal generator (SIGGEN) -- the path
+ * that actually works (confirmed audible). NO PCM/codec/DMA/timeslots: gen A
+ * is summed straight into the line driver, so an off-hook phone hears it just
+ * like dial tone. Opcodes from vp886_registers.h (Le9662): SIGAB 0xD2 (11B:
+ * ctrl + bias + freqA/ampA + freqB/ampB), SIGCTRL 0xDE (bit0 = enable gen A).
+ * Tone code = Hz * 2.7307; 1 kHz = 0x0AAB. Amplitude 0x7000 (single tone, no
+ * sum-clip). `cat tone` beeps for 3 s. Needs the line in a codec-on state
+ * (STATE 0x23), which slic_audio_setup leaves it in.
+ */
+static int slic_tone_show(struct seq_file *s, void *unused)
+{
+	mutex_lock(&sd.lock);
+	if (!slic_audio_up) {
+		zsi_hw_init();
+		zsi_slic_reset();
+		writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+		slic_load_profiles();
+		slic_audio_up = (slic_audio_setup() == 0);
+	}
+	/* SIGAB: gen A 1 kHz (0x0AAB), amp 0x7000, sine continuous; gen B off */
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ static const u8 sg[] = { 0xd2, 0x00, 0x00, 0x00, 0x0a, 0xab,
+				   0x70, 0x00, 0x00, 0x00, 0x00, 0x00 };
+	  slic_write_mpi("sigab", sg, sizeof(sg)); }
+	/* SIGCTRL: enable gen A, continuous */
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ static const u8 on[] = { 0xde, 0x01 }; slic_write_mpi("sigctrl-on", on, sizeof(on)); }
+	mutex_unlock(&sd.lock);
+
+	msleep(3000);				/* beep duration */
+
+	mutex_lock(&sd.lock);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ static const u8 off[] = { 0xde, 0x00 }; slic_write_mpi("sigctrl-off", off, sizeof(off)); }
+	mutex_unlock(&sd.lock);
+
+	seq_puts(s, "tone: 1kHz @ amp 0x7000 via SIGGEN gen A, 3s beep into the line\n");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_tone);
+
 static int __init econet_slic_init(void)
 {
 	sd.chip_scu = ioremap(CHIP_SCU_PHYS, CHIP_SCU_SIZE);
@@ -703,6 +905,10 @@ static int __init econet_slic_init(void)
 	debugfs_create_file("rx_scan", 0444, sd.dbg, NULL, &rx_scan_fops);
 	debugfs_create_file("play", 0444, sd.dbg, NULL, &slic_play_fops);
 	debugfs_create_file("tx_loopback", 0444, sd.dbg, NULL, &slic_loopback_fops);
+	debugfs_create_file("gr_check", 0444, sd.dbg, NULL, &slic_gr_check_fops);
+	debugfs_create_file("tone_loopback", 0444, sd.dbg, NULL, &slic_tone_loopback_fops);
+	debugfs_create_file("play_tone", 0444, sd.dbg, NULL, &slic_play_tone_fops);
+	debugfs_create_file("tone", 0444, sd.dbg, NULL, &slic_tone_fops);
 	debugfs_create_u8("cs", 0644, sd.dbg, &sd.cs);
 	debugfs_create_x32("pcm_intface", 0644, sd.dbg, &pcm_intface_ctrl);
 	debugfs_create_x32("zsi_cfg", 0644, sd.dbg, &zsi_cfg_val);

@@ -715,6 +715,137 @@ int pcm_en751221_play_melody(void)
 }
 EXPORT_SYMBOL_GPL(pcm_en751221_play_melody);
 
+static s16 pcm_tone_1khz_sample(int n)
+{
+	switch (n & 7) {
+	case 0:
+	case 4:
+		return 0;
+	case 1:
+	case 3:
+		return 14142;
+	case 2:
+		return 20000;
+	case 5:
+	case 7:
+		return -14142;
+	default:
+		return -20000;
+	}
+}
+
+static void pcm_fill_tone_1khz_frame(u8 *dst, int sample_base)
+{
+	int i;
+
+	for (i = 0; i < PCM_SAMP_PER_FRAME; i++) {
+		s16 s = pcm_tone_1khz_sample(sample_base + i);
+
+		dst[i * 2] = (u8)(s >> 8);
+		dst[i * 2 + 1] = (u8)(s & 0xff);
+	}
+}
+
+int pcm_en751221_play_tone_1khz(void)
+{
+	struct pcm_dev *p = g_pcm;
+	static const u32 oem_slots[4] = {
+		0x10301020, 0x10501040, 0x10701060, 0x10901080,
+	};
+	static void *txb, *rxb;
+	static dma_addr_t txb_dma, rxb_dma;
+	const int total_frames = 1000;	/* 10 seconds @ 100 frames/s */
+	int frame = 0, d, ch, guard = 0;
+
+	if (!p)
+		return -ENODEV;
+	if (!txb) {
+		txb = dmam_alloc_coherent(p->dev,
+					  PCM_DESC_NUM * PCM_BYTES_PER_FRAME + 64,
+					  &txb_dma, GFP_KERNEL);
+		rxb = dmam_alloc_coherent(p->dev, 8 * PCM_BYTES_PER_FRAME + 64,
+					  &rxb_dma, GFP_KERNEL);
+		if (!txb || !rxb)
+			return -ENOMEM;
+	}
+
+	for (d = 0; d < 4; d++) {
+		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+	}
+
+	for (d = 0; d < PCM_DESC_NUM && frame < total_frames; d++, frame++) {
+		memset(&p->tx_ring[d], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < 8; ch++)
+			p->tx_ring[d].buf_addr[ch] =
+				(u32)((txb_dma + d * PCM_BYTES_PER_FRAME) &
+				      PCM_DMA_ADDR_MASK);
+		pcm_fill_tone_1khz_frame((u8 *)txb + d * PCM_BYTES_PER_FRAME,
+					 frame * PCM_SAMP_PER_FRAME);
+		p->tx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+	}
+
+	for (d = 0; d < PCM_DESC_NUM; d++) {
+		memset(&p->rx_ring[d], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < 8; ch++)
+			p->rx_ring[d].buf_addr[ch] =
+				(u32)((rxb_dma + ch * PCM_BYTES_PER_FRAME) &
+				      PCM_DMA_ADDR_MASK);
+		p->rx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+	}
+
+	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)(p->tx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
+	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0xff) |
+	       PCM_DMA_TX_EN | PCM_DMA_RX_EN);
+	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+
+	while (frame < total_frames && guard < 4000) {
+		int progressed = 0;
+
+		for (d = 0; d < PCM_DESC_NUM && frame < total_frames; d++) {
+			dma_rmb();
+			if (READ_ONCE(p->tx_ring[d].status) & PCM_DESC_OWN)
+				continue;
+			pcm_fill_tone_1khz_frame((u8 *)txb + d * PCM_BYTES_PER_FRAME,
+						 frame * PCM_SAMP_PER_FRAME);
+			frame++;
+			dma_wmb();
+			p->tx_ring[d].status = PCM_DESC_OWN |
+				FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+				FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+			pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+			progressed = 1;
+		}
+		for (d = 0; d < PCM_DESC_NUM; d++) {
+			if (READ_ONCE(p->rx_ring[d].status) & PCM_DESC_OWN)
+				continue;
+			p->rx_ring[d].status = PCM_DESC_OWN |
+				FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+				FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+		}
+		pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+		if (!progressed) {
+			usleep_range(2000, 4000);
+			guard++;
+		}
+	}
+	msleep(220);
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~PCM_DMA_TX_EN);
+	return (frame >= total_frames) ? 0 : -ETIMEDOUT;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_play_tone_1khz);
+
 /*
  * Loopback test: transmit a known ramp (0,1,2,...79) on all 8 TX slots while
  * capturing RX channel 2 at the same time. With the SLIC's TSA loopback armed
@@ -803,6 +934,90 @@ int pcm_en751221_loopback_capture(u8 *out, u32 intface)
 	return (done >= 0) ? 0 : -ETIMEDOUT;
 }
 EXPORT_SYMBOL_GPL(pcm_en751221_loopback_capture);
+
+int pcm_en751221_loopback_tone_capture(u8 *out, int nbytes)
+{
+	struct pcm_dev *p = g_pcm;
+	static const u32 oem_slots[4] = {
+		0x10301020, 0x10501040, 0x10701060, 0x10901080,
+	};
+	static void *txb, *rxb;
+	static dma_addr_t txb_dma, rxb_dma;
+	int i, d, ch, done = -1;
+
+	if (!p)
+		return -ENODEV;
+	if (nbytes > 8 * PCM_BYTES_PER_FRAME)
+		nbytes = 8 * PCM_BYTES_PER_FRAME;
+	if (!txb) {
+		txb = dmam_alloc_coherent(p->dev,
+					  PCM_DESC_NUM * PCM_BYTES_PER_FRAME + 64,
+					  &txb_dma, GFP_KERNEL);
+		rxb = dmam_alloc_coherent(p->dev,
+					  PCM_DESC_NUM * 8 * PCM_BYTES_PER_FRAME + 64,
+					  &rxb_dma, GFP_KERNEL);
+		if (!txb || !rxb)
+			return -ENOMEM;
+	}
+	memset(rxb, 0, PCM_DESC_NUM * 8 * PCM_BYTES_PER_FRAME);
+
+	for (d = 0; d < 4; d++) {
+		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+	}
+	for (d = 0; d < PCM_DESC_NUM; d++) {
+		memset(&p->tx_ring[d], 0, sizeof(struct pcm_desc));
+		memset(&p->rx_ring[d], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < 8; ch++) {
+			p->tx_ring[d].buf_addr[ch] =
+				(u32)((txb_dma + d * PCM_BYTES_PER_FRAME) &
+				      PCM_DMA_ADDR_MASK);
+			p->rx_ring[d].buf_addr[ch] =
+				(u32)((rxb_dma + (d * 8 + ch) * PCM_BYTES_PER_FRAME) &
+				      PCM_DMA_ADDR_MASK);
+		}
+		pcm_fill_tone_1khz_frame((u8 *)txb + d * PCM_BYTES_PER_FRAME,
+					 d * PCM_SAMP_PER_FRAME);
+		p->tx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+		p->rx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+	}
+
+	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)(p->tx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
+	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0xff) |
+	       PCM_DMA_TX_EN | PCM_DMA_RX_EN);
+	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+
+	for (i = 0; i < 500; i++) {
+		dma_rmb();
+		for (d = PCM_DESC_NUM - 1; d >= 0; d--) {
+			if (!(READ_ONCE(p->rx_ring[d].status) & PCM_DESC_OWN)) {
+				done = d;
+				break;
+			}
+		}
+		if (done >= 0 && i > 20)
+			break;
+		usleep_range(1000, 2000);
+	}
+	dma_rmb();
+	if (done < 0)
+		done = 0;
+	memcpy(out, (u8 *)rxb + done * 8 * PCM_BYTES_PER_FRAME, nbytes);
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~(PCM_DMA_TX_EN | PCM_DMA_RX_EN));
+	return (done >= 0) ? 0 : -ETIMEDOUT;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_loopback_tone_capture);
 
 static irqreturn_t pcm_irq(int irq, void *data)
 {

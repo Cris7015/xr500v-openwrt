@@ -198,8 +198,14 @@ int pcm_en751221_capture_allch(u8 *out);
 /* Play a mu-law melody out the TX path (broadcast to all 8 slots). Blocks. */
 int pcm_en751221_play_melody(void);
 
+/* Play a sustained 1 kHz signed 16-bit big-endian linear tone. Blocks. */
+int pcm_en751221_play_tone_1khz(void);
+
 /* Loopback: TX a ramp + capture RX ch2. intface picks PCM-internal loopback
  * (bit 25 set) vs external/SLIC loopback (bit 25 clear). */
 int pcm_en751221_loopback_capture(u8 *out, u32 intface);
+
+/* Loopback: TX 1 kHz signed 16-bit BE tone and capture RX ch0. */
+int pcm_en751221_loopback_tone_capture(u8 *out, int nbytes);
 
 #endif /* _PCM_EN751221_H */
