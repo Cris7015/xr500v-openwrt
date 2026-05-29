@@ -22,6 +22,10 @@
 #include <linux/seq_file.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/kfifo.h>
+#include <linux/kthread.h>
+#include <linux/wait.h>
+#include <linux/uaccess.h>
 
 #include "pcm-en751221.h"
 
@@ -828,6 +832,227 @@ int pcm_en751221_voice_loopback(int seconds)
 }
 EXPORT_SYMBOL_GPL(pcm_en751221_voice_loopback);
 
+/* ---- Continuous full-duplex voice streaming engine (for the char device) ----
+ * Continuous TX+RX DMA using the same 8-slot RX layout as rx_scan2.
+ * A kthread recycles descriptors:
+ * RX-done -> push mic frame (ch1) into capture FIFO; TX-done -> pull a frame
+ * from playback FIFO (or silence) into the TX ring. read()/write() drain/fill
+ * the FIFOs. 16-bit linear, 8 kHz, mono. SPSC kfifos (lock-free).
+ */
+#define VOICE_FB	PCM_BYTES_PER_FRAME	/* 160 B = 80 samples * 2 */
+#define VOICE_FIFO_SZ	8192			/* ~50 ms each direction */
+#define VOICE_CHANS	8
+#define VOICE_TX_CH_VALID	0x0f
+#define VOICE_RX_CH_VALID	0x0f
+#define VOICE_RX_CH	1			/* mic at byte offset 160 */
+
+static struct {
+	bool active;
+	void *txb, *rxb;
+	dma_addr_t txb_dma, rxb_dma;
+	struct task_struct *thr;
+	struct kfifo cap;	/* mic -> userspace (read) */
+	struct kfifo play;	/* userspace (write) -> earpiece */
+	wait_queue_head_t cap_wq, play_wq;
+} vs;
+
+static int pcm_voice_thread(void *data)
+{
+	struct pcm_dev *p = g_pcm;
+	u8 frame[VOICE_FB];
+	int d;
+
+	while (!kthread_should_stop()) {
+		int progressed = 0;
+
+		for (d = 0; d < PCM_DESC_NUM; d++) {
+			dma_rmb();
+			/* RX captured: push mic to capture FIFO */
+			if (!(READ_ONCE(p->rx_ring[d].status) & PCM_DESC_OWN)) {
+				dma_rmb();
+				if (kfifo_avail(&vs.cap) >= VOICE_FB)
+					kfifo_in(&vs.cap,
+						 (u8 *)vs.rxb + (d * VOICE_CHANS + VOICE_RX_CH) * VOICE_FB,
+						 VOICE_FB);
+				dma_wmb();
+				p->rx_ring[d].status = PCM_DESC_OWN |
+					FIELD_PREP(PCM_DESC_CH_VALID, VOICE_RX_CH_VALID) |
+					FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+				progressed = 1;
+			}
+			/* TX played: pull a frame from playback FIFO (else silence) */
+			if (!(READ_ONCE(p->tx_ring[d].status) & PCM_DESC_OWN)) {
+				int n = 0;
+
+				if (kfifo_len(&vs.play) >= VOICE_FB)
+					n = kfifo_out(&vs.play, frame, VOICE_FB);
+				if (n < VOICE_FB)
+					memset(frame + n, 0, VOICE_FB - n);
+				memcpy((u8 *)vs.txb + d * VOICE_FB, frame, VOICE_FB);
+				dma_wmb();
+				p->tx_ring[d].status = PCM_DESC_OWN |
+					FIELD_PREP(PCM_DESC_CH_VALID, VOICE_TX_CH_VALID) |
+					FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+				progressed = 1;
+			}
+		}
+		pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+		pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+		if (progressed) {
+			wake_up_interruptible(&vs.cap_wq);
+			wake_up_interruptible(&vs.play_wq);
+			usleep_range(500, 1000);
+		} else {
+			usleep_range(1500, 2500);
+		}
+	}
+	return 0;
+}
+
+int pcm_en751221_voice_start(void)
+{
+	struct pcm_dev *p = g_pcm;
+	static const u32 oem_slots[4] = {
+		0x10301020, 0x10501040, 0x10701060, 0x10901080,
+	};
+	int d, ch, ret;
+
+	if (!p)
+		return -ENODEV;
+	if (vs.active)
+		return -EBUSY;
+
+	if (!vs.txb) {
+		vs.txb = dmam_alloc_coherent(p->dev, PCM_DESC_NUM * VOICE_FB + 64,
+					     &vs.txb_dma, GFP_KERNEL);
+		vs.rxb = dmam_alloc_coherent(p->dev,
+					     PCM_DESC_NUM * VOICE_CHANS * VOICE_FB + 64,
+					     &vs.rxb_dma, GFP_KERNEL);
+		if (!vs.txb || !vs.rxb)
+			return -ENOMEM;
+	}
+	ret = kfifo_alloc(&vs.cap, VOICE_FIFO_SZ, GFP_KERNEL);
+	if (ret)
+		return ret;
+	ret = kfifo_alloc(&vs.play, VOICE_FIFO_SZ, GFP_KERNEL);
+	if (ret) {
+		kfifo_free(&vs.cap);
+		return ret;
+	}
+	init_waitqueue_head(&vs.cap_wq);
+	init_waitqueue_head(&vs.play_wq);
+	memset(vs.txb, 0, PCM_DESC_NUM * VOICE_FB);
+	memset(vs.rxb, 0, PCM_DESC_NUM * VOICE_CHANS * VOICE_FB);
+
+	for (d = 0; d < 4; d++) {
+		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+	}
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~(PCM_DMA_TX_EN | PCM_DMA_RX_EN));
+	pcm_wr(p, PCM_ISR, pcm_rd(p, PCM_ISR));
+
+	for (d = 0; d < PCM_DESC_NUM; d++) {
+		memset(&p->tx_ring[d], 0, sizeof(struct pcm_desc));
+		memset(&p->rx_ring[d], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < VOICE_CHANS; ch++) {
+			p->tx_ring[d].buf_addr[ch] =
+				(u32)((vs.txb_dma + d * VOICE_FB) & PCM_DMA_ADDR_MASK);
+			p->rx_ring[d].buf_addr[ch] =
+				(u32)((vs.rxb_dma + (d * VOICE_CHANS + ch) * VOICE_FB) &
+				      PCM_DMA_ADDR_MASK);
+		}
+		p->tx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, VOICE_TX_CH_VALID) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+		p->rx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, VOICE_RX_CH_VALID) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+	}
+
+	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)(p->tx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
+	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, VOICE_RX_CH_VALID) |
+	       PCM_DMA_TX_EN | PCM_DMA_RX_EN);
+	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+
+	vs.thr = kthread_run(pcm_voice_thread, NULL, "pcm-voice");
+	if (IS_ERR(vs.thr)) {
+		kfifo_free(&vs.cap);
+		kfifo_free(&vs.play);
+		return PTR_ERR(vs.thr);
+	}
+	vs.active = true;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_voice_start);
+
+void pcm_en751221_voice_stop(void)
+{
+	struct pcm_dev *p = g_pcm;
+
+	if (!vs.active)
+		return;
+	vs.active = false;
+	if (vs.thr)
+		kthread_stop(vs.thr);
+	vs.thr = NULL;
+	if (p)
+		pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+		       pcm_rd(p, PCM_TX_RX_DMA_CTRL) &
+		       ~(PCM_DMA_TX_EN | PCM_DMA_RX_EN));
+	kfifo_free(&vs.cap);
+	kfifo_free(&vs.play);
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_voice_stop);
+
+/* Blocking read of captured mic PCM (16-bit linear). */
+ssize_t pcm_en751221_voice_read(char __user *ubuf, size_t len)
+{
+	unsigned int copied = 0;
+	int ret;
+
+	if (!vs.active)
+		return -ENODEV;
+	if (kfifo_is_empty(&vs.cap)) {
+		ret = wait_event_interruptible(vs.cap_wq,
+					       !kfifo_is_empty(&vs.cap) || !vs.active);
+		if (ret)
+			return ret;
+		if (!vs.active)
+			return 0;
+	}
+	ret = kfifo_to_user(&vs.cap, ubuf, len, &copied);
+	return ret ? ret : copied;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_voice_read);
+
+/* Blocking write of playback PCM (16-bit linear) to the earpiece. */
+ssize_t pcm_en751221_voice_write(const char __user *ubuf, size_t len)
+{
+	unsigned int copied = 0;
+	int ret;
+
+	if (!vs.active)
+		return -ENODEV;
+	if (kfifo_is_full(&vs.play)) {
+		ret = wait_event_interruptible(vs.play_wq,
+					       !kfifo_is_full(&vs.play) || !vs.active);
+		if (ret)
+			return ret;
+		if (!vs.active)
+			return -ENODEV;
+	}
+	ret = kfifo_from_user(&vs.play, ubuf, len, &copied);
+	return ret ? ret : copied;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_voice_write);
+
 static s16 pcm_tone_1khz_sample(int n)
 {
 	switch (n & 7) {
@@ -1171,6 +1396,102 @@ static int pcm_loopback_selftest_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(pcm_loopback_selftest);
 
+static int pcm_rx_scan2_show(struct seq_file *s, void *unused)
+{
+	struct pcm_dev *p = s->private;
+	static const u32 oem_slots[4] = {
+		0x10301020, 0x10501040, 0x10701060, 0x10901080,
+	};
+	static void *rxb;
+	static dma_addr_t rxb_dma;
+	const int chans = 8;
+	int d, ch, i, done = -1, ret = 0;
+
+	if (!rxb) {
+		rxb = dmam_alloc_coherent(p->dev,
+					  PCM_DESC_NUM * chans * PCM_BYTES_PER_FRAME + 64,
+					  &rxb_dma, GFP_KERNEL);
+		if (!rxb)
+			return -ENOMEM;
+	}
+
+	mutex_lock(&p->selftest_lock);
+	memset(rxb, 0, PCM_DESC_NUM * chans * PCM_BYTES_PER_FRAME);
+
+	for (i = 0; i < 4; i++)
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + i, oem_slots[i]);
+
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~PCM_DMA_RX_EN);
+	pcm_wr(p, PCM_ISR, pcm_rd(p, PCM_ISR));
+
+	for (d = 0; d < PCM_DESC_NUM; d++) {
+		memset(&p->rx_ring[d], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < chans; ch++)
+			p->rx_ring[d].buf_addr[ch] =
+				(u32)((rxb_dma + (d * chans + ch) * PCM_BYTES_PER_FRAME) &
+				      PCM_DMA_ADDR_MASK);
+		p->rx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
+	}
+
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
+	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0xff) | PCM_DMA_RX_EN);
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+
+	for (i = 0; i < 500; i++) {
+		dma_rmb();
+		for (d = 0; d < PCM_DESC_NUM; d++) {
+			if (!(READ_ONCE(p->rx_ring[d].status) & PCM_DESC_OWN)) {
+				done = d;
+				break;
+			}
+		}
+		if (done >= 0)
+			break;
+		usleep_range(1000, 2000);
+	}
+	dma_rmb();
+	if (done < 0) {
+		done = 0;
+		ret = -ETIMEDOUT;
+	}
+
+	seq_printf(s, "rx_scan2 ret=%d desc=%d stride=%u chValid=0xff\n",
+		   ret, done, PCM_BYTES_PER_FRAME);
+	for (ch = 0; ch < chans; ch++) {
+		u8 *b = (u8 *)rxb + (done * chans + ch) * PCM_BYTES_PER_FRAME;
+		s16 mn = 32767, mx = -32768;
+		int peak = 0;
+
+		for (i = 0; i < PCM_SAMP_PER_FRAME; i++) {
+			s16 v = (s16)((b[i * 2] << 8) | b[i * 2 + 1]);
+			int mag = (v == -32768) ? 32768 : abs(v);
+
+			if (v < mn)
+				mn = v;
+			if (v > mx)
+				mx = v;
+			if (mag > peak)
+				peak = mag;
+		}
+		seq_printf(s, " ch%d off=%3u min=%6d max=%6d pp=%6d peak=%5d %s\n",
+			   ch, ch * PCM_BYTES_PER_FRAME, mn, mx, mx - mn, peak,
+			   (mx - mn > 256 || peak > 256) ? "<== SIGNAL" : "");
+	}
+
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~PCM_DMA_RX_EN);
+	mutex_unlock(&p->selftest_lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(pcm_rx_scan2);
+
 static int pcm_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1224,6 +1545,7 @@ static int pcm_probe(struct platform_device *pdev)
 	debugfs_create_file("regs", 0444, p->dbg, p, &pcm_regs_fops);
 	debugfs_create_file("loopback_selftest", 0444, p->dbg, p,
 			    &pcm_loopback_selftest_fops);
+	debugfs_create_file("rx_scan2", 0444, p->dbg, p, &pcm_rx_scan2_fops);
 
 	platform_set_drvdata(pdev, p);
 	g_pcm = p;	/* for pcm_en751221_zsi_clock_run() (SLIC ZSI clock) */

@@ -26,6 +26,9 @@
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/mutex.h>
+#include <linux/miscdevice.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
 
 #define DRV_NAME "econet-slic"
 
@@ -439,8 +442,8 @@ static int slic_audio_setup(void)
 
 		ret = zsi_mpi_read(VP886_EC_1, 0xf5, icr4, sizeof(icr4));
 		if (ret) return ret;
-		icr4[0] |= 0x02;	/* VDAC_EN mask */
-		icr4[1] |= 0x02;	/* VDAC_EN data */
+		icr4[0] |= 0x03;	/* VDAC_EN (0x02) + VADC_EN (0x01) mask */
+		icr4[1] |= 0x03;	/* VDAC_EN + VADC_EN data (earpiece + mic) */
 		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
 		ret = slic_write_mpi("icr4-vdac", (const u8[]){ 0xf4, icr4[0], icr4[1], icr4[2], icr4[3] }, 5);
 		if (ret) return ret;
@@ -507,11 +510,68 @@ extern int pcm_en751221_capture_allch(u8 *out);
 extern int pcm_en751221_play_melody(void);
 extern int pcm_en751221_play_tone_1khz(void);
 extern int pcm_en751221_voice_loopback(int seconds);
+extern int pcm_en751221_voice_start(void);
+/* fwd: persistent line-up flag (defined once, set by audio_setup/voice open) */
+static bool slic_audio_up;
+extern void pcm_en751221_voice_stop(void);
+extern ssize_t pcm_en751221_voice_read(char __user *ubuf, size_t len);
+extern ssize_t pcm_en751221_voice_write(const char __user *ubuf, size_t len);
+
+/*
+ * /dev/xr500v-voice -- full-duplex 16-bit linear 8kHz PCM voice device.
+ * open: line the SLIC up for voice + start continuous DMA streaming.
+ * read = mic, write = earpiece. release: stop streaming.
+ */
+static int voice_dev_open(struct inode *ino, struct file *f)
+{
+	int ret;
+
+	mutex_lock(&sd.lock);
+	zsi_hw_init();
+	zsi_slic_reset();
+	writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+	slic_load_profiles();
+	slic_audio_up = (slic_audio_setup() == 0);
+	mutex_unlock(&sd.lock);
+	if (!slic_audio_up)
+		return -EIO;
+	ret = pcm_en751221_voice_start();
+	if (ret)
+		return ret;
+	return 0;
+}
+
+static int voice_dev_release(struct inode *ino, struct file *f)
+{
+	pcm_en751221_voice_stop();
+	return 0;
+}
+
+static ssize_t voice_dev_read(struct file *f, char __user *buf, size_t len, loff_t *o)
+{
+	return pcm_en751221_voice_read(buf, len);
+}
+
+static ssize_t voice_dev_write(struct file *f, const char __user *buf, size_t len, loff_t *o)
+{
+	return pcm_en751221_voice_write(buf, len);
+}
+
+static const struct file_operations voice_fops = {
+	.owner		= THIS_MODULE,
+	.open		= voice_dev_open,
+	.release	= voice_dev_release,
+	.read		= voice_dev_read,
+	.write		= voice_dev_write,
+};
+
+static struct miscdevice voice_miscdev = {
+	.minor	= MISC_DYNAMIC_MINOR,
+	.name	= "xr500v-voice",
+	.fops	= &voice_fops,
+};
 extern int pcm_en751221_loopback_capture(u8 *out, u32 intface);
 extern int pcm_en751221_loopback_tone_capture(u8 *out, int nbytes);
-
-/* Persistent line-up: do it once, then rx_scan captures without re-resetting. */
-static bool slic_audio_up;
 
 static int slic_audio_setup_show(struct seq_file *s, void *unused)
 {
@@ -969,6 +1029,9 @@ static int __init econet_slic_init(void)
 		}
 	}
 
+	if (misc_register(&voice_miscdev))
+		pr_warn(DRV_NAME ": /dev/xr500v-voice register failed\n");
+
 	pr_info(DRV_NAME ": loaded ZSI mode (cat /sys/kernel/debug/%s/slic_detect)\n",
 		DRV_NAME);
 	return 0;
@@ -986,6 +1049,8 @@ err:
 
 static void __exit econet_slic_exit(void)
 {
+	pcm_en751221_voice_stop();
+	misc_deregister(&voice_miscdev);
 	debugfs_remove_recursive(sd.dbg);
 	iounmap(sd.zsi);
 	iounmap(sd.pcm);
