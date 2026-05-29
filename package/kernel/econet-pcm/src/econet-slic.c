@@ -315,7 +315,7 @@ static int slic_detect(u8 *buf, u8 n)
  * mode reads back, AC 80-byte command accepted).
  */
 static const u8 dev_mpi[] = {	/* DEV_PROFILE_100V_BB_124_ZSI: PCLK, slot, dev mode, switcher */
-	0x46, 0x02, 0x44, 0x46, 0x5e, 0x14, 0x00, 0xf6, 0x95, 0x00,
+	0x46, 0x02, 0x44, 0x06, 0x5e, 0x14, 0x00, 0xf6, 0x95, 0x00,
 	0x58, 0x30, 0x5c, 0x30, 0xe4, 0x44, 0x92, 0x0a, 0xe6, 0x60,
 };
 static const u8 dc_mpi[] = {	/* DC_FXS_miSLIC_BB_DEF: DC feed */
@@ -360,7 +360,7 @@ static int slic_load_profiles(void)
 	ret = slic_write_mpi("dc", dc_mpi, sizeof(dc_mpi));
 	if (ret)
 		return ret;
-	ret = slic_write_mpi("ac", ac_mpi, sizeof(ac_mpi));
+	ret = slic_write_mpi("ac", ac_mpi + 6, sizeof(ac_mpi) - 6);
 	if (ret)
 		return ret;
 	return slic_write_mpi("ring", ring_mpi, sizeof(ring_mpi));
@@ -420,12 +420,31 @@ static int slic_audio_setup(void)
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
 	{ static const u8 rx[] = { 0x42, 0x04 }; slic_write_mpi("rxslot", rx, sizeof(rx)); }
 
-	/* 16-bit LINEAR codec: OPFUNC = (old & ~0xC0) | 0x80 */
-	ret = zsi_mpi_read(VP886_EC_1, 0x61, &v, 1);
-	if (ret) return ret;
-	v = (v & ~0xc0) | 0x80;
+	/* 16-bit LINEAR codec, all AC filters active. */
+	v = 0xbf;	/* OPFUNC = CODEC_LINEAR (0x80) | ALL_FILTERS (0x3f) */
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
 	{ u8 of[2] = { 0x60, v }; slic_write_mpi("opfunc", of, 2); }
+
+	/* ICR3/ICR4 are mask,data pairs: set mask bit and data bit. */
+	{
+		u8 icr3[4], icr4[4];
+
+		ret = zsi_mpi_read(VP886_EC_1, 0xf3, icr3, sizeof(icr3));
+		if (ret) return ret;
+		icr3[0] |= 0x01;	/* VREF_EN mask */
+		icr3[1] |= 0x01;	/* VREF_EN data */
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		ret = slic_write_mpi("icr3-vref", (const u8[]){ 0xf2, icr3[0], icr3[1], icr3[2], icr3[3] }, 5);
+		if (ret) return ret;
+
+		ret = zsi_mpi_read(VP886_EC_1, 0xf5, icr4, sizeof(icr4));
+		if (ret) return ret;
+		icr4[0] |= 0x02;	/* VDAC_EN mask */
+		icr4[1] |= 0x02;	/* VDAC_EN data */
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		ret = slic_write_mpi("icr4-vdac", (const u8[]){ 0xf4, icr4[0], icr4[1], icr4[2], icr4[3] }, 5);
+		if (ret) return ret;
+	}
 
 	/* GR receive (earpiece) gain = 0x4000 unity (MPI write opcode 0x82) */
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);

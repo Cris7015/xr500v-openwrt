@@ -609,6 +609,7 @@ int pcm_en751221_play_melody(void)
 	static void *txb, *rxb;
 	static dma_addr_t txb_dma, rxb_dma;
 	u8 *mel;
+	const u32 ch_valid = 0x0f;
 	int mel_len = 0, pos = 0, d, ch, guard = 0;
 
 	if (!p)
@@ -617,7 +618,7 @@ int pcm_en751221_play_melody(void)
 		txb = dmam_alloc_coherent(p->dev,
 					  PCM_DESC_NUM * PCM_BYTES_PER_FRAME + 64,
 					  &txb_dma, GFP_KERNEL);
-		rxb = dmam_alloc_coherent(p->dev, 8 * PCM_BYTES_PER_FRAME + 64,
+		rxb = dmam_alloc_coherent(p->dev, 4 * PCM_BYTES_PER_FRAME + 64,
 					  &rxb_dma, GFP_KERNEL);
 		if (!txb || !rxb)
 			return -ENOMEM;
@@ -630,11 +631,14 @@ int pcm_en751221_play_melody(void)
 		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + d, oem_slots[d]);
 		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + d, oem_slots[d]);
 	}
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~(PCM_DMA_TX_EN | PCM_DMA_RX_EN));
+	pcm_wr(p, PCM_ISR, pcm_rd(p, PCM_ISR));
 
 	/* prime the TX ring with the first PCM_DESC_NUM frames (160 B each) */
 	for (d = 0; d < PCM_DESC_NUM && pos < mel_len; d++) {
 		memset(&p->tx_ring[d], 0, sizeof(struct pcm_desc));
-		for (ch = 0; ch < 8; ch++)
+		for (ch = 0; ch < 4; ch++)
 			p->tx_ring[d].buf_addr[ch] =
 				(u32)((txb_dma + d * PCM_BYTES_PER_FRAME) &
 				      PCM_DMA_ADDR_MASK);
@@ -642,7 +646,7 @@ int pcm_en751221_play_melody(void)
 		       PCM_BYTES_PER_FRAME);
 		pos += PCM_BYTES_PER_FRAME;
 		p->tx_ring[d].status = PCM_DESC_OWN |
-			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_CH_VALID, ch_valid) |
 			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
 	}
 
@@ -655,12 +659,12 @@ int pcm_en751221_play_melody(void)
 	 */
 	for (d = 0; d < PCM_DESC_NUM; d++) {
 		memset(&p->rx_ring[d], 0, sizeof(struct pcm_desc));
-		for (ch = 0; ch < 8; ch++)
+		for (ch = 0; ch < 4; ch++)
 			p->rx_ring[d].buf_addr[ch] =
 				(u32)((rxb_dma + ch * PCM_BYTES_PER_FRAME) &
 				      PCM_DMA_ADDR_MASK);
 		p->rx_ring[d].status = PCM_DESC_OWN |
-			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_CH_VALID, ch_valid) |
 			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
 	}
 
@@ -670,7 +674,7 @@ int pcm_en751221_play_melody(void)
 	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
 	dma_wmb();
 	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
-	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0xff) |
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, ch_valid) |
 	       PCM_DMA_TX_EN | PCM_DMA_RX_EN);
 	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
 	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
@@ -688,7 +692,7 @@ int pcm_en751221_play_melody(void)
 			pos += PCM_BYTES_PER_FRAME;
 			dma_wmb();
 			p->tx_ring[d].status = PCM_DESC_OWN |
-				FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+				FIELD_PREP(PCM_DESC_CH_VALID, ch_valid) |
 				FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
 			pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
 			progressed = 1;
@@ -698,7 +702,7 @@ int pcm_en751221_play_melody(void)
 			if (READ_ONCE(p->rx_ring[d].status) & PCM_DESC_OWN)
 				continue;
 			p->rx_ring[d].status = PCM_DESC_OWN |
-				FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+				FIELD_PREP(PCM_DESC_CH_VALID, ch_valid) |
 				FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
 		}
 		pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
@@ -709,9 +713,9 @@ int pcm_en751221_play_melody(void)
 	}
 	msleep(220);		/* let the last queued frames drain */
 	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
-	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~PCM_DMA_TX_EN);
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~(PCM_DMA_TX_EN | PCM_DMA_RX_EN));
 	kfree(mel);
-	return 0;
+	return (guard < 2000) ? 0 : -ETIMEDOUT;
 }
 EXPORT_SYMBOL_GPL(pcm_en751221_play_melody);
 
