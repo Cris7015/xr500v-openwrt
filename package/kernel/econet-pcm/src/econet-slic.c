@@ -472,6 +472,7 @@ DEFINE_SHOW_ATTRIBUTE(slic_audio);
 
 extern int pcm_en751221_capture_allch(u8 *out);
 extern int pcm_en751221_play_melody(void);
+extern int pcm_en751221_loopback_capture(u8 *out);
 
 /* Persistent line-up: do it once, then rx_scan captures without re-resetting. */
 static bool slic_audio_up;
@@ -552,6 +553,55 @@ static int slic_play_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(slic_play);
 
+/*
+ * Digital loopback diagnostic: arm the SLIC TSA loopback (OPCOND bit 0x04) so
+ * what the SoC transmits returns on the PCM bus, then TX a ramp + capture RX
+ * ch2. A ramp coming back proves the TX digital path/slot map works and the
+ * silence is purely the analog earpiece.
+ */
+static int slic_loopback_show(struct seq_file *s, void *unused)
+{
+	u8 out[80], v = 0xff;
+	int ret, i, ramp = 0;
+
+	mutex_lock(&sd.lock);
+	if (!slic_audio_up) {
+		zsi_hw_init();
+		zsi_slic_reset();
+		writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+		slic_load_profiles();
+		slic_audio_up = (slic_audio_setup() == 0);
+	}
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ static const u8 rx[] = { 0x42, 0x06 }; slic_write_mpi("rxslot6", rx, sizeof(rx)); }
+	/* OPCOND |= TSA_LOOPBACK (0x04) */
+	zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+	v |= 0x04;
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ u8 oc[2] = { 0x70, v }; slic_write_mpi("opcond-lb", oc, 2); }
+	mutex_unlock(&sd.lock);
+
+	memset(out, 0, sizeof(out));
+	ret = pcm_en751221_loopback_capture(out);
+
+	mutex_lock(&sd.lock);
+	zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+	v &= ~0x04;
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ u8 oc[2] = { 0x70, v }; slic_write_mpi("opcond-rst", oc, 2); }
+	mutex_unlock(&sd.lock);
+
+	/* count how many bytes step by +1 (ramp signature, phase-agnostic) */
+	for (i = 1; i < 80; i++)
+		if (out[i] == (u8)(out[i - 1] + 1))
+			ramp++;
+	seq_printf(s, "loopback ret=%d  ramp_steps=%d/79 %s\n", ret, ramp,
+		   (ramp > 60) ? "<== TX DIGITAL PATH OK" : "(no ramp -- TX path broken)");
+	seq_printf(s, "ch2 first32: %32ph\n", out);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_loopback);
+
 static int slic_init_show(struct seq_file *s, void *unused)
 {
 	u8 id[2] = { 0xee, 0xee };
@@ -620,6 +670,7 @@ static int __init econet_slic_init(void)
 	debugfs_create_file("audio_setup", 0444, sd.dbg, NULL, &slic_audio_setup_fops);
 	debugfs_create_file("rx_scan", 0444, sd.dbg, NULL, &rx_scan_fops);
 	debugfs_create_file("play", 0444, sd.dbg, NULL, &slic_play_fops);
+	debugfs_create_file("tx_loopback", 0444, sd.dbg, NULL, &slic_loopback_fops);
 	debugfs_create_u8("cs", 0644, sd.dbg, &sd.cs);
 	debugfs_create_x32("pcm_intface", 0644, sd.dbg, &pcm_intface_ctrl);
 	debugfs_create_x32("zsi_cfg", 0644, sd.dbg, &zsi_cfg_val);

@@ -598,7 +598,7 @@ static u8 *pcm_build_melody(int *out_len)
 
 			if (f) {
 				phase += inc;
-				s = (phase & 0x8000) ? 7000 : -7000;
+				s = (phase & 0x8000) ? 24000 : -24000;
 			}
 			buf[idx++] = lin2ulaw(s);
 		}
@@ -724,6 +724,92 @@ int pcm_en751221_play_melody(void)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(pcm_en751221_play_melody);
+
+/*
+ * Loopback test: transmit a known ramp (0,1,2,...79) on all 8 TX slots while
+ * capturing RX channel 2 at the same time. With the SLIC's TSA loopback armed
+ * by the caller, the bytes we send come straight back, so a ramp in out[]
+ * proves the SoC TX -> bus -> SoC RX digital path (DMA + slot map) works end
+ * to end -- independent of the analog earpiece. Returns ch2 (80 bytes).
+ */
+int pcm_en751221_loopback_capture(u8 *out)
+{
+	struct pcm_dev *p = g_pcm;
+	static const u32 oem_slots[4] = {
+		0x10301020, 0x10501040, 0x10701060, 0x10901080,
+	};
+	static void *txb, *rxb;
+	static dma_addr_t txb_dma, rxb_dma;
+	int i, d, ch, done = -1;
+
+	if (!p)
+		return -ENODEV;
+	if (!txb) {
+		txb = dmam_alloc_coherent(p->dev, 80 + 64, &txb_dma, GFP_KERNEL);
+		rxb = dmam_alloc_coherent(p->dev, PCM_DESC_NUM * 8 * 80 + 64,
+					  &rxb_dma, GFP_KERNEL);
+		if (!txb || !rxb)
+			return -ENOMEM;
+	}
+	for (i = 0; i < 80; i++)		/* ramp pattern */
+		((u8 *)txb)[i] = (u8)i;
+	memset(rxb, 0, PCM_DESC_NUM * 8 * 80);
+
+	for (d = 0; d < 4; d++) {
+		pcm_wr(p, PCM_TX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+		pcm_wr(p, PCM_RX_TIME_SLOT_CFG0 + d, oem_slots[d]);
+	}
+	for (d = 0; d < PCM_DESC_NUM; d++) {
+		memset(&p->tx_ring[d], 0, sizeof(struct pcm_desc));
+		memset(&p->rx_ring[d], 0, sizeof(struct pcm_desc));
+		for (ch = 0; ch < 8; ch++) {
+			p->tx_ring[d].buf_addr[ch] =
+				(u32)(txb_dma & PCM_DMA_ADDR_MASK);
+			p->rx_ring[d].buf_addr[ch] =
+				(u32)((rxb_dma + (d * 8 + ch) * 80) &
+				      PCM_DMA_ADDR_MASK);
+		}
+		p->tx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
+		p->rx_ring[d].status = PCM_DESC_OWN |
+			FIELD_PREP(PCM_DESC_CH_VALID, 0xff) |
+			FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
+	}
+
+	pcm_wr(p, PCM_TX_DESC_RING_BASE, (u32)(p->tx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_RX_DESC_RING_BASE, (u32)(p->rx_dma & PCM_DMA_ADDR_MASK));
+	pcm_wr(p, PCM_TX_RX_DESC_RING_SIZE_OFFSET, 0x9f);
+	pcm_wr(p, PCM_INTFACE_CTRL, 0xf5071306);
+	dma_wmb();
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       FIELD_PREP(PCM_DMA_CH_VALID_MASK, 0xff) |
+	       PCM_DMA_TX_EN | PCM_DMA_RX_EN);
+	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
+	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
+
+	/* let a few frames loop through, then grab a completed RX descriptor */
+	for (i = 0; i < 500; i++) {
+		dma_rmb();
+		for (d = PCM_DESC_NUM - 1; d >= 0; d--) {
+			if (!(READ_ONCE(p->rx_ring[d].status) & PCM_DESC_OWN)) {
+				done = d;
+				break;
+			}
+		}
+		if (done >= 0 && i > 20)	/* give loopback pipeline time */
+			break;
+		usleep_range(1000, 2000);
+	}
+	dma_rmb();
+	if (done < 0)
+		done = 0;
+	memcpy(out, (u8 *)rxb + (done * 8 + 2) * 80, 80);	/* ch2 */
+	pcm_wr(p, PCM_TX_RX_DMA_CTRL,
+	       pcm_rd(p, PCM_TX_RX_DMA_CTRL) & ~(PCM_DMA_TX_EN | PCM_DMA_RX_EN));
+	return (done >= 0) ? 0 : -ETIMEDOUT;
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_loopback_capture);
 
 static irqreturn_t pcm_irq(int irq, void *data)
 {
