@@ -429,9 +429,11 @@ int pcm_en751221_capture_rx(u8 *out, int nbytes)
 	pcm_wr(p, PCM_RX_TIME_SLOT_CFG2, 0x00280020);
 	pcm_wr(p, PCM_RX_TIME_SLOT_CFG3, 0x00380030);
 
-	/* arm RX descriptor 0: own | chValid ch6 (0x40) | 80 samples */
+	/* arm RX descriptor 0: own | chValid ch6 (0x40) | 80 samples.
+	 * The HW writes channel N's data to buf_addr[N] (see 2b loopback), so the
+	 * channel-6 (slot 6 = SLIC mic) buffer goes in buf_addr[6], NOT [0]. */
 	memset(p->rx_ring, 0, PCM_DESC_NUM * sizeof(struct pcm_desc));
-	p->rx_ring[0].buf_addr[0] = (u32)(cap_dma & PCM_DMA_ADDR_MASK);
+	p->rx_ring[0].buf_addr[6] = (u32)(cap_dma & PCM_DMA_ADDR_MASK);
 	p->rx_ring[0].status = PCM_DESC_OWN |
 		FIELD_PREP(PCM_DESC_CH_VALID, 0x40) |
 		FIELD_PREP(PCM_DESC_SAMPLE_SIZE, 80);
