@@ -30,8 +30,8 @@
 		led-2  { label = "green:gpon";     gpios = <&gpio 2  GPIO_ACTIVE_LOW>; linux,default-trigger = "default-on"; };
 		led-7  { label = "green:wps";      gpios = <&gpio 7  GPIO_ACTIVE_LOW>; };
 		led-11 { label = "green:usb";      gpios = <&gpio 11 GPIO_ACTIVE_LOW>; };
-		led-12 { label = "green:wlan2g";   gpios = <&gpio 12 GPIO_ACTIVE_LOW>; };
-		led-13 { label = "green:wlan5g";   gpios = <&gpio 13 GPIO_ACTIVE_LOW>; };
+		/* WiFi 2.4/5GHz LEDs are inside the MT7603/MT7662 chips (driven by
+		 * the mt76 cdevs mt76-phy0/mt76-phy1), NOT these SoC GPIOs. */
 		led-24 { label = "red:alarm";      gpios = <&gpio 24 GPIO_ACTIVE_LOW>; };
 		led-25 { label = "green:phone1";   gpios = <&gpio 25 GPIO_ACTIVE_LOW>; };
 		led-26 { label = "green:phone2";   gpios = <&gpio 26 GPIO_ACTIVE_LOW>; };
@@ -251,6 +251,14 @@
 		reg = <0x0000 0 0 0 0>;
 		nvmem-cells = <&eeprom_misc_e0000>, <&macaddr_misc_f100>;
 		nvmem-cell-names = "eeprom", "mac-address";
+
+		/* Panel 5GHz LED = MT7662 MAC LED pin 2, active-low. mt76
+		 * kicks MT_LED_CTRL on pin 2; the phy1tpt throughput trigger
+		 * is auto-assigned by the driver (no board.d/uci needed). */
+		led {
+			led-sources = <2>;
+			led-active-low;
+		};
 	};
 };
 
@@ -264,6 +272,12 @@
 		nvmem-cells = <&macaddr_misc_f100>;
 		nvmem-cell-names = "mac-address";
 		mac-address-increment = <1>;
+
+		/* Panel 2.4GHz LED = MT7603 chip-internal GPIO12+GPIO13
+		 * (active-low), driven by the mt7603 driver from the LED
+		 * callbacks (phy0tpt trigger auto-assigned). */
+		mediatek,gpio-led;
+
 		mediatek,eeprom-data = /bits/ 8 <
 			0x03 0x76 0x00 0x00 0x02 0x76 0x03 0x50 0x00 0x01 0x00 0x00 0x00 0x00 0x00 0x00
 			0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00

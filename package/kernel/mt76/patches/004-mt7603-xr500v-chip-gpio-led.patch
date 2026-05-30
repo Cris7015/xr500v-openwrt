@@ -1,0 +1,119 @@
+--- a/mt7603/mt7603.h	2026-05-30 19:18:02.717742702 -0300
++++ b/mt7603/mt7603.h	2026-05-30 19:19:31.301740632 -0300
+@@ -137,6 +137,7 @@
+ 	u8 ed_strong_signal;
+ 
+ 	bool dynamic_sensitivity;
++	bool gpio_led;
+ 	s8 sensitivity;
+ 	u8 sensitivity_limit;
+ 
+--- a/mt7603/regs.h	2026-05-30 19:18:05.761742620 -0300
++++ b/mt7603/regs.h	2026-05-30 19:19:44.537740319 -0300
+@@ -601,6 +601,16 @@
+ #define MT_LED_STATUS_ON		GENMASK(23, 16)
+ #define MT_LED_STATUS_DURATION		GENMASK(15, 0)
+ 
++/* Chip-internal GPIO block (XR500v 2.4GHz panel LED on GPIO12 + GPIO13,
++ * active-low). Reached through the PCIe remap-2 window via mt7603_reg_map(). */
++#define MT_GPIO_PINMUX_SEL2		0x80023084
++#define MT_GPIO_PINMUX_SEL2_G12		GENMASK(18, 16)
++#define MT_GPIO_PINMUX_SEL2_G13		GENMASK(22, 20)
++#define MT_GPIO_OE1_SET			0x80023034
++#define MT_GPIO_DOUT1_SET		0x80023024
++#define MT_GPIO_DOUT1_RESET		0x80023028
++#define MT_GPIO_LED_MASK		(BIT(12) | BIT(13))	/* 0x3000 */
++
+ #define MT_CLIENT_BASE_PHYS_ADDR	0x800c0000
+ 
+ #define MT_CLIENT_TMAC_INFO_TEMPLATE	0x040
+--- a/mt7603/init.c	2026-05-30 19:18:08.713742541 -0300
++++ b/mt7603/init.c	2026-05-30 19:19:11.885741085 -0300
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: BSD-3-Clause-Clear
+ 
+ #include <linux/etherdevice.h>
++#include <linux/of.h>
+ #include "mt7603.h"
+ #include "mac.h"
+ #include "eeprom.h"
+@@ -343,6 +344,52 @@
+ 	}
+ };
+ 
++/* XR500v: the 2.4GHz panel LED is wired to MT7603 chip-internal GPIO12 and
++ * GPIO13 (both drive the same LED, active-low), reached only through the PCIe
++ * remap-2 window via mt7603_reg_map(). The pad the MAC LED block (0x80024000)
++ * targets is not routed to this board's LED, so drive the GPIOs directly.
++ */
++static void mt7603_gpio_led_init(struct mt7603_dev *dev)
++{
++	u32 addr, val;
++
++	/* PINMUX_SEL2: select GPIO function (0x2) for pads 12 and 13 */
++	addr = mt7603_reg_map(dev, MT_GPIO_PINMUX_SEL2);
++	val = mt76_rr(dev, addr);
++	val &= ~(MT_GPIO_PINMUX_SEL2_G12 | MT_GPIO_PINMUX_SEL2_G13);
++	val |= FIELD_PREP(MT_GPIO_PINMUX_SEL2_G12, 0x2) |
++	       FIELD_PREP(MT_GPIO_PINMUX_SEL2_G13, 0x2);
++	mt76_wr(dev, addr, val);
++
++	/* enable GPIO12/13 as outputs */
++	addr = mt7603_reg_map(dev, MT_GPIO_OE1_SET);
++	mt76_wr(dev, addr, MT_GPIO_LED_MASK);
++}
++
++static void mt7603_gpio_led_set(struct mt7603_dev *dev, bool on)
++{
++	u32 addr;
++
++	/* active-low: drive low = LED on */
++	if (on)
++		addr = mt7603_reg_map(dev, MT_GPIO_DOUT1_RESET);
++	else
++		addr = mt7603_reg_map(dev, MT_GPIO_DOUT1_SET);
++	mt76_wr(dev, addr, MT_GPIO_LED_MASK);
++}
++
++/* Return an error so the LED core falls through to software blink
++ * (led_blink_setup -> led_set_software_blink), whose timer then toggles our
++ * brightness_set ~1 Hz -> a real activity blink on chip GPIO12/13. The MAC
++ * LED block's hardware blink does not reach this board's pad.
++ */
++static int mt7603_gpio_led_set_blink(struct led_classdev *led_cdev,
++				     unsigned long *delay_on,
++				     unsigned long *delay_off)
++{
++	return -EINVAL;
++}
++
+ static void mt7603_led_set_config(struct mt76_phy *mphy, u8 delay_on,
+ 				  u8 delay_off)
+ {
+@@ -365,6 +412,9 @@
+ 		val |= MT_LED_CTRL_POLARITY(mphy->leds.pin);
+ 	addr = mt7603_reg_map(dev, MT_LED_CTRL);
+ 	mt76_wr(dev, addr, val);
++
++	if (dev->gpio_led)
++		mt7603_gpio_led_set(dev, delay_on != 0);
+ }
+ 
+ static int mt7603_led_set_blink(struct led_classdev *led_cdev,
+@@ -552,6 +602,16 @@
+ 	if (IS_ENABLED(CONFIG_MT76_LEDS)) {
+ 		dev->mphy.leds.cdev.brightness_set = mt7603_led_set_brightness;
+ 		dev->mphy.leds.cdev.blink_set = mt7603_led_set_blink;
++
++		/* XR500v: 2.4GHz panel LED is on chip GPIO12/13, not the MAC
++		 * LED pad. Drive it from the LED callbacks and force software
++		 * blink so it actually blinks on activity. */
++		if (of_property_read_bool(dev->mt76.dev->of_node,
++					  "mediatek,gpio-led")) {
++			dev->gpio_led = true;
++			dev->mphy.leds.cdev.blink_set = mt7603_gpio_led_set_blink;
++			mt7603_gpio_led_init(dev);
++		}
+ 	}
+ 
+ 	wiphy->reg_notifier = mt7603_regd_notifier;
