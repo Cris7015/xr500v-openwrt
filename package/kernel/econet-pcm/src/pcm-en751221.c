@@ -841,10 +841,12 @@ EXPORT_SYMBOL_GPL(pcm_en751221_voice_loopback);
  * the FIFOs. 16-bit linear, 8 kHz, mono. SPSC kfifos (lock-free).
  */
 #define VOICE_FB	PCM_BYTES_PER_FRAME	/* 160 B = 80 samples * 2 */
-#define VOICE_FIFO_SZ	12288			/* ~0.77 s. Tradeoff: bigger = fewer
-						 * play underruns (chops) but more
-						 * latency. 8192 chopped, 24576 was
-						 * smooth but ~1.5s; 12288 is the knee. */
+#define VOICE_FIFO_SZ	4096			/* default play/cap kfifo. kfifo rounds
+						 * to a power of two; the latency knee
+						 * with the clean u-law capture is 4096
+						 * (~0.26 s, fluid) -- 2048 chops. Was
+						 * 12288 before u-law. Live-tunable via
+						 * the voice_fifo_sz param. */
 #define VOICE_CHANS	8
 #define VOICE_TX_CH_VALID	0x0f	/* 4ch, like play_melody (full-duplex proven) */
 #define VOICE_RX_CH_VALID	0x0f	/* 4ch -- play_melody re-arms RX desc fine at
@@ -872,6 +874,15 @@ module_param(voice_gain, int, 0644);
  * echo {0,1} > /sys/module/pcm_en751221/parameters/tx_msb */
 static int tx_msb = 1;
 module_param(tx_msb, int, 0644);
+
+/* Voice FIFO size (bytes) for the play (earpiece) and capture (mic) kfifos;
+ * kfifo rounds it up to a power of two. This is the dominant audio-latency knob:
+ * the play path can buffer up to this much (PC->Philips delay), while bigger
+ * avoids underrun chops. The old big value predates the clean u-law capture.
+ * Tune live (takes effect on the next call/open):
+ * echo N > /sys/module/pcm_en751221/parameters/voice_fifo_sz */
+static int voice_fifo_sz = VOICE_FIFO_SZ;
+module_param(voice_fifo_sz, int, 0644);
 
 static struct {
 	bool active;
@@ -1036,10 +1047,10 @@ int pcm_en751221_voice_start(void)
 		if (!vs.txb || !vs.rxb)
 			return -ENOMEM;
 	}
-	ret = kfifo_alloc(&vs.cap, VOICE_FIFO_SZ, GFP_KERNEL);
+	ret = kfifo_alloc(&vs.cap, voice_fifo_sz, GFP_KERNEL);
 	if (ret)
 		return ret;
-	ret = kfifo_alloc(&vs.play, VOICE_FIFO_SZ, GFP_KERNEL);
+	ret = kfifo_alloc(&vs.play, voice_fifo_sz, GFP_KERNEL);
 	if (ret) {
 		kfifo_free(&vs.cap);
 		return ret;
