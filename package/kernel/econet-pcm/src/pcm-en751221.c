@@ -15,6 +15,7 @@
 #include <linux/of.h>
 #include <linux/io.h>
 #include <linux/bitfield.h>
+#include <linux/bitops.h>
 #include <linux/dma-mapping.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -840,11 +841,37 @@ EXPORT_SYMBOL_GPL(pcm_en751221_voice_loopback);
  * the FIFOs. 16-bit linear, 8 kHz, mono. SPSC kfifos (lock-free).
  */
 #define VOICE_FB	PCM_BYTES_PER_FRAME	/* 160 B = 80 samples * 2 */
-#define VOICE_FIFO_SZ	8192			/* ~50 ms each direction */
+#define VOICE_FIFO_SZ	12288			/* ~0.77 s. Tradeoff: bigger = fewer
+						 * play underruns (chops) but more
+						 * latency. 8192 chopped, 24576 was
+						 * smooth but ~1.5s; 12288 is the knee. */
 #define VOICE_CHANS	8
-#define VOICE_TX_CH_VALID	0x0f
-#define VOICE_RX_CH_VALID	0x0f
-#define VOICE_RX_CH	1			/* mic at byte offset 160 */
+#define VOICE_TX_CH_VALID	0x0f	/* 4ch, like play_melody (full-duplex proven) */
+#define VOICE_RX_CH_VALID	0x0f	/* 4ch -- play_melody re-arms RX desc fine at
+					 * 0x0f, so RX DOES complete; the earlier
+					 * read-hang was the voice_thread margin, not
+					 * the chNum (fixed below). */
+#define VOICE_RX_CH	0		/* mic = ch0 at chNum=4 (scan-confirmed:
+					 * clean voice, ~42dB SNR). NB the slot->ch
+					 * map shifts with chNum (was ch2 at chNum=8) */
+
+/* RX capture channel, runtime-tunable so the mic channel can be scanned
+ * (it shifts with chNum): echo N > /sys/module/pcm_en751221/parameters/voice_rx_ch */
+static int voice_rx_ch = VOICE_RX_CH;
+module_param(voice_rx_ch, int, 0644);
+
+/* Digital capture gain (mic is captured very quiet). 1 = passthrough.
+ * Tune live: echo N > /sys/module/pcm_en751221/parameters/voice_gain */
+static int voice_gain = 1;
+module_param(voice_gain, int, 0644);
+
+/* Byte position of the 8-bit u-law code in the 16-bit playback (TX) timeslot.
+ * The SLIC uses different clock-slot offsets for TX-capture (CLKSLOTS TCS) vs
+ * RX-playback (RCS), so the code can land in a different byte than capture.
+ * 1 = high byte (MSB), 0 = low byte (LSB). Tune live during a call:
+ * echo {0,1} > /sys/module/pcm_en751221/parameters/tx_msb */
+static int tx_msb = 1;
+module_param(tx_msb, int, 0644);
 
 static struct {
 	bool active;
@@ -856,6 +883,43 @@ static struct {
 	wait_queue_head_t cap_wq, play_wq;
 } vs;
 
+/*
+ * G.711 u-law codec. The Le9642 PCM interface drives (capture) and reads
+ * (playback) an 8-bit u-law code in the LOW byte of each 16-bit timeslot --
+ * the chip emits only 8 bits per slot even in "linear" mode, so we run it in
+ * u-law and (de)compand in software. u-law's logarithmic companding preserves
+ * quiet speech that 8-bit linear would quantize to silence (the "choppy"
+ * capture). The char device stays 16-bit linear so baresip is unchanged.
+ */
+static inline s16 ulaw_decode(u8 byte)
+{
+	int u = (~byte) & 0xff;
+	int sign = u & 0x80;
+	int exp = (u >> 4) & 0x07;
+	int man = u & 0x0f;
+	int s = (((man << 3) + 0x84) << exp) - 0x84;
+
+	return sign ? -s : s;
+}
+
+static inline u8 ulaw_encode(s16 pcm)
+{
+	int sign = (pcm >> 8) & 0x80;
+	int mag = sign ? -(int)pcm : (int)pcm;
+	int exp, man;
+
+	if (mag > 32635)
+		mag = 32635;
+	mag += 0x84;
+	exp = fls(mag >> 7) - 1;
+	if (exp > 7)
+		exp = 7;
+	else if (exp < 0)
+		exp = 0;
+	man = (mag >> (exp + 3)) & 0x0f;
+	return ~(sign | (exp << 4) | man);
+}
+
 static int pcm_voice_thread(void *data)
 {
 	struct pcm_dev *p = g_pcm;
@@ -864,31 +928,44 @@ static int pcm_voice_thread(void *data)
 
 	while (!kthread_should_stop()) {
 		int progressed = 0;
-		int nxt;
 
 		/*
-		 * RX in strict completion order, with a 1-descriptor margin: only
-		 * read rx_head once BOTH rx_head and rx_head+1 have completed (OWN
-		 * cleared). That guarantees the DMA has moved >=2 descriptors past
-		 * rx_head, so rx_head's buffer write is fully settled (no
-		 * read-during-write glitch). Reading in order avoids the scrambling
-		 * the all-scan version produced.
+		 * RX in strict completion order (same structure as the TX loop):
+		 * drain every descriptor whose OWN bit the DMA has cleared, copy
+		 * the mic channel into the capture fifo, then re-arm it. The earlier
+		 * 2-descriptor "margin" (requiring rx_head AND rx_head+1 done) could
+		 * wedge and never fill the fifo -> read() blocked forever. play_melody
+		 * proves a plain OWN check advances RX fine at this chNum.
 		 */
-		for (;;) {
-			nxt = (rx_head + 1) % PCM_DESC_NUM;
-			if ((READ_ONCE(p->rx_ring[rx_head].status) & PCM_DESC_OWN) ||
-			    (READ_ONCE(p->rx_ring[nxt].status) & PCM_DESC_OWN))
-				break;
+		while (!(READ_ONCE(p->rx_ring[rx_head].status) & PCM_DESC_OWN)) {
 			dma_rmb();
-			if (kfifo_avail(&vs.cap) >= VOICE_FB)
-				kfifo_in(&vs.cap,
-					 (u8 *)vs.rxb + (rx_head * VOICE_CHANS + VOICE_RX_CH) * VOICE_FB,
-					 VOICE_FB);
+			if (kfifo_avail(&vs.cap) >= VOICE_FB) {
+				s16 *src = (s16 *)((u8 *)vs.rxb +
+					(rx_head * VOICE_CHANS + voice_rx_ch) * VOICE_FB);
+				s16 tmp[PCM_SAMP_PER_FRAME];
+				int i;
+
+				/* The SLIC drives an 8-bit u-law code in the low
+				 * byte of each timeslot; decode to 16-bit linear. */
+				for (i = 0; i < PCM_SAMP_PER_FRAME; i++) {
+					int x = ulaw_decode(src[i] & 0xff);
+
+					if (voice_gain > 1) {
+						x *= voice_gain;
+						if (x > 32767)
+							x = 32767;
+						else if (x < -32768)
+							x = -32768;
+					}
+					tmp[i] = (s16)x;
+				}
+				kfifo_in(&vs.cap, tmp, VOICE_FB);
+			}
 			dma_wmb();
 			p->rx_ring[rx_head].status = PCM_DESC_OWN |
 				FIELD_PREP(PCM_DESC_CH_VALID, VOICE_RX_CH_VALID) |
 				FIELD_PREP(PCM_DESC_SAMPLE_SIZE, PCM_SAMP_PER_FRAME);
-			rx_head = nxt;
+			rx_head = (rx_head + 1) % PCM_DESC_NUM;
 			progressed = 1;
 		}
 
@@ -901,6 +978,20 @@ static int pcm_voice_thread(void *data)
 				n = kfifo_out(&vs.play, frame, VOICE_FB);
 			if (n < VOICE_FB)
 				memset(frame + n, 0, VOICE_FB - n);
+			{
+				/* Encode the 16-bit linear playback samples to
+				 * 8-bit u-law, placed in the MSB (or LSB) byte of
+				 * each timeslot (the other byte 0); the SLIC codec
+				 * is u-law. tx_msb selects the byte the SLIC reads. */
+				s16 *f = (s16 *)frame;
+				int i;
+
+				for (i = 0; i < PCM_SAMP_PER_FRAME; i++) {
+					u8 code = ulaw_encode(f[i]);
+
+					f[i] = tx_msb ? (s16)((u16)code << 8) : code;
+				}
+			}
 			memcpy((u8 *)vs.txb + tx_head * VOICE_FB, frame, VOICE_FB);
 			dma_wmb();
 			p->tx_ring[tx_head].status = PCM_DESC_OWN |

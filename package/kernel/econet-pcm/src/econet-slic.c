@@ -405,11 +405,43 @@ extern int pcm_en751221_capture_rx(u8 *out, int nbytes);
  *   - GR (receive/earpiece gain, MPI 0x82) = 0x4000 unity; without it the
  *     earpiece RX path is muted.
  */
+/*
+ * Capture-codec tuning (live, no rebuild). The SADC probe proved the mic AC
+ * signal IS on the line; the codec capture just isn't grabbing it unless the
+ * DAC is active (codec-gate). These let us sweep the OEM-correct activation.
+ *   icr4_mode: 0 = VADC+VDAC fully automatic (ICR4=0); 1 = force VDAC only,
+ *              VADC automatic (OEM-like; forcing VADC may pin the ADC marginal);
+ *              2 = force both (the old known-idle-issue config).
+ *   settle_ms: delay after STATE active+codec for the ADC front-end to converge.
+ *   hpf_on:    1 = also clear OPCOND HIGHPASS_DIS (HPF on, OEM, kills DC offset).
+ */
+static int icr4_mode = 2;	/* validated default (VADC+VDAC forced) */
+module_param(icr4_mode, int, 0644);
+static int settle_ms = 20;
+module_param(settle_ms, int, 0644);
+static int hpf_on = 1;
+module_param(hpf_on, int, 0644);
+static int gx_val;	/* GX capture gain register (0x80) override; 0 = profile */
+module_param(gx_val, int, 0644);
+/* DC feed loop-current limit ILA (DCFEED 0xc6 byte1 bits0-4). mA = 18 + field.
+ * The cordless DECT base needs more feed current than the 600R AC profile
+ * default (0x07 = 25mA) for the mic to reach the VADC; 0x14 = 38mA captured
+ * clean (no clip) in testing. 0 = leave the profile value. Live-tunable. */
+static int feed_ila = 0x14;
+module_param(feed_ila, int, 0644);
+
 static int slic_audio_setup(void)
 {
 	u8 v;
 	int ret;
 
+	/* Switcher timing + params (from OEM profile) BEFORE enabling the switcher,
+	 * so the buck-boost runs with calibrated edge timing instead of noisy
+	 * defaults (uncalibrated ripple couples broadband noise into the ADC). */
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ static const u8 swt[] = { 0xf6, 0x66, 0x00, 0x64, 0x30, 0x74, 0x30 }; slic_write_mpi("swtiming", swt, sizeof(swt)); }
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ static const u8 swp[] = { 0xe4, 0x04, 0x92, 0x0a }; slic_write_mpi("swparam", swp, sizeof(swp)); }
 	/* switcher HP (simple direct write -- the robust CALCTRL sequence breaks it) */
 	{ static const u8 sw[] = { 0xe6, 0x6f }; ret = slic_write_mpi("sw-hp", sw, sizeof(sw)); if (ret) return ret; }
 	/* feed active (no codec yet) */
@@ -417,16 +449,37 @@ static int slic_audio_setup(void)
 	if (ret) return ret;
 	{ static const u8 st[] = { 0x56, 0x03 }; slic_write_mpi("active", st, sizeof(st)); }
 
+	/* Raise the DC feed loop-current limit (ILA, DCFEED 0xc6 byte1 bits0-4).
+	 * The cordless DECT base needs more feed current than the 600R AC profile
+	 * default (ILA=0x07=25mA) for the mic modulation to reach the VADC --
+	 * otherwise the capture stays idle "00 XX" unless the DAC stirs the line.
+	 * Preserve byte0 (VOC) and byte1 bits5-7 (LONG_IMPED). feed_ila=0 keeps the
+	 * profile value. */
+	if (feed_ila != 0) {
+		u8 dcf[2];
+
+		if (!zsi_mpi_read(VP886_EC_1, 0xc7, dcf, sizeof(dcf))) {
+			dcf[1] = (dcf[1] & ~0x1f) | (feed_ila & 0x1f);
+			zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+			{ u8 d[3] = { 0xc6, dcf[0], dcf[1] }; slic_write_mpi("dcfeed-ila", d, 3); }
+		}
+	}
+
+	/* u-law (G.711) codec, all AC filters active. The Le9642 drives only 8 bits
+	 * per timeslot even in "linear" mode (the captured LSB/MSB byte is the only
+	 * data, the other is 0), so 16-bit linear gives 8-bit resolution -> quiet
+	 * speech quantizes to 0 -> choppy. u-law companding (8-bit log) preserves
+	 * quiet speech; the voice thread (de)compands to/from 16-bit linear for the
+	 * char device. Written BEFORE the timeslots (OEM order, le9641.c). */
+	v = 0x7f;	/* OPFUNC = CODEC_ULAW (0x40) | ALL_FILTERS (0x3f) */
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ u8 of[2] = { 0x60, v }; slic_write_mpi("opfunc", of, 2); }
+
 	/* TX slot 4 (mic -> bus, DMA ch0), RX slot 4 (earpiece <- bus) */
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
 	{ static const u8 tx[] = { 0x40, 0x04 }; slic_write_mpi("txslot", tx, sizeof(tx)); }
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
 	{ static const u8 rx[] = { 0x42, 0x04 }; slic_write_mpi("rxslot", rx, sizeof(rx)); }
-
-	/* 16-bit LINEAR codec, all AC filters active. */
-	v = 0xbf;	/* OPFUNC = CODEC_LINEAR (0x80) | ALL_FILTERS (0x3f) */
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
-	{ u8 of[2] = { 0x60, v }; slic_write_mpi("opfunc", of, 2); }
 
 	/* ICR3/ICR4 are mask,data pairs: set mask bit and data bit. */
 	{
@@ -440,12 +493,24 @@ static int slic_audio_setup(void)
 		ret = slic_write_mpi("icr3-vref", (const u8[]){ 0xf2, icr3[0], icr3[1], icr3[2], icr3[3] }, 5);
 		if (ret) return ret;
 
-		ret = zsi_mpi_read(VP886_EC_1, 0xf5, icr4, sizeof(icr4));
-		if (ret) return ret;
-		icr4[0] |= 0x03;	/* VDAC_EN (0x02) + VADC_EN (0x01) mask */
-		icr4[1] |= 0x03;	/* VDAC_EN + VADC_EN data (earpiece + mic) */
+		/* ICR4 [0]=override mask, [1]=data; [2]=mask, [3]=data. Bits:
+		 * VADC_EN 0x01, VDAC_EN 0x02, AISN_CTRL 0x10, SMALL_SIGNAL_CTRL 0x80.
+		 * The OEM/VP-API init writes ICR4 = {0,0,0,0} so the HW state machine
+		 * auto-enables VADC/VDAC/AISN/small-signal in active+codec. A nonzero
+		 * MASK bit with value 0 FORCE-DISABLES that block -> "ADC senses
+		 * nothing until the DAC stirs the line" (our exact bug). So write
+		 * ICR4 from ZERO (no read-modify-write that could preserve a stray
+		 * AISN/small-signal mask bit). icr4_mode 0 = fully automatic (OEM). */
+		icr4[0] = icr4[1] = icr4[2] = icr4[3] = 0;
+		if (icr4_mode == 1) {		/* force VDAC only (DAC), rest auto */
+			icr4[0] = 0x02;
+			icr4[1] = 0x02;
+		} else if (icr4_mode == 2) {	/* force VADC+VDAC (old config) */
+			icr4[0] = 0x03;
+			icr4[1] = 0x03;
+		}
 		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
-		ret = slic_write_mpi("icr4-vdac", (const u8[]){ 0xf4, icr4[0], icr4[1], icr4[2], icr4[3] }, 5);
+		ret = slic_write_mpi("icr4", (const u8[]){ 0xf4, icr4[0], icr4[1], icr4[2], icr4[3] }, 5);
 		if (ret) return ret;
 	}
 
@@ -453,16 +518,44 @@ static int slic_audio_setup(void)
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
 	{ static const u8 gr[] = { 0x82, 0x40, 0x00 }; slic_write_mpi("gr", gr, sizeof(gr)); }
 
-	/* OPCOND: clear CUT_TX|CUT_RX|TSA_LOOPBACK */
+	/* GX transmit (capture/mic) gain (opcode 0x80, 2 bytes). The mic is
+	 * captured at very low amplitude; the AC profile sets GX=0xA9F0. gx_val
+	 * lets us boost it in the analog codec (before its noise) -- 0 = leave the
+	 * profile value. Tune live: echo VAL > .../parameters/gx_val (decimal). */
+	if (gx_val != 0) {
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		{ u8 gx[3] = { 0x80, (gx_val >> 8) & 0xff, gx_val & 0xff };
+		  slic_write_mpi("gx", gx, sizeof(gx)); }
+	}
+
+	/* OPCOND: clear CUT_TX|CUT_RX|TSA_LOOPBACK (and HIGHPASS_DIS if hpf_on,
+	 * so the codec high-pass is active like the OEM -> removes DC offset). */
 	ret = zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
 	if (ret) return ret;
-	v &= ~0xc4;
+	v &= hpf_on ? ~0xe4 : ~0xc4;
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
 	{ u8 oc[2] = { 0x70, v }; slic_write_mpi("opcond", oc, 2); }
 
 	/* STATE = active + codec (0x23) */
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
 	{ static const u8 st[] = { 0x56, 0x23 }; slic_write_mpi("active+codec", st, sizeof(st)); }
+
+	/* let the ADC front-end bias/settle before the first capture */
+	if (settle_ms > 0)
+		msleep(settle_ms);
+
+	/* Enable ADC dither-cancel correction (INDCAL byte1 bit 0x80) to drop the
+	 * codec capture noise floor. Read INDCAL (0xb1) first to preserve byte0
+	 * (HD2 fuse trim). */
+	{
+		u8 ind[3];
+
+		if (!zsi_mpi_read(VP886_EC_1, 0xb1, ind, sizeof(ind))) {
+			ind[1] |= 0x80;
+			zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+			{ u8 ic[4] = { 0xb0, ind[0], ind[1], ind[2] }; slic_write_mpi("indcal-dither", ic, 4); }
+		}
+	}
 	return 0;
 }
 
@@ -525,6 +618,15 @@ extern ssize_t pcm_en751221_voice_write(const char __user *ubuf, size_t len);
 static int voice_dev_open(struct inode *ino, struct file *f)
 {
 	int ret;
+
+	/*
+	 * Full-duplex stream: read (mic) and write (earpiece) come from two
+	 * separate threads sharing this one fd (e.g. baresip's ausrc + auplay).
+	 * Mark it stream-mode so the VFS does NOT take the per-file f_pos lock
+	 * on read/write -- otherwise a writer blocked in voice_write() holds
+	 * f_pos_lock and starves the reader (capture throttled to ~3% -> TX=0).
+	 */
+	stream_open(ino, f);
 
 	mutex_lock(&sd.lock);
 	zsi_hw_init();
@@ -620,6 +722,162 @@ static int rx_scan_show(struct seq_file *s, void *unused)
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(rx_scan);
+
+/*
+ * Write knob: set SWCTRL (0xe6) live to test switcher power modes without
+ * re-running audio_setup. `echo 6a > swctrl` (MP/MP), 65 (LP/LP), 6f (HP/HP).
+ * Gap timing is handled inside slic_write_mpi -- no fragile shell sleeps.
+ */
+static ssize_t swctrl_write(struct file *f, const char __user *ub,
+			    size_t n, loff_t *off)
+{
+	u8 val;
+	int ret;
+
+	ret = kstrtou8_from_user(ub, n, 16, &val);
+	if (ret)
+		return ret;
+
+	mutex_lock(&sd.lock);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	{ u8 sw[2] = { 0xe6, val }; ret = slic_write_mpi("swctrl-dbg", sw, 2); }
+	mutex_unlock(&sd.lock);
+
+	pr_info("econet-slic: swctrl <- 0x%02x (ret=%d)\n", val, ret);
+	return ret ? ret : n;
+}
+static const struct file_operations swctrl_fops = {
+	.owner	= THIS_MODULE,
+	.write	= swctrl_write,
+	.open	= simple_open,
+	.llseek	= default_llseek,
+};
+
+/*
+ * Ring control for the "real call" flow: `echo 1 > ring` makes the FXS line
+ * ring (so a DECT handset treats it as a real incoming call and engages its
+ * mic when answered); `echo 0 > ring` drops to active+codec (= answered).
+ * Done over ZSI without opening the char device, so a userspace agent can ring
+ * on a SIP INVITE and poll `hook` for off-hook before telling baresip to answer.
+ */
+static ssize_t ring_write(struct file *f, const char __user *ub,
+			  size_t n, loff_t *off)
+{
+	u8 val;
+	int ret = kstrtou8_from_user(ub, n, 10, &val);
+
+	if (ret)
+		return ret;
+
+	mutex_lock(&sd.lock);
+	if (val) {
+		zsi_hw_init();
+		zsi_slic_reset();
+		writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
+		slic_load_profiles();
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		{ static const u8 sw[] = { 0xe6, 0x6f }; slic_write_mpi("ring-sw", sw, sizeof(sw)); }
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		{ static const u8 st[] = { 0x56, 0x03 }; slic_write_mpi("ring-active", st, sizeof(st)); }
+		msleep(20);
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		{ static const u8 r[] = { 0x56, 0x07 }; slic_write_mpi("ring-on", r, sizeof(r)); }
+	} else {
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		{ static const u8 st[] = { 0x56, 0x23 }; slic_write_mpi("ring-off", st, sizeof(st)); }
+	}
+	mutex_unlock(&sd.lock);
+	return n;
+}
+static const struct file_operations ring_fops = {
+	.owner	= THIS_MODULE,
+	.write	= ring_write,
+	.open	= simple_open,
+	.llseek	= default_llseek,
+};
+
+/* Read the SLIC hook state (SIGREG bit0): 1 = off-hook (handset lifted). */
+static int slic_hook_show(struct seq_file *s, void *unused)
+{
+	u8 sig = 0xff;
+
+	mutex_lock(&sd.lock);
+	zsi_mpi_read(VP886_EC_1, 0x4d, &sig, 1);
+	mutex_unlock(&sd.lock);
+	seq_printf(s, "%d\n", sig & 1);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_hook);
+
+/*
+ * SADC probe: read the supervisory ADC (0xA0) -- a measurement path totally
+ * independent of the voice codec (VADC->PCM). SEL TIP_RING_AC_V (0x00) reads
+ * the AC voltage on tip/ring = the mic signal ON THE LINE; SEL METALLIC_CUR
+ * (0x07) reads loop current (off-hook handset draws current). This tells us
+ * whether the mic signal reaches the line at all (DECT transmitting) vs the
+ * codec capture being idle (codec-gate). Run with the line up (cat
+ * audio_setup), earpiece SILENT, while the user speaks into the handset.
+ * One SADC math measurement: cfg via opcode 0xA0 (10 data bytes), wait, then
+ * read B1 (0x75, 25 bytes) and parse like Vp886GetSingleAdcMath.
+ */
+static int sadc_one(u8 sel, int *spread, int *avg)
+{
+	u8 cfg[11] = { 0xa0, 0x50, sel, 0x00, 0x3c, 0x00, 0x0a, 0, 0, 0, 0 };
+	u8 b1[25];
+	int num, mn, mx, ret;
+	long sum;
+
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	ret = slic_write_mpi("sadc-cfg", cfg, sizeof(cfg));
+	if (ret)
+		return ret;
+	msleep(60);
+	ret = zsi_mpi_read(VP886_EC_1, 0x75, b1, sizeof(b1));
+	if (ret)
+		return ret;
+	num = (b1[2] << 8) | b1[3];
+	mn  = (s16)((b1[4] << 8) | b1[5]);
+	mx  = (s16)((b1[6] << 8) | b1[7]);
+	sum = (long)(int)((b1[8] << 24) | (b1[9] << 16) | (b1[10] << 8) | b1[11]);
+	*spread = mx - mn;
+	*avg = num ? (int)(sum / num) : 0;
+	return num;
+}
+
+static int sadc_probe_show(struct seq_file *s, void *unused)
+{
+	int i, spread, avg, num, smin = 1 << 30, smax = 0, n = 0;
+	long ssum = 0;
+
+	mutex_lock(&sd.lock);
+	seq_puts(s, "SADC tip/ring AC (mic on the line) -- speak into the handset NOW:\n");
+	for (i = 0; i < 20; i++) {
+		num = sadc_one(0x00, &spread, &avg);
+		if (num <= 0) {
+			seq_printf(s, " [%2d] read err/empty (num=%d)\n", i, num);
+			continue;
+		}
+		seq_printf(s, " [%2d] AC spread=%6d (n=%d)\n", i, spread, num);
+		if (spread < smin)
+			smin = spread;
+		if (spread > smax)
+			smax = spread;
+		ssum += spread;
+		n++;
+	}
+	if (n)
+		seq_printf(s, "AC spread: min=%d max=%d mean=%ld  (large+varying => mic IS on the line)\n",
+			   smin, smax, ssum / n);
+	seq_puts(s, "Metallic loop current (off-hook handset draws current):\n");
+	for (i = 0; i < 3; i++) {
+		num = sadc_one(0x07, &spread, &avg);
+		seq_printf(s, " [%d] metallic avg=%d spread=%d (n=%d)\n",
+			   i, avg, spread, num);
+	}
+	mutex_unlock(&sd.lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(sadc_probe);
 
 /*
  * Play the melody out the earpiece. Line up the SLIC if needed (audio_setup
@@ -1008,6 +1266,10 @@ static int __init econet_slic_init(void)
 	debugfs_create_file("audio_capture", 0444, sd.dbg, NULL, &slic_audio_fops);
 	debugfs_create_file("audio_setup", 0444, sd.dbg, NULL, &slic_audio_setup_fops);
 	debugfs_create_file("rx_scan", 0444, sd.dbg, NULL, &rx_scan_fops);
+	debugfs_create_file("swctrl", 0200, sd.dbg, NULL, &swctrl_fops);
+	debugfs_create_file("ring", 0200, sd.dbg, NULL, &ring_fops);
+	debugfs_create_file("hook", 0444, sd.dbg, NULL, &slic_hook_fops);
+	debugfs_create_file("sadc_probe", 0444, sd.dbg, NULL, &sadc_probe_fops);
 	debugfs_create_file("play", 0444, sd.dbg, NULL, &slic_play_fops);
 	debugfs_create_file("tx_loopback", 0444, sd.dbg, NULL, &slic_loopback_fops);
 	debugfs_create_file("gr_check", 0444, sd.dbg, NULL, &slic_gr_check_fops);
