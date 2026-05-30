@@ -8,7 +8,7 @@ OpenWrt port for the **TP-Link Archer XR500v** GPON router — SoC: EcoNet **EN7
 |---|---|
 | Boot to console (UART, A/B slot flash) | ✅ |
 | **Ethernet LAN — 4 ports via DSA** | ✅ working (HW switching ~gigabit, CPU idle) |
-| PCIe / WiFi (MT7662 / mt76x2, 5 GHz AP) | ✅ |
+| **PCIe / WiFi — dual band** | ✅ 5 GHz AP (MT7662 / `mt76x2e`) + 2.4 GHz AP (MT7603 / `mt7603e`) |
 | **USB** (xHCI MediaTek + storage) | ✅ pendrive USB2 = `/dev/sda` |
 | **256 MB RAM** | ✅ (244 MB usable) |
 | **LAN TX throughput** | ✅ 161 Mbps como endpoint (fix BQL, antes ~5M) |
@@ -21,7 +21,7 @@ OpenWrt port for the **TP-Link Archer XR500v** GPON router — SoC: EcoNet **EN7
 ## Hardware
 - SoC: EcoNet EN751221 (MIPS 34Kc, BE, ~600 MHz). SPI-NAND 128 MB. **256 MB DDR3**.
 - Switch: dual MT7530 — on-die (MMIO `0x1fb58000`) + MCM (MDIO `0x1f`). 4× GE LAN.
-- WiFi: MediaTek MT7662 (mt76x2, PCIe). USB: xHCI (MediaTek).
+- WiFi: **two** MediaTek PCIe radios — MT7662 (5 GHz, `mt76x2e`) + MT7603 (2.4 GHz, `mt7603e`). USB: xHCI (MediaTek).
 - WAN: GPON (own MAC, not in OpenWrt). Phone: Microsemi **Le9642** SLIC over ZSI — reconstructed driver (see VoIP section).
 
 ## Cómo reconstruir (este repo es un OVERLAY sobre cjdelisle/openwrt)
@@ -45,6 +45,7 @@ make defconfig && make -j$(nproc)
 - **Port mapping invertido** (carcasa ≠ Linux): físico LAN1→`lan1` (MCM port4), LAN2→`lan2` (port3), LAN3→`lan3` (port2), LAN4→`lan4` (port1). Corregido en `en751221_tplink_archer-xr500v.dts`.
 - **USB** — nodo `usb@1fb90000` (mt8173-xhci). El puerto USB3 no tiene T-PHY cableado → `STS1_U3_MAC_RST` nunca sale de reset → `host_enable` timeout `-145`. Fix: `mediatek,u3p-dis-msk = <0x1>` (deshabilita U3; el puerto USB2 queda activo). El driver `xhci-mtk` NO consume `phys`.
 - **256 MB** — `memory@0 reg = <0x0 0x10000000>` en el board dts. Requiere disable INITRAMFS + dieta de kernel (sino el kernel comprimido no entra en `kernel1`=3 MB; el `dd conv=sync` redondea al múltiplo de 3072k).
+- **WiFi 2.4 GHz (MT7603)** — a *second* PCIe radio, separate from the 5 GHz MT7662. Two walls: enumeration needed the OEM global PCIe reset replicated at boot (the `mt7512_pcie_reset` sequence), and the `mt7603e` driver hung on the MCU EEPROM upload until a synthetic EEPROM was inlined in the DTS (`mediatek,eeprom-data` on the `wifi@0,0` node). 5 GHz (MT7662) runs on `mt76x2e`.
 - **Tagger** — econet-eth trae su propio `mtk-tag.ko` (de `gsw/tag-mtk.c`), *no* el `tag_mtk` del kernel. `mtk_conduit_find_user` device-agnostic.
 - **Gotcha operativo** — el conduit DSA `eth0` NO debe ser miembro de `br-lan` (su rx_handler de bridge bypasea el tagger DSA). `br-lan` = `lan1..lan4` (+ WiFi).
 - **Flash** — solo desde telnet stock OEM `:2323` (mtd write desde OpenWrt corriendo corrompe la NAND). Patch de header trendchip requerido.
