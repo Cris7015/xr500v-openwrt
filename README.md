@@ -2,7 +2,7 @@
 
 OpenWrt port for the **TP-Link Archer XR500v** GPON router — SoC: EcoNet **EN751221** (MIPS 34Kc, big-endian).
 
-## Status (2026-05-26) — FUNCIONAL ✅
+## Status (2026-05-30) — FUNCIONAL ✅
 
 | Function | State |
 |---|---|
@@ -13,8 +13,8 @@ OpenWrt port for the **TP-Link Archer XR500v** GPON router — SoC: EcoNet **EN7
 | **256 MB RAM** | ✅ (244 MB usable) |
 | **LAN TX throughput** | ✅ 161 Mbps como endpoint (fix BQL, antes ~5M) |
 | Bridge (4 LAN + WiFi) + persistent config + internet | ✅ |
+| **Telephone / VoIP (RJ11 FXS)** | ✅ working — clean bidirectional SIP calls + ring/answer/hangup (reconstructed SLIC driver) |
 | WAN / xPON (GPON fiber) | ❌ not supported (separate MAC block) |
-| Telephone (2× RJ11 / VoIP) | ❌ not supported (separate SLIC) |
 
 **The breakthrough:** the EN751221 has **two cascaded MT7530 switches** — an on-die one (MMIO @ `0x1fb58000`, only port5 cascade + port6 CPU) and an external MCM one (over MDIO @ `0x1f`) that carries the 4 real LAN ports. Modeling this as a **nested DSA tree** (the MCM as a child of the on-die switch's MDIO bus) makes all 4 LAN ports + WiFi work, bridged, with internet — *without* needing the unpublished MDIO-master code that previously blocked this.
 
@@ -22,7 +22,7 @@ OpenWrt port for the **TP-Link Archer XR500v** GPON router — SoC: EcoNet **EN7
 - SoC: EcoNet EN751221 (MIPS 34Kc, BE, ~600 MHz). SPI-NAND 128 MB. **256 MB DDR3**.
 - Switch: dual MT7530 — on-die (MMIO `0x1fb58000`) + MCM (MDIO `0x1f`). 4× GE LAN.
 - WiFi: MediaTek MT7662 (mt76x2, PCIe). USB: xHCI (MediaTek).
-- WAN: GPON (own MAC, not in OpenWrt). Phone: VoIP SLIC (not in OpenWrt).
+- WAN: GPON (own MAC, not in OpenWrt). Phone: Microsemi **Le9642** SLIC over ZSI — reconstructed driver (see VoIP section).
 
 ## Cómo reconstruir (este repo es un OVERLAY sobre cjdelisle/openwrt)
 
@@ -58,8 +58,52 @@ make defconfig && make -j$(nproc)
 
 *(Las patches PPE WIP 340/350 están en el historial git, commit `39fb218`. Se quitaron del build funcional: el forwarding ya da ~590M por software, HW NAT offload no es necesario.)*
 
+## VoIP / Telephone (FXS)  ✅
+
+The XR500v's RJ11 phone jacks use a **Microsemi Le9642** SLIC (VE886/VP886 family)
+over **ZSI** (Zarlink Serial Interface, multiplexed on the PCM bus) — "not
+supported" by the EcoNet OpenWrt project. The full FXS/VoIP stack was reverse-
+engineered and rebuilt from scratch: the SoC PCM/TDM DMA engine, the ZSI
+transport, the SLIC profiles / line-state / ring, G.711 audio, and a SIP
+integration. A point-to-point SIP call (PC softphone ↔ Philips DECT handset)
+works clean **both directions**, with real **ring / answer / hangup**.
+
+`package/kernel/econet-pcm/` builds two kernel modules — **`pcm-en751221`** (the
+SoC PCM/TDM controller @ `0x1fbd0000`) and **`econet-slic`** (the Le9642 over ZSI
+@ `0x1fbd1000`) — plus a baresip audio module exposing `/dev/xr500v-voice`
+(16-bit linear, 8 kHz) and `xr500v-callmgr.c`, a small userspace daemon for the
+call flow.
+
+### Key technical notes
+- **DC feed current** — the cordless DECT base needs more loop current than the
+  600R AC profile default (ILA 0x07 = 25 mA); the mic stays marginal at the
+  voice ADC until raised. `slic_audio_setup` bumps the DCFEED ILA to 38 mA
+  (`feed_ila` param) — this alone removed the capture noise and hum.
+- **u-law, not 16-bit linear** — the Le9642 drives only 8 bits per PCM timeslot
+  even in "linear" mode, so 16-bit linear gave 8-bit resolution (quiet speech
+  quantized to silence → choppy). The codec runs **G.711 u-law** and the voice
+  thread (de)compands to/from 16-bit linear for the char device; u-law's log
+  companding preserves quiet speech. The SLIC uses different clock-slot offsets
+  for TX-capture (low byte) vs RX-playback (high byte) — the `tx_msb` param
+  selects the playback byte.
+- **OPFUNC before TXSLOT** — the codec mode must be written before the timeslots
+  latch, or only one 8-bit slot is allocated.
+- **Real call flow** (`xr500v-callmgr`) — ties the SLIC hook (debugfs) to
+  baresip's `ctrl_tcp`: an incoming call rings the handset, going off-hook
+  accepts, on-hook hangs up (no leftover line tone). The ring voltage (STATE
+  0x07, 70–90 V) corrupts the SIGREG hook bit, so it rings with a cadence and
+  samples the hook only in the gaps, debounced.
+- **Persistence** — modules reload live without reflashing (the SLIC state only
+  resets on a cold boot). The whole stack (fixed `.ko` + baresip + callmgr)
+  persists via the UBIFS overlay (`/lib/modules`, `/root/bsdeploy`,
+  `/root/voip-start.sh` launched from `rc.local`) — no firmware reflash needed.
+
+The SLIC bring-up history (ZSI handshake, profiles, the ring milestone, the
+codec saga) lives in the git history and `notes/`.
+
 ## Estructura
 - `package/kernel/econet-eth/` — driver eth + DSA (patches sobre el fork `cjdelisle/econet_eth` @ `c2f855cf`) + `files/` (init del switch).
+- `package/kernel/econet-pcm/` — VoIP/FXS: `pcm-en751221` (PCM/TDM) + `econet-slic` (Le9642 over ZSI) kernel modules, the baresip `xr500v` audio module, and `xr500v-callmgr.c` (the ring/answer/hangup daemon).
 - `package/kernel/linux/modules/netdevices.mk` — agrega `TARGET_econet` a deps + define `kmod-dsa-mt7530`.
 - `target/linux/econet/` — DTS (SoC dtsi + board XR500v), `en751221/config-6.12`, image recipe, base-files, patches NAND.
 - `config.seed` — selecciones de build (sembrar como `.config`).
