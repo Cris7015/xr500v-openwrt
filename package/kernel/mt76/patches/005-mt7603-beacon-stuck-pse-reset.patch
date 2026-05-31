@@ -1,0 +1,22 @@
+--- a/mt7603/mac.c	2026-05-30 22:22:12.745486670 -0300
++++ b/mt7603/mac.c	2026-05-30 22:23:07.917485427 -0300
+@@ -1454,8 +1454,18 @@
+ 		mt76_queue_rx_reset(dev, i);
+ 	}
+ 
++	/*
++	 * XR500v: commit a8d9553 dropped BEACON_STUCK from the PSE-reset gate, so a
++	 * stuck beacon only gets the light reset (which stays inside the MT7603 MMIO
++	 * domain and cannot drain the leaked PSE beacon token) and re-sticks until a
++	 * cold power-cycle. Restore the full PSE reset for a recurring beacon stuck;
++	 * the DMA is already stopped at this point (mt7603_mac_dma_start runs below),
++	 * so it is safe.
++	 */
+ 	if (dev->reset_cause[RESET_CAUSE_RESET_FAILED] ||
+-	    dev->cur_reset_cause == RESET_CAUSE_RX_PSE_BUSY)
++	    dev->cur_reset_cause == RESET_CAUSE_RX_PSE_BUSY ||
++	    (dev->cur_reset_cause == RESET_CAUSE_BEACON_STUCK &&
++	     dev->reset_cause[RESET_CAUSE_BEACON_STUCK] >= 2))
+ 		mt7603_pse_reset(dev);
+ 
+ 	if (!dev->reset_cause[RESET_CAUSE_RESET_FAILED]) {
