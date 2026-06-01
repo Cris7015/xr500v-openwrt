@@ -1,0 +1,42 @@
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -206,6 +206,21 @@
+
+ 	ret = en75_qdma_xmit(port->qdma, skb, &msg, 0);
+
++	if (ret == -EBUSY) {
++		/* TX ring full: en75_qdma_xmit() returns -EBUSY *before*
++		 * consuming or DMA-mapping the skb, so the skb is still
++		 * ours and intact. The NETDEV_TX_BUSY contract
++		 * (Documentation/networking/driver.rst) forbids freeing
++		 * or keeping a reference to the skb here: the qdisc layer
++		 * requeues and retries it. Freeing it and returning
++		 * NETDEV_TX_BUSY was a use-after-free -- the stack
++		 * requeued the freed skb into q->gso_skb and the next
++		 * __qdisc_run() crashed in __skb_dequeue (NULL deref,
++		 * BadVA=0x4). */
++		netif_tx_stop_queue(txq);
++		return NETDEV_TX_BUSY;
++	}
++
+ 	if (ret < 0)
+ 		goto error;
+
+@@ -217,13 +232,12 @@
+ 	return NETDEV_TX_OK;
+
+ error:
++	/* Genuine, unrecoverable TX error (skb_linearize or
++	 * dma_mapping failure): drop the packet. The -EBUSY ring-full
++	 * case is handled above and never reaches here, so we must
++	 * never free the skb and then return NETDEV_TX_BUSY (the UAF). */
+ 	dev_kfree_skb_any(skb);
+ 	dev->stats.tx_dropped++;
+-
+-	if (ret == -EBUSY) {
+-		netif_tx_stop_queue(txq);
+-		return NETDEV_TX_BUSY;
+-	}
+
+ 	return NETDEV_TX_OK;
+ }
