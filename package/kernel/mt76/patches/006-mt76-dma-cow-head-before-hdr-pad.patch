@@ -1,0 +1,29 @@
+mt76: dma: ensure headroom before inserting the 4-byte align hdr pad
+
+mt76_insert_hdr_pad() does a bare skb_push(skb, 2) with no headroom
+check. A frame reaching mt76_dma_tx_queue_skb() with zero headroom
+(observed on mt76x2/MT7662 AP mode under sustained forwarding) makes
+skb->data go below skb->head -> skb_under_panic -> kernel BUG in the
+mt76-tx worker (Fatal exception, reboot). Guarantee the 2 bytes via
+skb_cow_head() before the pad; drop the frame on allocation failure.
+
+Signed-off-by: Cris7015 <pcristian292@gmail.com>
+--- a/dma.c
++++ b/dma.c
+@@ -671,8 +671,15 @@
+ 	txwi = mt76_get_txwi_ptr(dev, t);
+ 
+ 	skb->prev = skb->next = NULL;
+-	if (dev->drv->drv_flags & MT_DRV_TX_ALIGNED4_SKBS)
++	if (dev->drv->drv_flags & MT_DRV_TX_ALIGNED4_SKBS) {
++		/* mt76_insert_hdr_pad() does a bare skb_push(skb, 2). Guarantee the
++		 * 2 bytes of headroom first: a frame can reach the TX ring with no
++		 * headroom (e.g. forwarded/aggregated), and the bare push would
++		 * underflow the skb -> skb_under_panic. */
++		if (skb_cow_head(skb, 2))
++			goto free;
+ 		mt76_insert_hdr_pad(skb);
++	}
+ 
+ 	len = skb_headlen(skb);
+ 	addr = dma_map_single(dev->dma_dev, skb->data, len, DMA_TO_DEVICE);
