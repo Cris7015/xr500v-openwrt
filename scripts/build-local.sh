@@ -15,6 +15,12 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 JOBS="$(nproc)"
 IMG="$OWRT/bin/targets/econet/en751221/openwrt-econet-en751221-tplink_archer-xr500v-squashfs-sysupgrade.bin"
 
+# WSL strips: the Windows PATH leaks into WSL and 'C:\Program Files\PowerShell\7'
+# becomes a *relative* entry 'Files/PowerShell/7', which makes find -execdir
+# (used by OpenWrt's reproducible-build timestamp step) refuse to run and the
+# build fails at package/install. Drop /mnt/* and any non-absolute entry.
+export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -E '^/' | grep -vE '^/mnt/' | paste -sd:)"
+
 echo "==> [1/3] sync overlay ($REPO -> $OWRT)"
 cp -r "$REPO"/package/* "$OWRT/package/"
 cp -r "$REPO"/target/*  "$OWRT/target/"
