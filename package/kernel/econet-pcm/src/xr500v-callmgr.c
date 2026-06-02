@@ -25,6 +25,11 @@
 
 #define HOOK_PATH  "/sys/kernel/debug/econet-slic/hook"
 #define RING_PATH  "/sys/kernel/debug/econet-slic/ring"
+#define LED_PHONE  "/sys/class/leds/green:phone1"	/* PHONE panel LED for the active
+							 * line. With slic_ec=2 the line is
+							 * SLIC ch2/EC_2 = jack labeled
+							 * "phone1" (case labels are inverted
+							 * vs the silicon) */
 #define SPEEDDIAL  "/root/voip-speeddial"	/* optional: 1 line, a SIP URI */
 #define CTRL_IP    "127.0.0.1"
 #define CTRL_PORT  4444
@@ -70,6 +75,42 @@ static void ring(int on)
 		if (write(fd, on ? "1\n" : "0\n", 2) < 0)
 			;
 		close(fd);
+	}
+}
+
+/* Drive the PHONE panel LED to match the OEM manual: 2 = blink (ringing, via the
+ * kernel timer trigger), 1 = solid on (off-hook / in a call), 0 = off (on-hook). */
+static void phone_led(int mode)
+{
+	const char *trig = (mode == 2) ? "timer" : "none";
+	int fd;
+
+	fd = open(LED_PHONE "/trigger", O_WRONLY);
+	if (fd >= 0) {
+		if (write(fd, trig, strlen(trig)) < 0)
+			;
+		close(fd);
+	}
+	if (mode == 2) {
+		fd = open(LED_PHONE "/delay_on", O_WRONLY);
+		if (fd >= 0) {
+			if (write(fd, "400", 3) < 0)
+				;
+			close(fd);
+		}
+		fd = open(LED_PHONE "/delay_off", O_WRONLY);
+		if (fd >= 0) {
+			if (write(fd, "400", 3) < 0)
+				;
+			close(fd);
+		}
+	} else {
+		fd = open(LED_PHONE "/brightness", O_WRONLY);
+		if (fd >= 0) {
+			if (write(fd, mode ? "1" : "0", 1) < 0)
+				;
+			close(fd);
+		}
 	}
 }
 
@@ -142,9 +183,10 @@ int main(void)
 	char buf[8192];
 	int s = -1, blen = 0;
 	int hook_last = -1, stable_hk = -1, stable_cnt = 0, baseline = 0;
-	int ring_tick = 0;
+	int ring_tick = 0, ring_on = 0;	/* ring_on = SLIC ring state we last asserted */
 
 	logmsg("starting");
+	phone_led(0);			/* idle: PHONE LED off */
 	for (;;) {
 		struct pollfd pfd;
 		int rc, ringing_now = 0;
@@ -186,15 +228,18 @@ int main(void)
 					if (state == IDLE) {
 						state = RINGING;
 						ring_tick = 0;
+						phone_led(2);	/* ringing: blink */
 						logmsg("INCOMING -> ringing");
 					}
 				} else if (strstr(payload, "\"CALL_ESTABLISHED\"")) {
 					state = INCALL;
 					ring(0);
+					phone_led(1);	/* in call: solid on */
 					logmsg("ESTABLISHED");
 				} else if (strstr(payload, "\"CALL_CLOSED\"")) {
 					state = IDLE;
 					ring(0);
+					phone_led(0);	/* idle: off */
 					logmsg("CLOSED -> idle");
 				}
 				q = payload + len + 1;	/* past json + ',' */
@@ -212,9 +257,20 @@ int main(void)
 			int phase = ring_tick % RING_PERIOD;
 
 			ringing_now = (phase < RING_ON_TICKS);
-			ring(ringing_now ? 1 : 0);
+			/* Only (re)assert the SLIC ring state on a transition.
+			 * Writing STATE 0x07 every tick re-enters BAL_RING and
+			 * restarts the ring waveform, so the bell stutters / rings
+			 * continuously instead of cadencing. Toggle on edges only. */
+			if (ringing_now != ring_on) {
+				ring(ringing_now);
+				ring_on = ringing_now;
+			}
 			ring_tick++;
 		} else {
+			if (ring_on) {		/* left RINGING -> make sure ring is off */
+				ring(0);
+				ring_on = 0;
+			}
 			ring_tick = 0;
 		}
 
@@ -238,6 +294,7 @@ int main(void)
 							hook_last, stable_hk, state);
 						fflush(stderr);
 						if (stable_hk == 1) {		/* off-hook (lifted) */
+							phone_led(1);	/* off-hook: solid on */
 							if (state == RINGING) {
 								ctrl_cmd(s, "accept", NULL);
 								ring(0);
@@ -245,6 +302,7 @@ int main(void)
 								speeddial(s);
 							}
 						} else {			/* on-hook (hung up) */
+							phone_led(0);	/* on-hook: off */
 							if (state == INCALL || state == RINGING) {
 								ctrl_cmd(s, "hangup", NULL);
 								ring(0);
