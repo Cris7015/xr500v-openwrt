@@ -337,6 +337,24 @@ static const u8 ring_mpi[] = {	/* RING_ZL880_BB90V_DEF: ringing generator */
 	0xc0, 0x08, 0x00, 0x00, 0x00, 0x44, 0x3a, 0x9d, 0x00, 0x00, 0x00, 0x00,
 };
 
+/*
+ * SLIC channel selector for the FXS port. The Le9642 is a 2-channel device:
+ * VP886_EC_1 (0x01) = channel 1 (the working line; case-labeled "phone2" --
+ * the case labels are inverted vs the silicon, same as the ethernet ports),
+ * VP886_EC_2 (0x02) = channel 2 (2nd jack, case-labeled "phone1"). Probe: set
+ * slic_ec=2 to move the single line to the 2nd FXS channel, reusing the same
+ * timeslot/DMA/char device/baresip. Device-level init + chip detect stay on
+ * EC_1; only the per-channel line config, ring and hook follow this. */
+static int slic_ec = VP886_EC_1;
+module_param(slic_ec, int, 0644);
+
+/* PCM bus timeslot for this channel's voice (TXSLOT mic->bus, RXSLOT bus->ear).
+ * ch1 uses slot 4 (default). For two simultaneous lines, ch2 must use its OWN
+ * slot (e.g. 6) so the two lines don't collide on the bus. The SoC PCM RX DMA
+ * channel that the mic lands on shifts with this slot (find via rx_scan). */
+static int slic_slot = 4;
+module_param(slic_slot, int, 0644);
+
 /* Stream one raw MPI section to the SLIC in a single ZSI session. */
 static int slic_write_mpi(const char *what, const u8 *b, int n)
 {
@@ -367,6 +385,25 @@ static int slic_load_profiles(void)
 	if (ret)
 		return ret;
 	return slic_write_mpi("ring", ring_mpi, sizeof(ring_mpi));
+}
+
+/*
+ * Load the per-channel line profiles (DC feed, AC impedance, ring generator)
+ * onto the active SLIC channel (slic_ec). slic_load_profiles()/init only
+ * program channel 1; the 2nd FXS channel needs its own copy for a matched
+ * hybrid + ring. No-op on channel 1 (already loaded). Mirrors the DC/AC/ring
+ * sections of slic_load_profiles, just on the selected channel.
+ */
+static void slic_load_channel_profiles(void)
+{
+	if (slic_ec == VP886_EC_1)
+		return;
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+	slic_write_mpi("dc-ch", dc_mpi, sizeof(dc_mpi));
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+	slic_write_mpi("ac-ch", ac_mpi + 6, sizeof(ac_mpi) - 6);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+	slic_write_mpi("ring-ch", ring_mpi, sizeof(ring_mpi));
 }
 
 /* Full 3b init: bring-up (3a) + verify + load device profile. */
@@ -435,17 +472,21 @@ static int slic_audio_setup(void)
 	u8 v;
 	int ret;
 
+	/* For the 2nd FXS channel, give it its own DC/AC/ring line profiles first
+	 * (init only programmed channel 1). No-op on channel 1. */
+	slic_load_channel_profiles();
+
 	/* Switcher timing + params (from OEM profile) BEFORE enabling the switcher,
 	 * so the buck-boost runs with calibrated edge timing instead of noisy
 	 * defaults (uncalibrated ripple couples broadband noise into the ADC). */
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ static const u8 swt[] = { 0xf6, 0x66, 0x00, 0x64, 0x30, 0x74, 0x30 }; slic_write_mpi("swtiming", swt, sizeof(swt)); }
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ static const u8 swp[] = { 0xe4, 0x04, 0x92, 0x0a }; slic_write_mpi("swparam", swp, sizeof(swp)); }
 	/* switcher HP (simple direct write -- the robust CALCTRL sequence breaks it) */
 	{ static const u8 sw[] = { 0xe6, 0x6f }; ret = slic_write_mpi("sw-hp", sw, sizeof(sw)); if (ret) return ret; }
 	/* feed active (no codec yet) */
-	ret = zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	ret = zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	if (ret) return ret;
 	{ static const u8 st[] = { 0x56, 0x03 }; slic_write_mpi("active", st, sizeof(st)); }
 
@@ -458,9 +499,9 @@ static int slic_audio_setup(void)
 	if (feed_ila != 0) {
 		u8 dcf[2];
 
-		if (!zsi_mpi_read(VP886_EC_1, 0xc7, dcf, sizeof(dcf))) {
+		if (!zsi_mpi_read((u8)slic_ec, 0xc7, dcf, sizeof(dcf))) {
 			dcf[1] = (dcf[1] & ~0x1f) | (feed_ila & 0x1f);
-			zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+			zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 			{ u8 d[3] = { 0xc6, dcf[0], dcf[1] }; slic_write_mpi("dcfeed-ila", d, 3); }
 		}
 	}
@@ -472,24 +513,25 @@ static int slic_audio_setup(void)
 	 * quiet speech; the voice thread (de)compands to/from 16-bit linear for the
 	 * char device. Written BEFORE the timeslots (OEM order, le9641.c). */
 	v = 0x7f;	/* OPFUNC = CODEC_ULAW (0x40) | ALL_FILTERS (0x3f) */
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ u8 of[2] = { 0x60, v }; slic_write_mpi("opfunc", of, 2); }
 
-	/* TX slot 4 (mic -> bus, DMA ch0), RX slot 4 (earpiece <- bus) */
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
-	{ static const u8 tx[] = { 0x40, 0x04 }; slic_write_mpi("txslot", tx, sizeof(tx)); }
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
-	{ static const u8 rx[] = { 0x42, 0x04 }; slic_write_mpi("rxslot", rx, sizeof(rx)); }
+	/* TX slot (mic -> bus), RX slot (earpiece <- bus). slic_slot selects the
+	 * bus timeslot so a 2nd channel can use its own slot (default 4 = ch1). */
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+	{ u8 tx[] = { 0x40, (u8)slic_slot }; slic_write_mpi("txslot", tx, sizeof(tx)); }
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+	{ u8 rx[] = { 0x42, (u8)slic_slot }; slic_write_mpi("rxslot", rx, sizeof(rx)); }
 
 	/* ICR3/ICR4 are mask,data pairs: set mask bit and data bit. */
 	{
 		u8 icr3[4], icr4[4];
 
-		ret = zsi_mpi_read(VP886_EC_1, 0xf3, icr3, sizeof(icr3));
+		ret = zsi_mpi_read((u8)slic_ec, 0xf3, icr3, sizeof(icr3));
 		if (ret) return ret;
 		icr3[0] |= 0x01;	/* VREF_EN mask */
 		icr3[1] |= 0x01;	/* VREF_EN data */
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 		ret = slic_write_mpi("icr3-vref", (const u8[]){ 0xf2, icr3[0], icr3[1], icr3[2], icr3[3] }, 5);
 		if (ret) return ret;
 
@@ -509,13 +551,13 @@ static int slic_audio_setup(void)
 			icr4[0] = 0x03;
 			icr4[1] = 0x03;
 		}
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 		ret = slic_write_mpi("icr4", (const u8[]){ 0xf4, icr4[0], icr4[1], icr4[2], icr4[3] }, 5);
 		if (ret) return ret;
 	}
 
 	/* GR receive (earpiece) gain = 0x4000 unity (MPI write opcode 0x82) */
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ static const u8 gr[] = { 0x82, 0x40, 0x00 }; slic_write_mpi("gr", gr, sizeof(gr)); }
 
 	/* GX transmit (capture/mic) gain (opcode 0x80, 2 bytes). The mic is
@@ -523,21 +565,21 @@ static int slic_audio_setup(void)
 	 * lets us boost it in the analog codec (before its noise) -- 0 = leave the
 	 * profile value. Tune live: echo VAL > .../parameters/gx_val (decimal). */
 	if (gx_val != 0) {
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 		{ u8 gx[3] = { 0x80, (gx_val >> 8) & 0xff, gx_val & 0xff };
 		  slic_write_mpi("gx", gx, sizeof(gx)); }
 	}
 
 	/* OPCOND: clear CUT_TX|CUT_RX|TSA_LOOPBACK (and HIGHPASS_DIS if hpf_on,
 	 * so the codec high-pass is active like the OEM -> removes DC offset). */
-	ret = zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+	ret = zsi_mpi_read((u8)slic_ec, 0x71, &v, 1);
 	if (ret) return ret;
 	v &= hpf_on ? ~0xe4 : ~0xc4;
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ u8 oc[2] = { 0x70, v }; slic_write_mpi("opcond", oc, 2); }
 
 	/* STATE = active + codec (0x23) */
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ static const u8 st[] = { 0x56, 0x23 }; slic_write_mpi("active+codec", st, sizeof(st)); }
 
 	/* let the ADC front-end bias/settle before the first capture */
@@ -550,9 +592,9 @@ static int slic_audio_setup(void)
 	{
 		u8 ind[3];
 
-		if (!zsi_mpi_read(VP886_EC_1, 0xb1, ind, sizeof(ind))) {
+		if (!zsi_mpi_read((u8)slic_ec, 0xb1, ind, sizeof(ind))) {
 			ind[1] |= 0x80;
-			zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+			zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 			{ u8 ic[4] = { 0xb0, ind[0], ind[1], ind[2] }; slic_write_mpi("indcal-dither", ic, 4); }
 		}
 	}
@@ -572,9 +614,9 @@ static int slic_audio_show(struct seq_file *s, void *unused)
 	/* load profiles, then audio line-up */
 	slic_load_profiles();
 	ret = slic_audio_setup();
-	zsi_mpi_read(VP886_EC_1, 0x41, &txslot, 1);
-	zsi_mpi_read(VP886_EC_1, 0x61, &opfunc, 1);
-	zsi_mpi_read(VP886_EC_1, 0x57, &st, 1);
+	zsi_mpi_read((u8)slic_ec, 0x41, &txslot, 1);
+	zsi_mpi_read((u8)slic_ec, 0x61, &opfunc, 1);
+	zsi_mpi_read((u8)slic_ec, 0x57, &st, 1);
 	mutex_unlock(&sd.lock);
 
 	memset(buf, 0, sizeof(buf));
@@ -686,9 +728,9 @@ static int slic_audio_setup_show(struct seq_file *s, void *unused)
 	writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
 	slic_load_profiles();
 	ret = slic_audio_setup();
-	zsi_mpi_read(VP886_EC_1, 0x41, &tx, 1);
-	zsi_mpi_read(VP886_EC_1, 0x57, &st, 1);
-	zsi_mpi_read(VP886_EC_1, 0x4d, &sig, 1);
+	zsi_mpi_read((u8)slic_ec, 0x41, &tx, 1);
+	zsi_mpi_read((u8)slic_ec, 0x57, &st, 1);
+	zsi_mpi_read((u8)slic_ec, 0x4d, &sig, 1);
 	mutex_unlock(&sd.lock);
 	slic_audio_up = (ret == 0);
 	seq_printf(s, "audio setup ret=%d  txslot=0x%02x state=0x%02x hook=%d\n",
@@ -739,7 +781,7 @@ static ssize_t swctrl_write(struct file *f, const char __user *ub,
 		return ret;
 
 	mutex_lock(&sd.lock);
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ u8 sw[2] = { 0xe6, val }; ret = slic_write_mpi("swctrl-dbg", sw, 2); }
 	mutex_unlock(&sd.lock);
 
@@ -775,15 +817,16 @@ static ssize_t ring_write(struct file *f, const char __user *ub,
 		zsi_slic_reset();
 		writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
 		slic_load_profiles();
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		slic_load_channel_profiles();	/* 2nd FXS channel: own DC/AC/ring */
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 		{ static const u8 sw[] = { 0xe6, 0x6f }; slic_write_mpi("ring-sw", sw, sizeof(sw)); }
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 		{ static const u8 st[] = { 0x56, 0x03 }; slic_write_mpi("ring-active", st, sizeof(st)); }
 		msleep(20);
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 		{ static const u8 r[] = { 0x56, 0x07 }; slic_write_mpi("ring-on", r, sizeof(r)); }
 	} else {
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 		{ static const u8 st[] = { 0x56, 0x23 }; slic_write_mpi("ring-off", st, sizeof(st)); }
 	}
 	mutex_unlock(&sd.lock);
@@ -797,14 +840,23 @@ static const struct file_operations ring_fops = {
 };
 
 /* Read the SLIC hook state (SIGREG bit0): 1 = off-hook (handset lifted). */
+/*
+ * Read the SLIC hook state (off-hook = handset lifted). SIGREG (0x4d) is a
+ * DEVICE-level 4-byte register: each channel's HOOK bit (0x01) lives in its
+ * OWN byte -- byte[0]=channel 1 (EC_1), byte[1]=channel 2 (EC_2). So index by
+ * (slic_ec - 1), not a fixed byte[0]. (Empirically confirmed: off-hook on ch2
+ * reads 00 01 00 00.) Read with the no-update-latch addr so polling doesn't
+ * disturb the interrupt latch.
+ */
 static int slic_hook_show(struct seq_file *s, void *unused)
 {
-	u8 sig = 0xff;
+	u8 sig[4] = {0};
+	int idx = (slic_ec >= 1 && slic_ec <= 4) ? (slic_ec - 1) : 0;
 
 	mutex_lock(&sd.lock);
-	zsi_mpi_read(VP886_EC_1, 0x4d, &sig, 1);
+	zsi_mpi_read((u8)slic_ec, 0x4d, sig, sizeof(sig));
 	mutex_unlock(&sd.lock);
-	seq_printf(s, "%d\n", sig & 1);
+	seq_printf(s, "%d\n", sig[idx] & 1);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(slic_hook);
@@ -827,12 +879,12 @@ static int sadc_one(u8 sel, int *spread, int *avg)
 	int num, mn, mx, ret;
 	long sum;
 
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	ret = slic_write_mpi("sadc-cfg", cfg, sizeof(cfg));
 	if (ret)
 		return ret;
 	msleep(60);
-	ret = zsi_mpi_read(VP886_EC_1, 0x75, b1, sizeof(b1));
+	ret = zsi_mpi_read((u8)slic_ec, 0x75, b1, sizeof(b1));
 	if (ret)
 		return ret;
 	num = (b1[2] << 8) | b1[3];
@@ -949,11 +1001,11 @@ static int slic_loopback_show(struct seq_file *s, void *unused)
 		slic_load_profiles();
 		slic_audio_up = (slic_audio_setup() == 0);
 	}
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ static const u8 rx[] = { 0x42, 0x06 }; slic_write_mpi("rxslot6", rx, sizeof(rx)); }
-	zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+	zsi_mpi_read((u8)slic_ec, 0x71, &v, 1);
 	v |= 0x04;
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ u8 oc[2] = { 0x70, v }; slic_write_mpi("opcond-lb", oc, 2); }
 	mutex_unlock(&sd.lock);
 
@@ -961,9 +1013,9 @@ static int slic_loopback_show(struct seq_file *s, void *unused)
 	ret = pcm_en751221_loopback_capture(out, 0xf5071306);
 
 	mutex_lock(&sd.lock);
-	zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+	zsi_mpi_read((u8)slic_ec, 0x71, &v, 1);
 	v &= ~0x04;
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ u8 oc[2] = { 0x70, v }; slic_write_mpi("opcond-rst", oc, 2); }
 	mutex_unlock(&sd.lock);
 
@@ -978,7 +1030,7 @@ static int slic_write_ec1_mpi(const u8 *b, int n)
 {
 	int ret;
 
-	ret = zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	ret = zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	if (ret)
 		return ret;
 	return slic_write_mpi("ec1-mpi", b, n);
@@ -997,7 +1049,7 @@ static int slic_audio_slot4_prepare(u8 *opfunc_out, u8 *opcond_out,
 	if (ret)
 		return ret;
 
-	ret = zsi_mpi_read(VP886_EC_1, 0x61, &v, 1);
+	ret = zsi_mpi_read((u8)slic_ec, 0x61, &v, 1);
 	if (ret)
 		return ret;
 	v = (v & ~0xc0) | 0x80;
@@ -1010,7 +1062,7 @@ static int slic_audio_slot4_prepare(u8 *opfunc_out, u8 *opcond_out,
 	if (ret)
 		return ret;
 
-	ret = zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+	ret = zsi_mpi_read((u8)slic_ec, 0x71, &v, 1);
 	if (ret)
 		return ret;
 	v &= ~0xc4;
@@ -1019,7 +1071,7 @@ static int slic_audio_slot4_prepare(u8 *opfunc_out, u8 *opcond_out,
 		return ret;
 	*opcond_out = v;
 
-	ret = zsi_mpi_read(VP886_EC_1, 0x57, &st, 1);
+	ret = zsi_mpi_read((u8)slic_ec, 0x57, &st, 1);
 	if (ret)
 		return ret;
 	*state_before = st;
@@ -1043,15 +1095,15 @@ static int slic_gr_check_show(struct seq_file *s, void *unused)
 	mutex_lock(&sd.lock);
 	zsi_hw_init();
 	writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
-	ret1 = zsi_mpi_read(VP886_EC_1, 0x83, gr_before, 2);
-	zsi_mpi_read(VP886_EC_1, 0x61, &opfunc, 1);
+	ret1 = zsi_mpi_read((u8)slic_ec, 0x83, gr_before, 2);
+	zsi_mpi_read((u8)slic_ec, 0x61, &opfunc, 1);
 	ret2 = slic_write_ec1_mpi((const u8[]){ 0x82, 0x40, 0x00 }, 3);
 	if (!ret2)
-		ret2 = zsi_mpi_read(VP886_EC_1, 0x83, gr_after, 2);
-	zsi_mpi_read(VP886_EC_1, 0x41, &tx, 1);
-	zsi_mpi_read(VP886_EC_1, 0x43, &rx, 1);
-	zsi_mpi_read(VP886_EC_1, 0x71, &opcond, 1);
-	zsi_mpi_read(VP886_EC_1, 0x57, &state, 1);
+		ret2 = zsi_mpi_read((u8)slic_ec, 0x83, gr_after, 2);
+	zsi_mpi_read((u8)slic_ec, 0x41, &tx, 1);
+	zsi_mpi_read((u8)slic_ec, 0x43, &rx, 1);
+	zsi_mpi_read((u8)slic_ec, 0x71, &opcond, 1);
+	zsi_mpi_read((u8)slic_ec, 0x57, &state, 1);
 	mutex_unlock(&sd.lock);
 
 	seq_printf(s, "GR before ret=%d raw=%02x %02x be=0x%02x%02x le=0x%02x%02x\n",
@@ -1083,7 +1135,7 @@ static int slic_tone_loopback_show(struct seq_file *s, void *unused)
 	writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
 	ret = slic_audio_slot4_prepare(&opfunc, &opcond, &state, &state_wr);
 	if (!ret) {
-		ret = zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+		ret = zsi_mpi_read((u8)slic_ec, 0x71, &v, 1);
 		if (!ret) {
 			v = (v & ~0xc0) | 0x04;
 			ret = slic_write_ec1_mpi((const u8[]){ 0x70, v }, 2);
@@ -1095,7 +1147,7 @@ static int slic_tone_loopback_show(struct seq_file *s, void *unused)
 		ret = pcm_en751221_loopback_tone_capture(out, sizeof(out));
 
 	mutex_lock(&sd.lock);
-	zsi_mpi_read(VP886_EC_1, 0x71, &v, 1);
+	zsi_mpi_read((u8)slic_ec, 0x71, &v, 1);
 	v &= ~0x04;
 	slic_write_ec1_mpi((const u8[]){ 0x70, v }, 2);
 	mutex_unlock(&sd.lock);
@@ -1201,19 +1253,19 @@ static int slic_tone_show(struct seq_file *s, void *unused)
 		slic_audio_up = (slic_audio_setup() == 0);
 	}
 	/* SIGAB: gen A 1 kHz (0x0AAB), amp 0x7000, sine continuous; gen B off */
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ static const u8 sg[] = { 0xd2, 0x00, 0x00, 0x00, 0x0a, 0xab,
 				   0x70, 0x00, 0x00, 0x00, 0x00, 0x00 };
 	  slic_write_mpi("sigab", sg, sizeof(sg)); }
 	/* SIGCTRL: enable gen A, continuous */
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ static const u8 on[] = { 0xde, 0x01 }; slic_write_mpi("sigctrl-on", on, sizeof(on)); }
 	mutex_unlock(&sd.lock);
 
 	msleep(3000);				/* beep duration */
 
 	mutex_lock(&sd.lock);
-	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ VP886_EC_1 }, 1);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ static const u8 off[] = { 0xde, 0x00 }; slic_write_mpi("sigctrl-off", off, sizeof(off)); }
 	mutex_unlock(&sd.lock);
 
