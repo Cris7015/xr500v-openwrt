@@ -25,11 +25,13 @@
 
 #define HOOK_PATH  "/sys/kernel/debug/econet-slic/hook"
 #define RING_PATH  "/sys/kernel/debug/econet-slic/ring"
-#define LED_PHONE  "/sys/class/leds/green:phone1"	/* PHONE panel LED for the active
-							 * line. With slic_ec=2 the line is
-							 * SLIC ch2/EC_2 = jack labeled
-							 * "phone1" (case labels are inverted
-							 * vs the silicon) */
+#define HOOK_RAW   "/sys/kernel/debug/econet-slic/hook_raw"	/* "b0 b1": b0=EC_1=phone2, b1=EC_2=phone1 */
+#define SLIC_EC_P  "/sys/module/econet_slic/parameters/slic_ec"	/* active channel (1 or 2) */
+/* PHONE panel LEDs. Case labels are inverted vs the silicon: EC_2 (SLIC ch2) =
+ * jack "phone1" = LED_PHONE1; EC_1 (ch1) = jack "phone2" = LED_PHONE2. We ring
+ * both jacks so the single phone rings in whichever it is plugged into. */
+#define LED_PHONE1 "/sys/class/leds/green:phone1"	/* EC_2 */
+#define LED_PHONE2 "/sys/class/leds/green:phone2"	/* EC_1 */
 #define SPEEDDIAL  "/root/voip-speeddial"	/* optional: 1 line, a SIP URI */
 #define CTRL_IP    "127.0.0.1"
 #define CTRL_PORT  4444
@@ -66,6 +68,41 @@ static int read_hook(void)
 	return -1;
 }
 
+/* Read BOTH channels' hook bits from hook_raw ("b0 b1"): h[0]=EC_1=jack phone2,
+ * h[1]=EC_2=jack phone1. Returns 0 on success, -1 on error (caller falls back to
+ * the single-channel read_hook). */
+static int read_hook_raw(int h[2])
+{
+	char b[32];
+	int fd, n;
+
+	fd = open(HOOK_RAW, O_RDONLY);
+	if (fd < 0)
+		return -1;
+	n = read(fd, b, sizeof(b) - 1);
+	close(fd);
+	if (n <= 0)
+		return -1;
+	b[n] = 0;
+	if (sscanf(b, "%d %d", &h[0], &h[1]) != 2)
+		return -1;
+	return 0;
+}
+
+/* Select the active SLIC channel (1 or 2) the audio/line-up routes to. Written
+ * before "accept" so voice_dev_open lines up the jack that was answered. */
+static void set_slic_ec(int ec)
+{
+	char c = (char)('0' + ec);
+	int fd = open(SLIC_EC_P, O_WRONLY);
+
+	if (fd >= 0) {
+		if (write(fd, &c, 1) < 0)
+			;
+		close(fd);
+	}
+}
+
 /* ring the SLIC line: 1 = ring (STATE 0x07), 0 = stop (STATE 0x23 active+codec) */
 static void ring(int on)
 {
@@ -78,41 +115,45 @@ static void ring(int on)
 	}
 }
 
-/* Drive the PHONE panel LED to match the OEM manual: 2 = blink (ringing, via the
- * kernel timer trigger), 1 = solid on (off-hook / in a call), 0 = off (on-hook). */
-static void phone_led(int mode)
+/* Drive ONE PHONE panel LED (by sysfs base path): 2 = blink (ringing, via the
+ * kernel timer trigger), 1 = solid on (off-hook / in a call), 0 = off (on-hook).
+ * Tolerates a missing LED node (open fails -> skipped). */
+static void led_set(const char *base, int mode)
 {
 	const char *trig = (mode == 2) ? "timer" : "none";
+	char path[96];
 	int fd;
 
-	fd = open(LED_PHONE "/trigger", O_WRONLY);
+	snprintf(path, sizeof(path), "%s/trigger", base);
+	fd = open(path, O_WRONLY);
 	if (fd >= 0) {
 		if (write(fd, trig, strlen(trig)) < 0)
 			;
 		close(fd);
 	}
 	if (mode == 2) {
-		fd = open(LED_PHONE "/delay_on", O_WRONLY);
-		if (fd >= 0) {
-			if (write(fd, "400", 3) < 0)
-				;
-			close(fd);
-		}
-		fd = open(LED_PHONE "/delay_off", O_WRONLY);
-		if (fd >= 0) {
-			if (write(fd, "400", 3) < 0)
-				;
-			close(fd);
-		}
+		snprintf(path, sizeof(path), "%s/delay_on", base);
+		fd = open(path, O_WRONLY);
+		if (fd >= 0) { if (write(fd, "400", 3) < 0) ; close(fd); }
+		snprintf(path, sizeof(path), "%s/delay_off", base);
+		fd = open(path, O_WRONLY);
+		if (fd >= 0) { if (write(fd, "400", 3) < 0) ; close(fd); }
 	} else {
-		fd = open(LED_PHONE "/brightness", O_WRONLY);
-		if (fd >= 0) {
-			if (write(fd, mode ? "1" : "0", 1) < 0)
-				;
-			close(fd);
-		}
+		snprintf(path, sizeof(path), "%s/brightness", base);
+		fd = open(path, O_WRONLY);
+		if (fd >= 0) { if (write(fd, mode ? "1" : "0", 1) < 0) ; close(fd); }
 	}
 }
+
+/* ringing: blink BOTH jacks (the phone is in one of them). */
+static void leds_ring(void) { led_set(LED_PHONE1, 2); led_set(LED_PHONE2, 2); }
+/* answered on channel ec: that jack solid on, the other off (ec=2 -> phone1). */
+static void leds_answer(int ec)
+{
+	led_set(LED_PHONE1, ec == 2 ? 1 : 0);
+	led_set(LED_PHONE2, ec == 1 ? 1 : 0);
+}
+static void leds_off(void) { led_set(LED_PHONE1, 0); led_set(LED_PHONE2, 0); }
 
 static int ctrl_connect(void)
 {
@@ -171,12 +212,12 @@ static void speeddial(int s)
 }
 
 /* Ring cadence (in 150ms ticks): ~0.75 s on, ~1.05 s off. The SLIC ring voltage
- * corrupts the SIGREG hook bit, so we only sample the hook during the OFF gap --
- * a shorter cadence means the gaps come sooner, so answering is more responsive
- * (worst-case answer latency ~= ring-on + debounce ~= 1.2 s). */
+ * corrupts the SIGREG hook bit, so we only sample the hook during the OFF gap.
+ * The 450ms debounce is the silicon settle guard (shortening it -> false hooks).
+ * During RINGING we watch BOTH channels' hook bits to learn which jack answered. */
 #define RING_ON_TICKS	5
 #define RING_PERIOD	12
-#define DEBOUNCE	3	/* consecutive stable reads before a hook change counts */
+#define DEBOUNCE	3	/* consecutive stable reads (3*150=450ms) before a hook change counts */
 
 int main(void)
 {
@@ -184,9 +225,10 @@ int main(void)
 	int s = -1, blen = 0;
 	int hook_last = -1, stable_hk = -1, stable_cnt = 0, baseline = 0;
 	int ring_tick = 0, ring_on = 0;	/* ring_on = SLIC ring state we last asserted */
+	int answered_ec = 2;		/* channel/jack the active call was answered on (default phone1=EC_2) */
 
 	logmsg("starting");
-	phone_led(0);			/* idle: PHONE LED off */
+	leds_off();			/* idle: both PHONE LEDs off */
 	for (;;) {
 		struct pollfd pfd;
 		int rc, ringing_now = 0;
@@ -228,18 +270,19 @@ int main(void)
 					if (state == IDLE) {
 						state = RINGING;
 						ring_tick = 0;
-						phone_led(2);	/* ringing: blink */
+						leds_ring();	/* ringing: blink both jacks */
 						logmsg("INCOMING -> ringing");
 					}
 				} else if (strstr(payload, "\"CALL_ESTABLISHED\"")) {
 					state = INCALL;
 					ring(0);
-					phone_led(1);	/* in call: solid on */
+					leds_answer(answered_ec);	/* in call: answered jack solid on */
 					logmsg("ESTABLISHED");
 				} else if (strstr(payload, "\"CALL_CLOSED\"")) {
 					state = IDLE;
 					ring(0);
-					phone_led(0);	/* idle: off */
+					leds_off();	/* idle: both off */
+					answered_ec = 2;
 					logmsg("CLOSED -> idle");
 				}
 				q = payload + len + 1;	/* past json + ',' */
@@ -274,9 +317,23 @@ int main(void)
 			ring_tick = 0;
 		}
 
-		/* ---- hook poll (debounced; skip while the ring is energized) ---- */
+		/* ---- hook poll (debounced; skip while the ring is energized) ----
+		 * Waiting for an answer (RINGING/IDLE) we watch BOTH jacks; in a call
+		 * we watch only the answered channel (for hang-up). `which` = the jack
+		 * that went off-hook, so the audio is routed to it before "accept". */
 		if (!ringing_now) {
-			int hk = read_hook();
+			int h[2], hk, which = answered_ec;
+
+			if (read_hook_raw(h) == 0) {
+				if (state == INCALL) {
+					hk = h[(answered_ec == 1) ? 0 : 1];
+				} else {		/* RINGING or IDLE: either jack */
+					hk = h[0] || h[1];
+					which = h[0] ? 1 : (h[1] ? 2 : answered_ec);
+				}
+			} else {
+				hk = read_hook();	/* fallback: active channel only */
+			}
 
 			if (hk >= 0) {
 				if (hk == stable_hk) {
@@ -290,23 +347,31 @@ int main(void)
 					if (!baseline) {
 						baseline = 1;		/* first settle: no action */
 					} else {
-						fprintf(stderr, "[callmgr] hook %d->%d (state=%d)\n",
-							hook_last, stable_hk, state);
+						fprintf(stderr, "[callmgr] hook %d->%d (state=%d ec=%d)\n",
+							hook_last, stable_hk, state, which);
 						fflush(stderr);
 						if (stable_hk == 1) {		/* off-hook (lifted) */
-							phone_led(1);	/* off-hook: solid on */
 							if (state == RINGING) {
+								answered_ec = which;
+								set_slic_ec(answered_ec);	/* route audio to this jack BEFORE accept */
+								leds_answer(answered_ec);
 								ctrl_cmd(s, "accept", NULL);
 								ring(0);
 							} else if (state == IDLE) {
+								answered_ec = which;
+								set_slic_ec(answered_ec);
+								leds_answer(answered_ec);
 								speeddial(s);
+							} else {
+								leds_answer(answered_ec);
 							}
 						} else {			/* on-hook (hung up) */
-							phone_led(0);	/* on-hook: off */
+							leds_off();
 							if (state == INCALL || state == RINGING) {
 								ctrl_cmd(s, "hangup", NULL);
 								ring(0);
 								state = IDLE;
+								answered_ec = 2;
 							}
 						}
 					}

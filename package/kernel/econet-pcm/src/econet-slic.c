@@ -79,6 +79,7 @@
 /* MPI / Le9642 (VP886) constants. */
 #define CSLAC_EC_REG_WRT	0x4a
 #define VP886_EC_1		0x01
+#define VP886_EC_2		0x02
 #define VP886_R_RCNPCN_RD	0x73
 #define VP886_R_RCNPCN_LEN	2
 #define VP886_R_RCNPCN_RCN	0x08
@@ -419,6 +420,39 @@ static void slic_load_channel_profiles(void)
 	slic_write_mpi("ac-ch", ac_mpi + 6, sizeof(ac_mpi) - 6);
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	slic_write_mpi("ring-ch", ring_mpi, sizeof(ring_mpi));
+}
+
+/* Load DC/AC/ring profiles onto an EXPLICIT channel (EC_1 or EC_2). Same bytes
+ * as slic_load_channel_profiles but for an arbitrary ec -- needed to ring both
+ * jacks (EC_1's profiles otherwise come only implicitly from slic_load_profiles
+ * landing on the post-reset default channel). */
+static void slic_load_dc_ac_ring(u8 ec)
+{
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ ec }, 1);
+	slic_write_mpi("dc-ch", dc_mpi, sizeof(dc_mpi));
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ ec }, 1);
+	slic_write_mpi("ac-ch", ac_mpi + 6, sizeof(ac_mpi) - 6);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ ec }, 1);
+	slic_write_mpi("ring-ch", ring_mpi, sizeof(ring_mpi));
+}
+
+/* Assert the ring state on ONE channel. on=1 -> ring (STATE 0x07). on=0 -> stop
+ * + feed (STATE 0x23 active+codec) so the hook stays detectable in the OFF gap.
+ * Profiles for ec must already be loaded. Byte-for-byte the same sequence the
+ * single-channel path used, just parameterised by ec. */
+static void slic_ring_state(u8 ec, bool on)
+{
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ ec }, 1);
+	if (on) {
+		{ static const u8 sw[] = { 0xe6, 0x6f }; slic_write_mpi("ring-sw", sw, sizeof(sw)); }
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ ec }, 1);
+		{ static const u8 st[] = { 0x56, 0x03 }; slic_write_mpi("ring-active", st, sizeof(st)); }
+		msleep(20);
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ ec }, 1);
+		{ static const u8 r[] = { 0x56, 0x07 }; slic_write_mpi("ring-on", r, sizeof(r)); }
+	} else {
+		static const u8 st[] = { 0x56, 0x23 }; slic_write_mpi("ring-off", st, sizeof(st));
+	}
 }
 
 /* Full 3b init: bring-up (3a) + verify + load device profile. */
@@ -868,6 +902,12 @@ static const struct file_operations swctrl_fops = {
  * Done over ZSI without opening the char device, so a userspace agent can ring
  * on a SIP INVITE and poll `hook` for off-hook before telling baresip to answer.
  */
+/* Ring BOTH FXS jacks (EC_1=phone2, EC_2=phone1) on an incoming call so the one
+ * phone rings in whichever jack it is plugged into. 0 = legacy single-channel
+ * (slic_ec) -- byte-identical to the pre-ring-both behaviour. */
+static int ring_both = 1;
+module_param(ring_both, int, 0644);
+
 static ssize_t ring_write(struct file *f, const char __user *ub,
 			  size_t n, loff_t *off)
 {
@@ -879,21 +919,27 @@ static ssize_t ring_write(struct file *f, const char __user *ub,
 
 	mutex_lock(&sd.lock);
 	if (val) {
+		/* device-level bring-up once: resets the chip + loads EC_1's
+		 * (post-reset default channel) profiles */
 		zsi_hw_init();
 		zsi_slic_reset();
 		writel(readl(sd.zsi + ZSI_EN) | ZSI_EN_VAL, sd.zsi + ZSI_EN);
 		slic_load_profiles();
-		slic_load_channel_profiles();	/* 2nd FXS channel: own DC/AC/ring */
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
-		{ static const u8 sw[] = { 0xe6, 0x6f }; slic_write_mpi("ring-sw", sw, sizeof(sw)); }
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
-		{ static const u8 st[] = { 0x56, 0x03 }; slic_write_mpi("ring-active", st, sizeof(st)); }
-		msleep(20);
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
-		{ static const u8 r[] = { 0x56, 0x07 }; slic_write_mpi("ring-on", r, sizeof(r)); }
+		if (ring_both) {
+			slic_load_dc_ac_ring(VP886_EC_2);	/* EC_1 from load_profiles, EC_2 explicit */
+			slic_ring_state(VP886_EC_1, true);
+			slic_ring_state(VP886_EC_2, true);	/* EC_2 last: tail identical to phone1-only */
+		} else {
+			slic_load_channel_profiles();		/* legacy: slic_ec channel */
+			slic_ring_state((u8)slic_ec, true);
+		}
 	} else {
-		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
-		{ static const u8 st[] = { 0x56, 0x23 }; slic_write_mpi("ring-off", st, sizeof(st)); }
+		if (ring_both) {
+			slic_ring_state(VP886_EC_1, false);
+			slic_ring_state(VP886_EC_2, false);
+		} else {
+			slic_ring_state((u8)slic_ec, false);
+		}
 	}
 	mutex_unlock(&sd.lock);
 	return n;
@@ -926,6 +972,25 @@ static int slic_hook_show(struct seq_file *s, void *unused)
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(slic_hook);
+
+/*
+ * hook_raw: BOTH channels' hook bits from one device-level SIGREG (0x4d) read.
+ * b0 = byte[0] = SLIC ch1 (EC_1) = physical jack "phone2",
+ * b1 = byte[1] = SLIC ch2 (EC_2) = physical jack "phone1".
+ * Lets the callmgr ring both jacks and learn which one was lifted. The
+ * single-digit `hook` node above is untouched (it indexes the active slic_ec).
+ */
+static int slic_hook_raw_show(struct seq_file *s, void *unused)
+{
+	u8 sig[4] = {0};
+
+	mutex_lock(&sd.lock);
+	zsi_mpi_read((u8)slic_ec, 0x4d, sig, sizeof(sig));	/* SIGREG is device-level; ec arg is don't-care */
+	mutex_unlock(&sd.lock);
+	seq_printf(s, "%d %d\n", sig[0] & 1, sig[1] & 1);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(slic_hook_raw);
 
 /*
  * SADC probe: read the supervisory ADC (0xA0) -- a measurement path totally
@@ -1388,6 +1453,7 @@ static int __init econet_slic_init(void)
 	debugfs_create_file("swctrl", 0200, sd.dbg, NULL, &swctrl_fops);
 	debugfs_create_file("ring", 0200, sd.dbg, NULL, &ring_fops);
 	debugfs_create_file("hook", 0444, sd.dbg, NULL, &slic_hook_fops);
+	debugfs_create_file("hook_raw", 0444, sd.dbg, NULL, &slic_hook_raw_fops);
 	debugfs_create_file("sadc_probe", 0444, sd.dbg, NULL, &sadc_probe_fops);
 	debugfs_create_file("play", 0444, sd.dbg, NULL, &slic_play_fops);
 	debugfs_create_file("tx_loopback", 0444, sd.dbg, NULL, &slic_loopback_fops);
