@@ -128,6 +128,19 @@ static int zsi_poll_set(u32 mask)
 	return -ETIMEDOUT;
 }
 
+/*
+ * Inter-byte ZSI settle gap (microseconds). The SLIC needs time to clock each
+ * byte over the 8 kHz PCM bus before the next or it replies garbage (0xf1).
+ * 5000 is the safe stock value, but ~300 profile bytes * 5 ms = ~1.5 s of the
+ * call-answer line-up (the dominant "connected but silent" delay). Lower it
+ * live (echo N > /sys/module/econet_slic/parameters/zsi_gap_us) to cut that
+ * latency -- the profile load is fire-and-forget so a too-short gap mis-loads
+ * silently; validate RCN/PCN readback (08 75) + a clean sustained call at each
+ * step before keeping a lower floor.
+ */
+static int zsi_gap_us = 5000;
+module_param(zsi_gap_us, int, 0644);
+
 /* ZSI: write one byte (cmd or data). Verified-by-poke handshake. */
 static int zsi_write_byte(u8 v)
 {
@@ -140,8 +153,9 @@ static int zsi_write_byte(u8 v)
 	writel(ZSI_CTL_TX_ACK, sd.zsi + ZSI_CTL);	/* W1C the ack */
 	/* the wrapper ack only means the wrapper sent; the SLIC needs time to
 	 * clock the byte over the PCM bus (8 kHz frames). Without this gap the
-	 * SLIC replies garbage (0xf1). 5 ms verified live; ~125 us/frame so safe. */
-	usleep_range(5000, 6000);
+	 * SLIC replies garbage (0xf1). 5 ms verified live; ~125 us/frame so safe.
+	 * Tunable via zsi_gap_us to cut the ~1.5 s profile-load answer latency. */
+	usleep_range(zsi_gap_us, zsi_gap_us + 1000);
 	return 0;
 }
 
@@ -156,7 +170,7 @@ static int zsi_read_byte(u8 *out)
 		return ret;
 	*out = readl(sd.zsi + ZSI_RX) & 0xff;
 	writel(ZSI_CTL_RX_READY, sd.zsi + ZSI_CTL);	/* W1C the ready */
-	usleep_range(5000, 6000);			/* inter-byte gap (see zsi_write_byte) */
+	usleep_range(zsi_gap_us, zsi_gap_us + 1000);	/* inter-byte gap (see zsi_write_byte) */
 	return 0;
 }
 
