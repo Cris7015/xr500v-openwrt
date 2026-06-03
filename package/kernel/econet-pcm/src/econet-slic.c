@@ -646,6 +646,7 @@ extern int pcm_en751221_play_melody(void);
 extern int pcm_en751221_play_tone_1khz(void);
 extern int pcm_en751221_voice_loopback(int seconds);
 extern int pcm_en751221_voice_start(void);
+extern void pcm_en751221_voice_reset(void);
 /* fwd: persistent line-up flag (defined once, set by audio_setup/voice open) */
 static bool slic_audio_up;
 extern void pcm_en751221_voice_stop(void);
@@ -669,6 +670,15 @@ static int voice_dev_open(struct inode *ino, struct file *f)
 	 * f_pos_lock and starves the reader (capture throttled to ~3% -> TX=0).
 	 */
 	stream_open(ino, f);
+
+	/*
+	 * Rewind the PCM DMA engine BEFORE the SLIC line-up. Without this the
+	 * engine keeps the descriptor pointer from the previous call and the 2nd+
+	 * call desyncs against the voice thread -> ring starves -> earpiece chops
+	 * (ISR reg 0x24 = 0x3d vs a healthy 0x0d). It must precede the line-up
+	 * because the soft reset blips the TDM clock the SLIC locks onto.
+	 */
+	pcm_en751221_voice_reset();
 
 	mutex_lock(&sd.lock);
 	zsi_hw_init();

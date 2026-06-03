@@ -1025,6 +1025,29 @@ static int pcm_voice_thread(void *data)
 	return 0;
 }
 
+/*
+ * Reset the PCM DMA engine before each call. Disabling/re-enabling the TX/RX
+ * EN bits in voice_start does NOT rewind the engine's internal descriptor
+ * pointer, so the 2nd and later calls resume mid-ring while the voice thread
+ * restarts at descriptor 0 -> they desync, the DMA reaches descriptors the
+ * thread has not re-armed (ISR END_OF_TX/RX_DESC latch, reg 0x24 = 0x3d vs a
+ * healthy 0x0d) and the ring starves -> the earpiece chops. The 1st call after
+ * probe is clean only because probe already soft-reset the engine.
+ *
+ * This MUST run BEFORE the SLIC line-up: the soft reset blips the TDM clock the
+ * SLIC synchronises to, so resetting after line-up desyncs the codec highway
+ * (audio stops, RTP goes to 0, the peer drops the call). The char-device open
+ * calls this at its very top, ahead of the SLIC reset + profile load.
+ */
+void pcm_en751221_voice_reset(void)
+{
+	if (g_pcm) {
+		pcm_soft_reset(g_pcm);
+		pcm_load_defaults(g_pcm);
+	}
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_voice_reset);
+
 int pcm_en751221_voice_start(void)
 {
 	struct pcm_dev *p = g_pcm;

@@ -203,6 +203,7 @@ int pcm_en751221_voice_loopback(int seconds);
 
 /* Continuous full-duplex voice streaming engine (backs /dev/xr500v-voice). */
 int pcm_en751221_voice_start(void);
+void pcm_en751221_voice_reset(void);
 void pcm_en751221_voice_stop(void);
 ssize_t pcm_en751221_voice_read(char __user *ubuf, size_t len);
 ssize_t pcm_en751221_voice_write(const char __user *ubuf, size_t len);
