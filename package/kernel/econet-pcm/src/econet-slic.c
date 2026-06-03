@@ -29,6 +29,7 @@
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
+#include <linux/workqueue.h>
 
 #define DRV_NAME "econet-slic"
 
@@ -661,11 +662,45 @@ extern int pcm_en751221_play_tone_1khz(void);
 extern int pcm_en751221_voice_loopback(int seconds);
 extern int pcm_en751221_voice_start(void);
 extern void pcm_en751221_voice_reset(void);
+extern void pcm_en751221_voice_set_mute(int on);
 /* fwd: persistent line-up flag (defined once, set by audio_setup/voice open) */
 static bool slic_audio_up;
 extern void pcm_en751221_voice_stop(void);
 extern ssize_t pcm_en751221_voice_read(char __user *ubuf, size_t len);
 extern ssize_t pcm_en751221_voice_write(const char __user *ubuf, size_t len);
+
+/*
+ * On-hook fast-mute. While a call is up (/dev/xr500v-voice open) a process-
+ * context delayed_work polls the SLIC hook; the moment the line goes on-hook it
+ * mutes the captured TX audio (PCM silence flag) so the loud dead-line transient
+ * is not streamed to the peer for the ~450ms the callmgr takes to debounce +
+ * hang up. It only mutes audio, never call control, so a transient false on-hook
+ * just mutes for <=one poll and self-heals. Runs only during INCALL (no ring to
+ * corrupt the hook bit). ZSI I/O sleeps, so this MUST be process context, never
+ * a timer (a timer doing ZSI panics 'scheduling while atomic').
+ */
+static struct delayed_work hook_poll_work;
+static bool hook_poll_running;
+static int hook_poll_ms = 40;	/* a 4-byte ZSI read holds sd.lock ~8-16ms at zsi_gap_us=1000 */
+module_param(hook_poll_ms, int, 0644);
+
+static void hook_poll_fn(struct work_struct *w)
+{
+	u8 sig[4] = {0};
+	int idx = (slic_ec >= 1 && slic_ec <= 4) ? (slic_ec - 1) : 0;
+	int rc;
+
+	mutex_lock(&sd.lock);
+	rc = zsi_mpi_read((u8)slic_ec, 0x4d, sig, sizeof(sig));
+	mutex_unlock(&sd.lock);
+
+	/* keep the last mute state on a ZSI read error -- never mute on a glitch */
+	if (rc == 0)
+		pcm_en751221_voice_set_mute(!(sig[idx] & 0x01));
+
+	if (READ_ONCE(hook_poll_running))
+		schedule_delayed_work(&hook_poll_work, msecs_to_jiffies(hook_poll_ms));
+}
 
 /*
  * /dev/xr500v-voice -- full-duplex 16-bit linear 8kHz PCM voice device.
@@ -706,11 +741,18 @@ static int voice_dev_open(struct inode *ino, struct file *f)
 	ret = pcm_en751221_voice_start();
 	if (ret)
 		return ret;
+	WRITE_ONCE(hook_poll_running, true);
+	schedule_delayed_work(&hook_poll_work, msecs_to_jiffies(hook_poll_ms));
 	return 0;
 }
 
 static int voice_dev_release(struct inode *ino, struct file *f)
 {
+	/* stop the hook poller (not holding sd.lock here, so the sync cancel that
+	 * waits for hook_poll_fn -- which takes sd.lock -- cannot deadlock) */
+	WRITE_ONCE(hook_poll_running, false);
+	cancel_delayed_work_sync(&hook_poll_work);
+	pcm_en751221_voice_set_mute(0);
 	pcm_en751221_voice_stop();
 	return 0;
 }
@@ -1333,6 +1375,7 @@ static int __init econet_slic_init(void)
 		goto err;
 
 	mutex_init(&sd.lock);
+	INIT_DELAYED_WORK(&hook_poll_work, hook_poll_fn);
 	sd.cs = 0;
 	sd.where = "idle";
 
@@ -1387,6 +1430,8 @@ err:
 
 static void __exit econet_slic_exit(void)
 {
+	WRITE_ONCE(hook_poll_running, false);
+	cancel_delayed_work_sync(&hook_poll_work);
 	pcm_en751221_voice_stop();
 	misc_deregister(&voice_miscdev);
 	debugfs_remove_recursive(sd.dbg);

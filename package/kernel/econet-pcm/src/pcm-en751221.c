@@ -884,6 +884,13 @@ module_param(tx_msb, int, 0644);
 static int voice_fifo_sz = VOICE_FIFO_SZ;
 module_param(voice_fifo_sz, int, 0644);
 
+/* TX mute flag, set by the SLIC hook poller via pcm_en751221_voice_set_mute().
+ * When the line goes on-hook mid-call the analog loop opens and the capture path
+ * picks up a loud dead-line transient; muting here feeds silence to the peer in
+ * ~one frame instead of waiting ~450ms for the callmgr to debounce + hang up.
+ * Reset to 0 in voice_start so a new call never starts muted. */
+static int voice_tx_mute;
+
 static struct {
 	bool active;
 	void *txb, *rxb;
@@ -970,6 +977,10 @@ static int pcm_voice_thread(void *data)
 					}
 					tmp[i] = (s16)x;
 				}
+				/* on-hook: feed silence so the dead-line transient
+				 * is not streamed to the peer (see voice_tx_mute) */
+				if (READ_ONCE(voice_tx_mute))
+					memset(tmp, 0, sizeof(tmp));
 				kfifo_in(&vs.cap, tmp, VOICE_FB);
 			}
 			dma_wmb();
@@ -1048,6 +1059,18 @@ void pcm_en751221_voice_reset(void)
 }
 EXPORT_SYMBOL_GPL(pcm_en751221_voice_reset);
 
+/*
+ * Mute/un-mute the captured (TX) audio. Called from the SLIC driver's hook
+ * poller: on-hook -> mute (silence to the peer), off-hook -> un-mute. It only
+ * sets a flag the voice thread reads; it never touches call control, so a
+ * transient false on-hook just mutes for one poll and self-heals.
+ */
+void pcm_en751221_voice_set_mute(int on)
+{
+	WRITE_ONCE(voice_tx_mute, on ? 1 : 0);
+}
+EXPORT_SYMBOL_GPL(pcm_en751221_voice_set_mute);
+
 int pcm_en751221_voice_start(void)
 {
 	struct pcm_dev *p = g_pcm;
@@ -1120,6 +1143,7 @@ int pcm_en751221_voice_start(void)
 	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
 	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
 
+	WRITE_ONCE(voice_tx_mute, 0);	/* a new call always starts un-muted */
 	vs.thr = kthread_run(pcm_voice_thread, NULL, "pcm-voice");
 	if (IS_ERR(vs.thr)) {
 		kfifo_free(&vs.cap);
