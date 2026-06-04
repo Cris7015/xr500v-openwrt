@@ -25,3 +25,6 @@ docs/superpowers/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Local project context for the AI assistant (holds device creds — never commit)
+CLAUDE.md
