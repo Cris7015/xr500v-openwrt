@@ -365,14 +365,28 @@ int main(void)
 							} else {
 								leds_answer(answered_ec);
 							}
-						} else {			/* on-hook (hung up) */
-							leds_off();
-							if (state == INCALL || state == RINGING) {
+						} else {			/* on-hook */
+							/* During RINGING the handset is SUPPOSED to be
+							 * on-hook (not answered yet), so an on-hook read
+							 * here is the NORMAL state and must NOT hang up.
+							 * The SLIC SIGREG reads a false off-hook at cold
+							 * start (only a BAL_RING cycle corrects it), so the
+							 * callmgr's baseline starts at 1; the SIGREG's
+							 * 1->0 self-correction during the FIRST ring used
+							 * to trip this branch -> spurious hangup -> baresip
+							 * 486 Busy Here on the first call. A caller giving
+							 * up arrives as CALL_CLOSED, not via the hook, so
+							 * only a real on-hook while INCALL is a hang-up. */
+							if (state == INCALL) {
 								ctrl_cmd(s, "hangup", NULL);
 								ring(0);
+								leds_off();
 								state = IDLE;
 								answered_ec = 2;
+							} else if (state == IDLE) {
+								leds_off();
 							}
+							/* state == RINGING: keep ringing (bell + LEDs). */
 						}
 					}
 					hook_last = stable_hk;
