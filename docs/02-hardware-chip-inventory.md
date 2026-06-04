@@ -194,7 +194,7 @@ The NAND is split into a **dual-slot A/B layout**: slot A holds the stock OEM ke
 | **PCM / TDM** | EN751221 on-SoC | Codec/voice DMA to SLIC | MMIO `0x1fbd0000` | `pcm-en751221` (reconstructed) | Working |
 | **WAN / GPON** | GPON ONU + xPON MAC | Optical fiber WAN | xPON MAC block (own) | — | Not in OpenWrt |
 | **USB** | MediaTek xHCI | USB host (storage) | `0x1fb90000` | `xhci-mtk` | Working, USB2 (`/dev/sda`); USB3 unwired |
-| **GPIO / LEDs** | TrendChip **tc3162** GPIO | Panel LEDs + PCIe power lines | MMIO `0x1fbf0200` | `gpio-tc3162` | Working, 8/10 LEDs |
+| **GPIO / LEDs** | TrendChip **tc3162** GPIO | Panel LEDs + PCIe power lines | MMIO `0x1fbf0200` | `gpio-tc3162` | Working — panel 10/10 (8 SoC via `gpio-tc3162` + 2 WiFi LEDs inside MT7603/MT7662 via mt76) |
 | **UART** | ns16550 (on-SoC) | Serial console | `0x1fbf0000` | `8250`/`ns16550` | Working, 115200 8N1 |
 
 ### Notes on individual chips

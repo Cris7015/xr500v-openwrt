@@ -131,7 +131,7 @@ ssh <build-host> 'cd ~/openwrt && \
 #    image -> <tftp-root>/iterN_*.bin
 ```
 
-> **Prefer live module reload over reflashing for iteration.** Repeated slot-B reflashing wears the SPI-NAND: on the test unit a block began failing `MEMERASE64` after roughly 19 reflash cycles. The fastest and least destructive inner loop is to build the changed kernel module on the build host, copy the `.ko` to the device's UBI overlay (`/lib/modules/...`), and `rmmod`/`insmod` it live — no flash write at all. The full slice-and-flash flow below is only needed for kernel/DTB/squashfs changes that cannot be expressed as a module reload.
+> **Prefer live module reload over reflashing for iteration.** On the test unit a block started failing `MEMERASE64` after roughly 19 reflash cycles. To be clear this is *not* SPI-NAND wear — the endurance is on the order of ~100k erase cycles and `en75_bmt` reported `worn: 0` — so the cause is unexplained (a grown bad block, or an artifact of the flashing procedure), not endurance. Either way it is a concrete reason to minimise flash writes during iteration. The fastest and least destructive inner loop is to build the changed kernel module on the build host, copy the `.ko` to the device's UBI overlay (`/lib/modules/...`), and `rmmod`/`insmod` it live — no flash write at all. The full slice-and-flash flow below is only needed for kernel/DTB/squashfs changes that cannot be expressed as a module reload.
 
 **Always `make package/kernel/econet-eth/clean` before a fresh build**, and never leave backup directories under `package/` (see trap below). The image lands at:
 
@@ -217,7 +217,7 @@ mtd writeflash /tmp/r1.bin 3145728 28311552 /dev/mtd0
 Two reasons to minimize reflashing:
 
 - Each rollback to stock OEM lets the stock bootloader's `en75_bmt` scan possibly re-write the BBT and shift the user area, which can damage UBI persistence — so keep round-trips to stock to a minimum.
-- Repeated erase/write cycles wear the SPI-NAND. On the test unit a block began failing `MEMERASE64` after roughly 19 reflash cycles — a device-condition caveat, not a build issue, but a concrete reason to favor the live-module-reload workflow (see the iterate loop above) for day-to-day iteration and reserve flashing for kernel/DTB/squashfs changes.
+- Minimise erase/write cycles anyway. On the test unit a block started failing `MEMERASE64` after roughly 19 reflash cycles — this is *not* SPI-NAND endurance wear (~100k-cycle endurance; `en75_bmt` reported `worn: 0`), so it is an unexplained device condition rather than a build issue, but still a concrete reason to favor the live-module-reload workflow (see the iterate loop above) for day-to-day iteration and reserve flashing for kernel/DTB/squashfs changes.
 
 ## Build traps and gotchas
 
