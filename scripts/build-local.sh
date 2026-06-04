@@ -36,8 +36,8 @@ if [ -f "$IMG" ]; then
   python3 "$REPO/scripts/patch_trendchip_header.py" "$IMG" "${IMG%.bin}-patched.bin"
   echo
   echo "  RAW    : $IMG"
-  echo "  FLASH  : ${IMG%.bin}-patched.bin   <- usa ESTE (header trendchip)"
-  echo "  -> flash: ./scripts/flash-from-wsl.sh  (router en stock telnet :2323)"
+  echo "  FLASH  : ${IMG%.bin}-patched.bin   <- use THIS (trendchip header)"
+  echo "  -> flash: ./scripts/flash-from-wsl.sh  (router in stock telnet :2323)"
 else
   echo "==> (no sysupgrade image generated — probably a partial package build)"
 fi

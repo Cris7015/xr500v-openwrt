@@ -371,9 +371,9 @@
             interrupts = <17>;
             usb3-lpm-capable;
 
-            /* USB3 sin T-PHY cableado/encendido: STS1_U3_MAC_RST no sale de
-             * reset -> host_enable timeout (-145). Deshabilitar U3 (BIT0);
-             * el puerto USB2 queda activo para storage. */
+            /* USB3 has no T-PHY wired/powered: STS1_U3_MAC_RST never exits
+             * reset -> host_enable timeout (-145). Disable U3 (BIT0); the
+             * USB2 port stays active for storage. */
             mediatek,u3p-dis-msk = <0x1>;
     };
 
