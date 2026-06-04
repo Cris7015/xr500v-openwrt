@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""iter54: portar macMT7530doP6Cal al kernel mt7530.c."""
+"""iter54: port macMT7530doP6Cal to the kernel mt7530.c."""
 import sys
 
 FN = "/home/cristuu/openwrt/build_dir/target-mips_24kc_musl/linux-econet_en751221/linux-6.12.80/drivers/net/dsa/mt7530.c"
@@ -7,12 +7,12 @@ FN = "/home/cristuu/openwrt/build_dir/target-mips_24kc_musl/linux-econet_en75122
 src = open(FN).read()
 
 if "ITER54_P6_CAL" in src:
-    print("[i] iter54 ya aplicado")
+    print("[i] iter54 already applied")
     sys.exit(0)
 
 needle1 = "/* Setup port 6 interface mode and TRGMII TX circuit */\n"
 if needle1 not in src:
-    sys.exit("ERROR: ancla setup_port6 comment no encontrada")
+    sys.exit("ERROR: setup_port6 comment anchor not found")
 
 new_func = """/* ITER54_P6_CAL: TRGMII RX delay calibration ported from stock OEM eth.ko
  * macMT7530doP6Cal. Sweeps delay 1..127 per channel, finds window where test
@@ -115,9 +115,9 @@ new_call = """\t/* Enable the MT7530 TRGMII clocks */
 }"""
 
 if needle2 not in src:
-    sys.exit("ERROR: ancla setup_port6 fin no encontrada")
+    sys.exit("ERROR: setup_port6 end anchor not found")
 
 src = src.replace(needle2, new_call, 1)
 
 open(FN, "w").write(src)
-print("[+] iter54 mt7530.c parchado con macMT7530doP6Cal port")
+print("[+] iter54 mt7530.c patched with macMT7530doP6Cal port")

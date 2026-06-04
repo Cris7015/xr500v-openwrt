@@ -1,6 +1,6 @@
 #!/bin/bash
-# Aplica los files XR500v-específicos del repo en un clone de openwrt
-# Uso: ./apply-xr500v-files.sh [openwrt_dir]
+# Applies the XR500v-specific files from this repo into an openwrt clone
+# Usage: ./apply-xr500v-files.sh [openwrt_dir]
 #   openwrt_dir defaults to ~/openwrt
 
 set -e
@@ -8,8 +8,8 @@ OPENWRT_DIR="${1:-$HOME/openwrt}"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [[ ! -d "$OPENWRT_DIR/target/linux/econet" ]]; then
-    echo "ERROR: $OPENWRT_DIR no parece ser un openwrt tree con target econet" >&2
-    echo "       (no existe $OPENWRT_DIR/target/linux/econet)" >&2
+    echo "ERROR: $OPENWRT_DIR does not look like an openwrt tree with target econet" >&2
+    echo "       ($OPENWRT_DIR/target/linux/econet does not exist)" >&2
     exit 1
 fi
 

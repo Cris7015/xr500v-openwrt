@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""iter58: portar GE PHY analog cal del SDK kernel 2.6 al kernel 6.12.
+"""iter58: port GE PHY analog cal from the 2.6 SDK kernel to kernel 6.12.
 
-Source: cjdelisle/EN751221-Linux26 tcetherphy_7512.c líneas 8569-9105 (doGePhyALLAnalogCal + GECal_Rext)
+Source: cjdelisle/EN751221-Linux26 tcetherphy_7512.c lines 8569-9105 (doGePhyALLAnalogCal + GECal_Rext)
 
 API mapping kernel 2.6 SDK -> kernel 6.12:
 - tcMiiStationWrite(phy, reg, val)  -> phy_write(phydev, reg, val)
@@ -21,13 +21,13 @@ FN = "/home/cristuu/openwrt/build_dir/target-mips_24kc_musl/linux-econet_en75122
 src = open(FN).read()
 
 if "ITER58_PHY_ANALOG_CAL" in src:
-    print("[i] iter58 ya aplicado")
+    print("[i] iter58 already applied")
     sys.exit(0)
 
 # Insert the cal code BEFORE en751221_setup_port (which calls them)
 needle = "/* Setup ports 0..=4 on EN751221 switch."
 if needle not in src:
-    sys.exit("ERROR: ancla en751221_setup_port no encontrada")
+    sys.exit("ERROR: en751221_setup_port anchor not found")
 
 new_block = r'''/* === ITER58_PHY_ANALOG_CAL ============================================
  * GE PHY analog calibration ported from cjdelisle/EN751221-Linux26 SDK
@@ -528,8 +528,8 @@ en751221_setup_port(struct dsa_switch *ds, int port)
 	/* This is mostly undocumented magic. */
 
 	phy_write(phy, MII_BMCR, BMCR_RESET);"""
-assert old_setup in src, "ancla en751221_setup_port body no encontrada"
+assert old_setup in src, "en751221_setup_port body anchor not found"
 src = src.replace(old_setup, new_setup, 1)
 
 open(FN, "w").write(src)
-print("[+] iter58 mt7530.c parchado con GE PHY analog cal")
+print("[+] iter58 mt7530.c patched with GE PHY analog cal")

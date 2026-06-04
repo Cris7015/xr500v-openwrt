@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""iter55: portar trgmii_interface_init pre-cal completo del stock OEM eth.ko.
+"""iter55: port the full trgmii_interface_init pre-cal from the stock OEM eth.ko.
 
-Stock OEM hace una secuencia larga de writes ANTES de macMT7530doP6Cal:
-- PLL_GROUPx writes via MDIO (ya cubierto por upstream mt7530_setup_port6 + iter53 patch)
+Stock OEM performs a long sequence of writes BEFORE macMT7530doP6Cal:
+- PLL_GROUPx writes via MDIO (already covered by upstream mt7530_setup_port6 + iter53 patch)
 - PMCR_P(5) = 0x9a30a (force-link 1G FDX, port 5)
 - TRGMII RX clock toggle on 0x7a40 bit 28
 - 0x7a00 |= 0x80000000 (TRGMII enable)
@@ -15,8 +15,8 @@ Stock OEM hace una secuencia larga de writes ANTES de macMT7530doP6Cal:
 - 0x250c, 0x260c = 0x000fff10
 - PMCR_P(5) = 0xe430b (final force)
 
-Sin estos writes, el ErrChk loop de macMT7530doP6Cal no recibe feedback
-porque el "test bus" no está enabled.
+Without these writes, the macMT7530doP6Cal ErrChk loop receives no feedback
+because the "test bus" is not enabled.
 """
 import sys
 
@@ -25,13 +25,13 @@ FN = "/home/cristuu/openwrt/build_dir/target-mips_24kc_musl/linux-econet_en75122
 src = open(FN).read()
 
 if "ITER55_TRGMII_INIT" in src:
-    print("[i] iter55 ya aplicado")
+    print("[i] iter55 already applied")
     sys.exit(0)
 
-# Insertar la función pre-cal antes de mt7530_p6_cal
+# Insert the pre-cal function before mt7530_p6_cal
 needle1 = "/* ITER54_P6_CAL: TRGMII RX delay calibration ported from stock OEM eth.ko\n"
 if needle1 not in src:
-    sys.exit("ERROR: ancla iter54 no encontrada — aplicar iter54 primero")
+    sys.exit("ERROR: iter54 anchor not found — apply iter54 first")
 
 new_func = """/* ITER55_TRGMII_INIT: pre-cal setup ported from stock OEM trgmii_interface_init.
  * Writes the TRGMII pad/clock/test-bus registers needed before P6 cal can work.
@@ -108,7 +108,7 @@ static void mt7530_trgmii_pre_cal_setup(struct mt7530_priv *priv)
 
 src = src.replace(needle1, new_func + needle1, 1)
 
-# Llamar pre-cal antes de mt7530_p6_cal
+# Call pre-cal before mt7530_p6_cal
 needle2 = """\t/* ITER54: TRGMII RX delay calibration - critical for EN751221 SoC GMAC
 \t * to latch incoming frames from switch. */
 \tmt7530_p6_cal(priv);"""
@@ -121,9 +121,9 @@ new_call = """\t/* ITER55: TRGMII pre-cal setup (PMCR_P5, pads, test-bus regs) *
 \tmt7530_p6_cal(priv);"""
 
 if needle2 not in src:
-    sys.exit("ERROR: ancla mt7530_p6_cal call no encontrada")
+    sys.exit("ERROR: mt7530_p6_cal call anchor not found")
 
 src = src.replace(needle2, new_call, 1)
 
 open(FN, "w").write(src)
-print("[+] iter55 mt7530.c parchado con trgmii_interface_init pre-cal")
+print("[+] iter55 mt7530.c patched with trgmii_interface_init pre-cal")

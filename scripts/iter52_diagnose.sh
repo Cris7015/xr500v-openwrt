@@ -1,16 +1,16 @@
 #!/bin/sh
-# iter52: post-boot diagnostic. Pegar en el shell del router después de bootear iter52.
-# Lee GDM1 RX counters + QDMA RX queue state + switch port 6 stats.
+# iter52: post-boot diagnostic. Paste into the router shell after booting iter52.
+# Reads GDM1 RX counters + QDMA RX queue state + switch port 6 stats.
 #
-# Mientras corre, generá tráfico desde tu PC (ping al router, broadcasts, etc.)
-# Si GDM1 RX_PKTS > 0 → frames llegan al SoC desde el switch
-# Si GDM1 RX_PKTS = 0 pero switch port 6 TX > 0 → TRGMII RX side roto
-# Si GDM1 RX_PKTS > 0 pero kernel rx = 0 → bug GDM→QDMA path
+# While running, generate traffic from your PC (ping the router, broadcasts, etc.)
+# If GDM1 RX_PKTS > 0 → frames are reaching the SoC from the switch
+# If GDM1 RX_PKTS = 0 but switch port 6 TX > 0 → TRGMII RX side broken
+# If GDM1 RX_PKTS > 0 but kernel rx = 0 → bug in GDM→QDMA path
 
 SYS=/sys/devices/platform/1fb50000.ethernet
 
 if [ ! -e $SYS/raw_offset ]; then
-    echo "ERROR: raw_offset sysfs no existe — ¿flasheaste el kernel iter52?"
+    echo "ERROR: raw_offset sysfs does not exist — did you flash the iter52 kernel?"
     exit 1
 fi
 
@@ -23,18 +23,18 @@ readreg() {
 }
 
 echo "=== eth0 / GDM1 (port0) regs at 0x0400+ ==="
-# fwd_cfg está en offset 0x100 dentro de port0 = absoluto 0x500
+# fwd_cfg is at offset 0x100 within port0 = absolute 0x500
 readreg 0x500 "GDM1 fwd_cfg"
-# rx_len_threshold: típicamente cerca de fwd_cfg
+# rx_len_threshold: typically near fwd_cfg
 readreg 0x508 "GDM1 rx_len_th"
 # bitfield_0 (GDM_RX*_FPORT)
 readreg 0x504 "GDM1 bitfield_0"
 
 echo
 echo "=== GDM1 counters (struct gdm_counters) ==="
-# Counters en gdm struct typically a 0x280+ bytes from start of gdm
+# Counters in gdm struct typically at 0x280+ bytes from start of gdm
 # Layout: tx counters first, then rx
-# Best-effort offsets — pueden necesitar ajuste leyendo struct gdm en gdm_regs.h
+# Best-effort offsets — may need adjustment by reading struct gdm in gdm_regs.h
 for off in 0x680 0x684 0x688 0x68c 0x690 0x694 0x698 0x69c \
            0x6a0 0x6a4 0x6a8 0x6ac 0x6b0 0x6b4 0x6b8 0x6bc \
            0x6c0 0x6c4 0x6c8 0x6cc 0x6d0; do
@@ -47,7 +47,7 @@ readreg 0x4000 "QDMA0 cfg"
 readreg 0x4008 "QDMA0 int_status"
 readreg 0x400c "QDMA0 int_enable"
 # Q chain registers: rx_hwi/cpui/base
-# Layout assumed at offset ~0x100-0x300 dentro de qdma_regs
+# Layout assumed at offset ~0x100-0x300 within qdma_regs
 for off in 0x4100 0x4108 0x410c 0x4110 0x4114 0x4118 0x411c \
            0x4180 0x4188 0x418c 0x4190; do
     readreg $off "QDMA0 q[$off]"
@@ -82,6 +82,6 @@ echo "=== /proc/interrupts (busca QDMA/eth/mt7530 IRQs) ==="
 grep -iE "ethernet|qdma|mt7530|gdm|trgmii" /proc/interrupts 2>/dev/null
 
 echo
-echo "=== dmesg eth/mt7530 errores ==="
+echo "=== dmesg eth/mt7530 errors ==="
 dmesg | grep -iE "(eth|gdm|qdma|mt7530|trgmii).*(err|fail|drop|warn)" | tail -10
-echo "(fin)"
+echo "(end)"

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""iter53: parchar mt7530.c para usar valores stock OEM cuando xtal detection
-devuelve 0 (caso EN751221 MCM mode donde MTRAP no expone XTAL bits correctos).
+"""iter53: patch mt7530.c to use OEM stock values when xtal detection
+returns 0 (EN751221 MCM mode where MTRAP does not expose the correct XTAL bits).
 
-Stock OEM eth.ko trgmii_interface_init escribe:
+Stock OEM eth.ko trgmii_interface_init writes:
   ssc_delta = 0x57
-  ncpo1     = 0x1d00   (NO 0x1400 que upstream usa para MT7530+25MHz)
+  ncpo1     = 0x1d00   (NOT 0x1400 which upstream uses for MT7530+25MHz)
 """
 import sys, os
 
@@ -13,10 +13,10 @@ FN = "/home/cristuu/openwrt/build_dir/target-mips_24kc_musl/linux-econet_en75122
 src = open(FN).read()
 
 if "ITER53_EN751221_TRGMII" in src:
-    print("[i] iter53 ya aplicado")
+    print("[i] iter53 already applied")
     sys.exit(0)
 
-# Modificar el bloque de detección xtal en mt7530_setup_port6
+# Modify the xtal detection block in mt7530_setup_port6
 old = """	xtal = mt7530_read(priv, MT753X_MTRAP) & MT7530_XTAL_MASK;
 
 	if (xtal == MT7530_XTAL_25MHZ)
@@ -39,12 +39,11 @@ old = """	xtal = mt7530_read(priv, MT753X_MTRAP) & MT7530_XTAL_MASK;
 
 new = """	xtal = mt7530_read(priv, MT753X_MTRAP) & MT7530_XTAL_MASK;
 
-	/* ITER53_EN751221_TRGMII: en MCM mode dentro del SoC EN751221,
-	 * MT753X_MTRAP no devuelve los XTAL bits correctos (lee 0).
-	 * Con xtal=0 ncpo1 quedaba uninitialized (UB). Stock OEM eth.ko
-	 * trgmii_interface_init usa ssc_delta=0x57 y ncpo1=0x1d00 — esos
-	 * son los valores que necesita el TRGMII RX clock del SoC para
-	 * latch correcto.
+	/* ITER53_EN751221_TRGMII: in MCM mode inside the EN751221 SoC,
+	 * MT753X_MTRAP does not return the correct XTAL bits (reads 0).
+	 * With xtal=0 ncpo1 was left uninitialized (UB). Stock OEM eth.ko
+	 * trgmii_interface_init uses ssc_delta=0x57 and ncpo1=0x1d00 — those
+	 * are the values the SoC TRGMII RX clock needs for correct latching.
 	 */
 	if (xtal == 0) {
 		ssc_delta = 0x57;
@@ -69,9 +68,9 @@ new = """	xtal = mt7530_read(priv, MT753X_MTRAP) & MT7530_XTAL_MASK;
 	}"""
 
 if old not in src:
-    sys.exit("ERROR: ancla mt7530 setup_port6 no encontrada")
+    sys.exit("ERROR: mt7530 setup_port6 anchor not found")
 
 src = src.replace(old, new, 1)
 
 open(FN, "w").write(src)
-print("[+] iter53 mt7530.c parchado")
+print("[+] iter53 mt7530.c patched")

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Descarga la última imagen del Azure VM y flashea a slot B del XR500v
-# Uso: ./flash-from-wsl.sh
+# Downloads the latest image from the Azure VM and flashes it to slot B of the XR500v
+# Usage: ./flash-from-wsl.sh
 
 set -e
 ROUTER_IP="${ROUTER_IP:-192.168.68.99}"
@@ -9,11 +9,11 @@ ROUTER_PORT="${ROUTER_PORT:-2323}"
 TFTP_DIR="${TFTP_DIR:-/mnt/c/tftp}"
 AZURE_HOST="${AZURE_HOST:-azure-xr500v}"
 
-# Detectar nombre del archivo de imagen (lo último compilado)
+# Detect the image filename (most recently built)
 IMAGE_NAME=$(ssh "$AZURE_HOST" 'ls -t ~/openwrt/bin/targets/econet/en751221/*xr500v*sysupgrade.bin 2>/dev/null | head -1' || true)
 
 if [[ -z "$IMAGE_NAME" ]]; then
-    echo "ERROR: no se encontró imagen XR500v en ~/openwrt/bin/targets/" >&2
+    echo "ERROR: no XR500v image found in ~/openwrt/bin/targets/" >&2
     exit 1
 fi
 

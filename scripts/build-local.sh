@@ -39,5 +39,5 @@ if [ -f "$IMG" ]; then
   echo "  FLASH  : ${IMG%.bin}-patched.bin   <- usa ESTE (header trendchip)"
   echo "  -> flash: ./scripts/flash-from-wsl.sh  (router en stock telnet :2323)"
 else
-  echo "==> (no se generó imagen sysupgrade — probablemente un build parcial de paquete)"
+  echo "==> (no sysupgrade image generated — probably a partial package build)"
 fi

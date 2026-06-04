@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""iter52: agrega raw_offset/raw_value sysfs al econet_eth.c (full MMIO 0x0..0xFFFC)."""
+"""iter52: adds raw_offset/raw_value sysfs to econet_eth.c (full MMIO 0x0..0xFFFC)."""
 import sys
 
 FN = "/home/cristuu/openwrt/build_dir/target-mips_24kc_musl/linux-econet_en751221/econet-eth-2026.01.27~1db74f83/econet_eth.c"
@@ -7,12 +7,12 @@ FN = "/home/cristuu/openwrt/build_dir/target-mips_24kc_musl/linux-econet_en75122
 src = open(FN).read()
 
 if "en75_sysfs_raw_offset" in src:
-    print("[i] iter52 ya aplicado")
+    print("[i] iter52 already applied")
     sys.exit(0)
 
 needle = 'static DEVICE_ATTR(sw_value, 0644, en75_sysfs_value_show, en75_sysfs_value_store);\n'
 if needle not in src:
-    sys.exit("ERROR: ancla sw_value no encontrada")
+    sys.exit("ERROR: sw_value anchor not found")
 
 addition = '''
 /* iter52: raw MMIO sysfs - read any reg in en751221_regs (0x0..0xFFFC) */
@@ -73,10 +73,10 @@ src = src.replace(needle, needle + addition, 1)
 
 sw_create = '\tdevice_create_file(&pdev->dev, &dev_attr_sw_value);\n'
 if sw_create not in src:
-    sys.exit("ERROR: ancla device_create_file sw_value no encontrada")
+    sys.exit("ERROR: device_create_file sw_value anchor not found")
 
 create_addition = '\tdevice_create_file(&pdev->dev, &dev_attr_raw_offset);\n\tdevice_create_file(&pdev->dev, &dev_attr_raw_value);\n'
 src = src.replace(sw_create, sw_create + create_addition, 1)
 
 open(FN, 'w').write(src)
-print("[+] iter52 aplicado a econet_eth.c")
+print("[+] iter52 applied to econet_eth.c")

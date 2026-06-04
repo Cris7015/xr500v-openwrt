@@ -24,7 +24,7 @@ throughput (~5 Mbps), localized but not yet root-caused.
    leftover `bridge-vlan`), whose bridge rx_handler bypassed the DSA tagger → 0 demux.
    Removing eth0 from the bridge was the final unlock (RX demux started, tag `port=1`).
 7. **Labels.** Physical jack ↔ Linux port is reversed; fixed in the xr500v.dts
-   (port1=lan4 … port4=lan1) so físico LANn = lanN. Added MCM port4/phy4.
+   (port1=lan4 … port4=lan1) so physical LANn = lanN. Added MCM port4/phy4.
 
 End-to-end verified: `ping` 0% loss both ways, WiFi clients online, survives reboot.
 
@@ -60,18 +60,18 @@ the OpenWrt driver leaves unset) — instead of more trial patches. Caleb's comm
 - OEM QDMA init: `oem_src/ether/en7512/eth_lan.c` (`qdma_reg_init`).
 - Build VM, flash flow, recovery: `scripts/`.
 
-## ADDENDUM — ROOT CAUSE del TX ~5M: QDMA per-channel TX rate limiter
-Disasm RE (`phase2-disasm/qdma-lan.disasm.reloc.txt`) + OEM source confirman:
-- El QDMA tiene un **rate-limiter de TX por canal**. El OEM lo programa a 1Gbps por
-  canal en `eth_lan.c::downstermToQdmaTxRateLimitInit()` (llamado en `eth_mac_init`,
-  antes del qdma init); `perChannelRateLimitSwitch()` lo toggle por QoS/WAN.
-- **Caleb (econet_qdma.c) NUNCA lo programa** → default de HW throttlea (~5M).
-- Reg de cfg global: `QDMA_base+0x98` ([31]=enable, [15:0]=clock, tick=8000/clock).
-  Confirmado enabled en vivo: `tx_meter_cfg=0x80020fa0`.
-- Los valores per-canal están en registros separados que programa `qdma_set_tx_ratelimit`
-  (func ~400B: usa `qdmaGetLimitRateMax`, mul/div, hooks FWC/MT7530LanPortMap, canal<8).
-- Patch 260 (zero del reg global) NO alcanzó → faltan los registros per-canal.
+## ADDENDUM — ROOT CAUSE of TX ~5M: QDMA per-channel TX rate limiter
+Disasm RE (`phase2-disasm/qdma-lan.disasm.reloc.txt`) + OEM source confirm:
+- The QDMA has a **per-channel TX rate limiter**. The OEM programs it to 1 Gbps per
+  channel in `eth_lan.c::downstermToQdmaTxRateLimitInit()` (called in `eth_mac_init`,
+  before qdma init); `perChannelRateLimitSwitch()` toggles it per QoS/WAN.
+- **Caleb (econet_qdma.c) never programs it** → hardware default throttles to (~5M).
+- Global config register: `QDMA_base+0x98` ([31]=enable, [15:0]=clock, tick=8000/clock).
+  Confirmed enabled live: `tx_meter_cfg=0x80020fa0`.
+- Per-channel values are in separate registers programmed by `qdma_set_tx_ratelimit`
+  (func ~400B: uses `qdmaGetLimitRateMax`, mul/div, hooks FWC/MT7530LanPortMap, channel<8).
+- Patch 260 (zeroing the global register) was not enough → per-channel registers still need setting.
 
-**FIX pendiente:** replicar `downstermToQdmaTxRateLimitInit` (setear cada canal a 1Gbps,
-o disable) en el driver, post DMA-enable. Requiere decodificar el encoding per-canal de
-`qdma_set_tx_ratelimit` o la librería QDMA del SDK. Root cause CONFIRMADO; falta el encoding.
+**Pending fix:** replicate `downstermToQdmaTxRateLimitInit` (set each channel to 1 Gbps,
+or disable) in the driver, post DMA-enable. Requires decoding the per-channel encoding of
+`qdma_set_tx_ratelimit` or the SDK's QDMA library. Root cause CONFIRMED; encoding still to be worked out.

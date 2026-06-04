@@ -25,11 +25,11 @@ FN = "/home/cristuu/openwrt/build_dir/target-mips_24kc_musl/linux-econet_en75122
 src = open(FN).read()
 
 if "ITER59_C45_BYPASS" in src:
-    print("[i] iter59 ya aplicado")
+    print("[i] iter59 already applied")
     sys.exit(0)
 
 if "ITER58_PHY_ANALOG_CAL" not in src:
-    sys.exit("ERROR: bloque ITER58 no encontrado, aplicar iter58 primero")
+    sys.exit("ERROR: ITER58 block not found, apply iter58 first")
 
 # Insert the C45 bypass helpers right after the constants/table, before
 # en751221_anacal_wait. We anchor on the table closing brace.
@@ -78,9 +78,9 @@ block_new = re.sub(r"\bphy_read_mmd\(phydev,",
 # Sanity: at least 20 substitutions expected
 n_w = block.count("phy_write_mmd(phydev,")
 n_r = block.count("phy_read_mmd(phydev,")
-print(f"[i] reemplazos en bloque cal: {n_w} writes, {n_r} reads")
+print(f"[i] substitutions in cal block: {n_w} writes, {n_r} reads")
 if n_w + n_r < 30:
-    sys.exit(f"ERROR: solo {n_w + n_r} sustituciones (esperaba >=30)")
+    sys.exit(f"ERROR: only {n_w + n_r} substitutions (expected >=30)")
 
 # Mark applied
 block_new = block_new.replace(
@@ -92,4 +92,4 @@ block_new = block_new.replace(
 src = src[:i_start] + block_new + src[i_end:]
 
 open(FN, "w").write(src)
-print(f"[+] iter59 aplicado: {n_w} writes + {n_r} reads ahora vía C45 directo")
+print(f"[+] iter59 applied: {n_w} writes + {n_r} reads now via direct C45")

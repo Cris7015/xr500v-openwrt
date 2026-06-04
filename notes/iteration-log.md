@@ -1,116 +1,116 @@
 # Iteration Log
 
-Diario de qué se probó, qué pasó, qué se aprendió.
+Log of what was tried, what happened, and what was learned.
 
 ## 2026-05-06: Project bootstrap
-- Repo creado, estructura inicial.
+- Repo created, initial structure.
 
-## 2026-05-06: Task 4 — Clone repos en Azure
-- Clonado cjdelisle/openwrt fork + nuestro repo en Azure VM.
-- ⚠️ **El soporte econet está en branch `econet-integration-tree-apr27-2026`, NO en main.**
-  - `git checkout econet-integration-tree-apr27-2026` después del clone.
-  - Habrá que actualizar scripts/setup para hacer el checkout automático.
-- Last commit cjdelisle (en esa branch): `f3605b31fb econet: add EN751627 subtarget and Zyxel EX3301-T0 board`
-- DTS disponibles para EN751221: vr1200v-v2, smartfiber_xp8421-b, nokia_g240g-e, zyxel_pmg5617ga, generic
-- VR1200v v2 DTS = 128 líneas (nuestro punto de partida para XR500v)
+## 2026-05-06: Task 4 — Clone repos on Azure
+- Cloned cjdelisle/openwrt fork + our repo on the Azure VM.
+- ⚠️ **Econet support is in branch `econet-integration-tree-apr27-2026`, NOT in main.**
+  - `git checkout econet-integration-tree-apr27-2026` after cloning.
+  - Scripts/setup should be updated to perform this checkout automatically.
+- Last cjdelisle commit (on that branch): `f3605b31fb econet: add EN751627 subtarget and Zyxel EX3301-T0 board`
+- DTS files available for EN751221: vr1200v-v2, smartfiber_xp8421-b, nokia_g240g-e, zyxel_pmg5617ga, generic
+- VR1200v v2 DTS = 128 lines (our starting point for XR500v)
 - Feeds update + install OK
 
 ## 2026-05-06: Task 5 — Baseline VR1200v build
-- Build pipeline VALIDADO en Azure VM (8 vCPU, 32GB RAM)
+- Build pipeline VALIDATED on Azure VM (8 vCPU, 32GB RAM)
 - Branch: `econet-integration-tree-apr27-2026`
-- Imagen output: `openwrt-econet-en751221-tplink_archer-vr1200v-v2-squashfs-sysupgrade.bin`
-- Tamaño build: **8,487,580 bytes (8.09 MB)**
-- Tamaño referencia local vr1200v_sysupgrade.bin: 7,814,770 bytes (7.45 MB) — diferencia +672KB (8.6%), aceptable
-- Sin errores en `make -j8`; warnings solo de python3-pysocks/unidecode en feed packages (benignos)
-- Duración total build: ~25 min (VM clock UTC); toolchain GCC 14.3.0 + Linux 6.12.80 + packages
-- Outputs adicionales: initramfs-kernel.bin (6.7MB), manifest, sha256sums, profiles.json
-- ✅ Pipeline OK — listo para Task 6: crear DTS del XR500v
+- Output image: `openwrt-econet-en751221-tplink_archer-vr1200v-v2-squashfs-sysupgrade.bin`
+- Build size: **8,487,580 bytes (8.09 MB)**
+- Reference local vr1200v_sysupgrade.bin size: 7,814,770 bytes (7.45 MB) — delta +672KB (8.6%), acceptable
+- No errors in `make -j8`; warnings only from python3-pysocks/unidecode in feed packages (benign)
+- Total build duration: ~25 min (VM clock UTC); toolchain GCC 14.3.0 + Linux 6.12.80 + packages
+- Additional outputs: initramfs-kernel.bin (6.7MB), manifest, sha256sums, profiles.json
+- ✅ Pipeline OK — ready for Task 6: create the XR500v DTS
 
-## 2026-05-06: Task 8 — DTS XR500v creado
-- Copiado de en751221_tplink_archer-vr1200v-v2.dts
-- compatible string actualizada a "tplink,archer-xr500v"
-- model actualizada a "TP-Link Archer XR500v v1"
-- Partition layout ajustado al layout real del XR500v (3MB kernel, 16MB rootfs)
+## 2026-05-06: Task 8 — XR500v DTS created
+- Copied from en751221_tplink_archer-vr1200v-v2.dts
+- compatible string updated to "tplink,archer-xr500v"
+- model updated to "TP-Link Archer XR500v v1"
+- Partition layout adjusted to the real XR500v layout (3MB kernel, 16MB rootfs)
   - boot=256K, romfile=256K, kernel=3MB, rootfs=16MB, misc=4.5MB
   - kernel1=3MB, rootfs1=16MB, others=4.9MB, bootflag=128K
-  - openwrt_ubi=~62.75MB (0x3000000-0x6ec0000, con reserva BMT)
-- NVMEM layout en partición misc eliminado (no conocemos offsets XR500v)
-- gmac0 nvmem-cells comentado (MAC address NVMEM no mapeada aún)
-- wifi@pcie0/pcie1: mantenidos con compatible=mediatek,mt76 pero sin nvmem-cells (EEPROM/MAC desconocidos)
-- CPP preprocessing OK (449 líneas post-include), dtc compilación OK con 1 warning pre-existente en dtsi
-- DTS commiteado: 418736a042fac128c8b715f5edacfcd0b25d5e37
+  - openwrt_ubi=~62.75MB (0x3000000-0x6ec0000, with BMT reserve)
+- NVMEM layout in misc partition removed (XR500v offsets unknown)
+- gmac0 nvmem-cells commented out (MAC address NVMEM not mapped yet)
+- wifi@pcie0/pcie1: kept with compatible=mediatek,mt76 but without nvmem-cells (EEPROM/MAC unknown)
+- CPP preprocessing OK (449 lines post-include), dtc compilation OK with 1 pre-existing warning in dtsi
+- DTS committed: 418736a042fac128c8b715f5edacfcd0b25d5e37
 
-## 2026-05-06: Task 9 — Image Makefile registra XR500v
-- Bloque Device/tplink_archer-xr500v agregado a target/linux/econet/image/en751221.mk
+## 2026-05-06: Task 9 — Image Makefile registers XR500v
+- Device/tplink_archer-xr500v block added to target/linux/econet/image/en751221.mk
 - KERNEL_SIZE=3072k, IMAGE_SIZE=16384k, BLOCKSIZE=128k
-- IMAGES=sysupgrade.bin con recipe: append-kernel | lzma | tclinux-trx
+- IMAGES=sysupgrade.bin with recipe: append-kernel | lzma | tclinux-trx
 - TARGET_DEVICES += tplink_archer-xr500v
-- Decisión de diseño: se usa tclinux-trx en lugar de tplink-v2-header porque el XR500v
-  es OEM TCLinux (no firmware TP-Link nativo); TPLINK_HWID desconocido (firmware cifrado).
+- Design decision: tclinux-trx used instead of tplink-v2-header because the XR500v
+  is an OEM TCLinux device (not native TP-Link firmware); TPLINK_HWID unknown (encrypted firmware).
 - Makefile dry-run (-n) OK: "Nothing to be done for all"
 
-## 2026-05-06: Task 11 — Primer build XR500v ✅
-- Imagen sysupgrade.bin: 6166960 bytes
-- Imagen initramfs-kernel.bin: 5887402 bytes
-- Build incremental sin errores
-- Total bin/targets/econet/en751221/ tiene tanto VR1200v (baseline) como XR500v (nuestro)
+## 2026-05-06: Task 11 — First XR500v build ✅
+- sysupgrade.bin image: 6166960 bytes
+- initramfs-kernel.bin image: 5887402 bytes
+- Incremental build without errors
+- Total bin/targets/econet/en751221/ contains both VR1200v (baseline) and XR500v (ours)
 
-## 2026-05-06: Task 12 — Verificación imagen XR500v ⚠️ CRITICAL FINDING
-- Imagen tamaño: 6166960 bytes (5.88 MB)
-- Header magic primeros 4 bytes: `32 52 44 48` = **'2RDH' (TRX2 format)**
+## 2026-05-06: Task 12 — XR500v image verification ⚠️ CRITICAL FINDING
+- Image size: 6166960 bytes (5.88 MB)
+- Header magic first 4 bytes: `32 52 44 48` = **'2RDH' (TRX2 format)**
 - Squashfs offset: 0x2f4782 (3098498 bytes)
 - LZMA offset: 0x100
 
-### ❌ BLOCKER IDENTIFICADO:
-La imagen sysupgrade.bin usa la receta `tclinux-trx` (decidida en Task 9), que genera un envoltorio **TRX2 ('2RDH')**. 
-**EL BOOTLOADER RECHAZA EXPLÍCITAMENTE este formato** (notas del task original).
+### ❌ BLOCKER IDENTIFIED:
+The sysupgrade.bin image uses the `tclinux-trx` recipe (decided in Task 9), which generates a **TRX2 ('2RDH') wrapper**. 
+**THE BOOTLOADER EXPLICITLY REJECTS this format** (notes from the original task).
 
-### Comparación con referentes:
-| Imagen | Header | TRX2? | LZMA@ | Squashfs@ | Estado |
+### Comparison with reference images:
+| Image | Header | TRX2? | LZMA@ | Squashfs@ | Status |
 |--------|--------|-------|-------|-----------|--------|
-| VR1200v sysupgrade | `03 00 00 00 'ver. 2.0'` | NO | 0x200 | 0x400000 | ✅ Aceptado por bldr |
-| Stock XR500v (mtd3) | `03 00 00 03 ...` | NO | 0x200 | - | ✅ En producción |
-| **NEW XR500v sysupgrade** | **'2RDH'** | **YES** | **0x100** | **0x2f4782** | **❌ RECHAZADO** |
+| VR1200v sysupgrade | `03 00 00 00 'ver. 2.0'` | NO | 0x200 | 0x400000 | ✅ Accepted by bldr |
+| Stock XR500v (mtd3) | `03 00 00 03 ...` | NO | 0x200 | - | ✅ In production |
+| **NEW XR500v sysupgrade** | **'2RDH'** | **YES** | **0x100** | **0x2f4782** | **❌ REJECTED** |
 
-### Acción requerida:
-- Cambiar imagen recipe en `target/linux/econet/image/en751221.mk`
-- Opciones investigadas en Task 9:
-  - `tplink-v2-header`: usaba TPLINK_HWID (desconocido, FW cifrado)
-  - `tclinux-trx`: produce TRX2 envoltorio (actual, RECHAZADO)
-- Necesario: investigar qué recipe genera formato `03 00 00 ...` sin TRX2
-  - Posible: cambiar a `append-kernel-lzma | append-squashfs` sin tclinux-trx wrapper
-  - O encontrar recipe del VR1200v que generó su formato aceptado
+### Required action:
+- Change the image recipe in `target/linux/econet/image/en751221.mk`
+- Options investigated in Task 9:
+  - `tplink-v2-header`: used TPLINK_HWID (unknown, encrypted FW)
+  - `tclinux-trx`: produces TRX2 wrapper (current, REJECTED)
+- Needed: investigate which recipe generates the `03 00 00 ...` format without TRX2
+  - Possible: switch to `append-kernel-lzma | append-squashfs` without tclinux-trx wrapper
+  - Or find the VR1200v recipe that generated its accepted format
 
-## 2026-05-06: Task 12 Fix -- Image recipe corregido
-- Recipe IMAGE/sysupgrade.bin cambiado de tclinux-trx (produce "2RDH" rechazado por bldr)
-  a tplink-v2-header con TPLINK_HVERSION=3 (produce "03 00 00 00 ver. 2.0")
-- TPLINK_FLASHLAYOUT=16Mmtk, TPLINK_HWID=0x0ec60001 (dummy, bldr no valida HWID)
-- Nueva header magic primeros 16 bytes: 030000007665722e20322e3000ffffff
-- Imagen tamano: 6214858 bytes (6.0 MB)
-- Header antes: 32524448 ("2RDH", rechazado) | Header ahora: 03000000 ("\x03\x00\x00\x00", aceptado)
-- Imagen en: /mnt/c/tftp/openwrt-xr500v-iter2.bin
+## 2026-05-06: Task 12 Fix -- Image recipe corrected
+- IMAGE/sysupgrade.bin recipe changed from tclinux-trx (produces "2RDH" rejected by bldr)
+  to tplink-v2-header with TPLINK_HVERSION=3 (produces "03 00 00 00 ver. 2.0")
+- TPLINK_FLASHLAYOUT=16Mmtk, TPLINK_HWID=0x0ec60001 (dummy, bldr does not validate HWID)
+- New header magic first 16 bytes: 030000007665722e20322e3000ffffff
+- Image size: 6214858 bytes (6.0 MB)
+- Header before: 32524448 ("2RDH", rejected) | Header now: 03000000 ("\x03\x00\x00\x00", accepted)
+- Image at: /mnt/c/tftp/openwrt-xr500v-iter2.bin
 
-## 2026-05-06: Task 13 — Flash slot B con XR500v iter2
-- Imagen: openwrt-xr500v-iter2.bin (con header tplink-v2 corregido)
-- Layout imagen: [512B file_hdr][3MB-512B kernel_data][512B zeros][2.93MB rootfs squashfs]
-- kernel1_v3.bin = src[0:0x300000]: incluye file header como partition header (03 00 00 00 ver. 2.0)
-- rootfs1_v3.bin = src[0x300200:] padded to 16MB: comienza con squashfs hsqs magic
+## 2026-05-06: Task 13 — Flash slot B with XR500v iter2
+- Image: openwrt-xr500v-iter2.bin (with corrected tplink-v2 header)
+- Image layout: [512B file_hdr][3MB-512B kernel_data][512B zeros][2.93MB rootfs squashfs]
+- kernel1_v3.bin = src[0:0x300000]: includes file header as partition header (03 00 00 00 ver. 2.0)
+- rootfs1_v3.bin = src[0x300200:] padded to 16MB: starts with squashfs hsqs magic
 - kernel1 (mtd6): tftp 3MB OK → /userfs/bin/mtd -f -e kernel1 write → K_RC_0
 - rootfs1 (mtd7 via mtd0 offset 0x1b00000): tftp 16MB OK → /userfs/bin/mtd writeflash → R_RC_0
-- writeflash output: 128 sectores [e][w] x sector, "writeflash: total write 0x1000000 bytes"
-- Verificación readback kernel1 (mtd6): 030000007665722e20322e3000ffffff ✓ MATCH
-- Verificación readback rootfs1 (mtd0+0x1b00000): 687371730803000027abf06900000400 = 'hsqs' ✓ MATCH
-- Slot A (mtd3/mtd4) intacto: no tocado en ningún momento
-- Próximo: power cycle + bldr bflag set 1 + autoboot (Task 14)
+- writeflash output: 128 sectors [e][w] per sector, "writeflash: total write 0x1000000 bytes"
+- Readback verification kernel1 (mtd6): 030000007665722e20322e3000ffffff ✓ MATCH
+- Readback verification rootfs1 (mtd0+0x1b00000): 687371730803000027abf06900000400 = 'hsqs' ✓ MATCH
+- Slot A (mtd3/mtd4) intact: not touched at any point
+- Next: power cycle + bldr bflag set 1 + autoboot (Task 14)
 
 ## 2026-05-06: Task 14 — Boot test iter 1 ❌ CRASH
-- Header tplink-v2 ACEPTADO por bldr (mejora vs iter previo)
-- LZMA decompress exitoso: kernel cargado a 0x80020000
-- Kernel CRASH al inicio: EPC=0x81fb91a8, BADVADDR=0xc0000000, CAUSE=8 (Bus Error)
-- Mismo crash que en sesión anterior con VR1200v sysupgrade — independiente del DTS XR500v custom
-- Hipótesis: crash en código de plataforma EcoNet o en en751221.dtsi (hardcoded peripheral access)
-- 0xc0000000 = MIPS KSEG2, periférico no existe o está en otra dirección en XR500v vs lo asumido por kernel
-- Próximo: Codex analysis para identificar la función en EPC=0x81fb91a8
+- tplink-v2 header ACCEPTED by bldr (improvement over previous iter)
+- LZMA decompress successful: kernel loaded at 0x80020000
+- Kernel CRASH at startup: EPC=0x81fb91a8, BADVADDR=0xc0000000, CAUSE=8 (Bus Error)
+- Same crash as in previous session with VR1200v sysupgrade — independent of the custom XR500v DTS
+- Hypothesis: crash in EcoNet platform code or in en751221.dtsi (hardcoded peripheral access)
+- 0xc0000000 = MIPS KSEG2, peripheral does not exist or is at a different address on XR500v vs kernel assumption
+- Next: Codex analysis to identify the function at EPC=0x81fb91a8
 
 ## 2026-05-06: Task 16 — Iteration loop summary
 
@@ -147,13 +147,13 @@ Massive 12+ hour session attacking the community-unresolved RX bug on lan1-4. WA
 |------|--------|--------|
 | iter97 | Codex round 1 (PHY 9-12) — broke econet_eth probe with -EINVAL | Source corruption from partial patch state |
 | iter98a-d | DTS PHY remap 1-4 (per OEM ethphxcmd miir) + /delete-node/ &switch0port4 + &switch0phy4 | DSA enumerates 4 user ports, link UP 1Gbps |
-| iter99 | DSA_TAG_PROTO_MTK → 8021Q (naive switch) | Fail silently — kernel sin CONFIG_NET_DSA_TAG_8021Q standalone |
+| iter99 | DSA_TAG_PROTO_MTK → 8021Q (naive switch) | Fails silently — kernel without CONFIG_NET_DSA_TAG_8021Q standalone |
 | iter100 | Revert iter99 → baseline iter98d | Stable |
-| iter101 | port0.regs.stag_en = 1 (enable HW STAG insertion on RX) | Frames empiezan a llegar a CPU pero con fport=13 (unexpected) |
-| iter102 | Full OEM macEN7512STagEnable: CDMA_VLAN_CTRL[0]=1 + fwd_cfg[24]=1 + stag_en=1 + vlan=0x81000001 | Hex dump revela MTK STAG inline format 00 05 00 00 (port=5 = WAN, never 0-3) |
-| iter103-104 | Debug log sp_tag + skb hex dump primeros 32 bytes | sp_tag=0 (descriptor empty); STAG está inline post-srcMAC. tag_mtk decodea correcto, sólo WAN frames llegan |
-| iter105 | REMOVE iter84 PCR forcing 0x00ff (était L2-bridging LAN↔WAN bypass CPU); deja DSA programar PCR=0x004d | PC vía LAN no tiene internet (L2 bridge cortado), pero RXU sigue 0 |
-| iter106 | Codex round 1 fix: PMCR bits 13/14 (PMCR_MAC_RX_EN/TX_EN) + bits 4/5 (FORCE_RX/TX_FC_EN) | Bits set OK (PMCR=0x5e330 cuando link UP) pero RXU=0 todavía |
+| iter101 | port0.regs.stag_en = 1 (enable HW STAG insertion on RX) | Frames start arriving at CPU but with fport=13 (unexpected) |
+| iter102 | Full OEM macEN7512STagEnable: CDMA_VLAN_CTRL[0]=1 + fwd_cfg[24]=1 + stag_en=1 + vlan=0x81000001 | Hex dump reveals MTK STAG inline format 00 05 00 00 (port=5 = WAN, never 0-3) |
+| iter103-104 | Debug log sp_tag + skb hex dump first 32 bytes | sp_tag=0 (descriptor empty); STAG is inline post-srcMAC. tag_mtk decodes correctly, only WAN frames arrive |
+| iter105 | REMOVE iter84 PCR forcing 0x00ff (was L2-bridging LAN↔WAN bypass CPU); let DSA program PCR=0x004d | PC via LAN has no internet (L2 bridge cut), but RXU still 0 |
+| iter106 | Codex round 1 fix: PMCR bits 13/14 (PMCR_MAC_RX_EN/TX_EN) + bits 4/5 (FORCE_RX/TX_FC_EN) | Bits set OK (PMCR=0x5e330 when link UP) but RXU=0 still |
 | iter107 | Codex round 2 + DeepSeek-V4 Pro: PVID per port 1..7, MFC=0x404040e0, CPU PVC bit 5 PORT_SPEC_TAG → 0x81008120 | All registers match OEM, RX persists 0 |
 | iter108 | Clear PMCR bit 15 MT7530_FORCE_MODE → PMCR=0x56330 (**exact match OEM**) | **Perfect register-level OEM match. RXU=0 STILL.** Bug confirmed sub-register layer |
 
@@ -167,7 +167,7 @@ Massive 12+ hour session attacking the community-unresolved RX bug on lan1-4. WA
 
 ### Other key findings
 
-- **Port labeling carcasa ↔ Linux invertido**: jack LAN1 = Linux lan4, LAN2 = lan3, LAN3 = lan2, LAN4 = lan1 (confirmed via OEM  + live cable-plug tests)
+- **Inverted enclosure ↔ Linux port labeling**: jack LAN1 = Linux lan4, LAN2 = lan3, LAN3 = lan2, LAN4 = lan1 (confirmed via OEM  + live cable-plug tests)
 - **PHY MDIO addresses real**: 1, 2, 3, 4 (NOT 0-3 from base dtsi, NOT 9-12 from econet-linux wiki). Confirmed via OEM .
 - **MTK STAG format**: standard 4-byte inline header after src MAC:  (port 5 = WAN in our captures). Decoded correctly by mainline  with .
 - **patch_trendchip_header.py default entry**: changed from 0x8176d140 (iter91-specific) to 0x80020000 (= KERNEL_LOADADDR, always correct for OpenWrt MIPS pipeline).
@@ -183,5 +183,5 @@ Massive 12+ hour session attacking the community-unresolved RX bug on lan1-4. WA
 
 ### Regressions in iter108
 
-- WiFi PCIe binding broken (mt76 modules loaded, /sys/class/ieee80211/ empty, no PCIe enumeration in dmesg). Likely  dropped a kernel CONFIG. Fixable next session.
+- WiFi PCIe binding broken (mt76 modules loaded, /sys/class/ieee80211/ empty, no PCIe enumeration in dmesg). Likely a dropped kernel CONFIG. Fixable next session.
 

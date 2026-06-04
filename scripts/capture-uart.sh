@@ -1,30 +1,30 @@
 #!/bin/bash
-# Captura bootlog del UART durante un intervalo (default 90s)
-# Uso: ./capture-uart.sh [seconds] [output_file]
+# Captures the UART boot log for a given interval (default 90s)
+# Usage: ./capture-uart.sh [seconds] [output_file]
 
 DURATION="${1:-90}"
 OUTFILE="${2:-/tmp/xr500v_boot_$(date +%Y%m%d_%H%M%S).log}"
 DEV="/dev/ttyUSB0"
 
-# Verificar device
+# Check device
 if [[ ! -e "$DEV" ]]; then
-    echo "ERROR: $DEV no existe — verificá usbipd attach desde Windows" >&2
+    echo "ERROR: $DEV does not exist — check usbipd attach from Windows" >&2
     exit 1
 fi
 
-# Permisos
+# Permissions
 sudo chmod 666 "$DEV" 2>/dev/null
 
-# Configurar puerto raw
+# Configure raw port
 stty -F "$DEV" 115200 cs8 -cstopb -parenb -ixon -ixoff raw -echo -echoe -echok -echoctl -echoke -onlcr 2>/dev/null
 
 echo "[+] Capturing $DEV for ${DURATION}s → $OUTFILE"
-echo "[+] (Power cycle el router AHORA si querés ver el boot completo)"
+echo "[+] (Power cycle the router NOW if you want to capture the full boot)"
 
 timeout "$DURATION" cat "$DEV" > "$OUTFILE" 2>&1 &
 CAT_PID=$!
 
-# Mostrar progreso
+# Show progress
 for i in $(seq 1 $((DURATION/5))); do
     sleep 5
     SIZE=$(wc -c < "$OUTFILE" 2>/dev/null || echo 0)

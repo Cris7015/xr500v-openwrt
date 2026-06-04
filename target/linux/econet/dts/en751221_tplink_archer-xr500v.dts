@@ -127,11 +127,11 @@
 			};
 
 			/*
-			 * iter36: MT7662 factory EEPROM (chip ID 0x7662 confirmado
-			 * en byte 0). 512 bytes que contienen calibration data
-			 * (TX power per-channel, etc). El driver mt76x2e la lee via
+			 * iter36: MT7662 factory EEPROM (chip ID 0x7662 confirmed
+			 * at byte 0). 512 bytes containing calibration data
+			 * (TX power per-channel, etc). The mt76x2e driver reads it via
 			 * nvmem-cells = <&eeprom_misc_e0000>; nvmem-cell-names = "eeprom".
-			 * Sin esto, el driver usa defaults conservadores (TX=3dBm).
+			 * Without this, the driver uses conservative defaults (TX=3dBm).
 			 */
 			eeprom_misc_e0000: eeprom@e0000 {
 				reg = <0xe0000 0x200>;
@@ -146,13 +146,13 @@
 		partition@1b00000 {
 			/*
 			 * Slot B rootfs (raw squashfs).
-			 * linux,rootfs marca esta partition como root device para
-			 * mount_root. mtd-split-squashfs sigue creando una sub
-			 * "rootfs_data" automáticamente post-squashfs end, pero a
-			 * partir de iter35 NO la usamos: el overlay UBI vive en
-			 * partition propia "openwrt_ubi" en el área libre
-			 * 0x3000000-0x7000000 (confirmada vacía con dump completo).
-			 * El preinit hook 79_ubi_attach ahora apunta a openwrt_ubi.
+			 * linux,rootfs marks this partition as the root device for
+			 * mount_root. mtd-split-squashfs still creates a
+			 * "rootfs_data" sub-partition automatically after the squashfs
+			 * end, but from iter35 onwards we do NOT use it: the UBI overlay
+			 * lives in its own "openwrt_ubi" partition in the free area
+			 * 0x3000000-0x7000000 (confirmed empty with a full dump).
+			 * The preinit hook 79_ubi_attach now points to openwrt_ubi.
 			 */
 			label = "rootfs1";
 			reg = <0x1b00000 0x1000000>;
@@ -172,17 +172,17 @@
 		/*
 		 * iter35: dedicated UBI partition in the unused free area.
 		 *
-		 * El stock OEM expone /dev/mtd0 = "ALL" de 0x07000000 (112MB)
-		 * — eso es el espacio "user" del en75_bmt antes de su reserve
-		 * area (922 user blocks * 128KB = ~115MB, OEM reporta 112MB).
-		 * Las 9 particiones existentes suman 0x3000000 (48MB), dejando
-		 * 0x3000000-0x7000000 (64MB) disponibles. Confirmado erased
-		 * con dump completo el 2026-05-08 (16 chunks de 4MB todos
-		 * hash md5 = 4MB de 0xff puro).
+		 * The stock OEM exposes /dev/mtd0 = "ALL" at 0x07000000 (112MB)
+		 * — that is the en75_bmt "user" space before its reserve area
+		 * (922 user blocks * 128KB = ~115MB, OEM reports 112MB).
+		 * The 9 existing partitions sum to 0x3000000 (48MB), leaving
+		 * 0x3000000-0x7000000 (64MB) available. Confirmed erased
+		 * with a full dump on 2026-05-08 (16 chunks of 4MB, all
+		 * md5 hash = 4MB of 0xff).
 		 *
-		 * Esta partition se provisiona con ubiformat/ubiattach/ubimkvol
-		 * desde running OpenWrt (one-time per device); el preinit hook
-		 * 79_ubi_attach la atachea cada boot.
+		 * This partition is provisioned with ubiformat/ubiattach/ubimkvol
+		 * from a running OpenWrt (one-time per device); the preinit hook
+		 * 79_ubi_attach attaches it on every boot.
 		 */
 		partition@3000000 {
 			label = "openwrt_ubi";
@@ -231,8 +231,8 @@
 };
 
 /*
- * iter57 v2: Enable PCIe (perdió status=okay al rewrite del dts)
- * pcie0 = port0 (no slot ahí)
+ * iter57 v2: Enable PCIe (lost status=okay during the dts rewrite)
+ * pcie0 = port0 (no slot there)
  * pcie1 + slot1 = MT7662 WiFi card
  */
 
@@ -251,9 +251,9 @@
 		reg = <0x0000 0 0 0 0>;
 		nvmem-cells = <&eeprom_misc_e0000>, <&macaddr_misc_f100>;
 		nvmem-cell-names = "eeprom", "mac-address";
-		/* 5GHz MAC = base flash 0xf100 + 2 (= esquema OEM: wlan5 BSSID ...3A).
-		 * Sin esto, el 5GHz se quedaba en la base ...38 y colisionaba con el
-		 * conduit DSA / la 2.4 cuando el increment del MT7603 fallaba. */
+		/* 5GHz MAC = base flash 0xf100 + 2 (= OEM scheme: wlan5 BSSID ...3A).
+		 * Without this, the 5GHz stayed at the base ...38 and collided with the
+		 * DSA conduit / 2.4 GHz when the MT7603 increment failed. */
 		mac-address-increment = <2>;
 
 		/* Panel 5GHz LED = MT7662 MAC LED pin 2, active-low. mt76
@@ -268,11 +268,11 @@
 
 &slot0 {
 	wifi@0,0 {
-		/* MT7603 2.4GHz -- EEPROM sintetica inline (pared 2). MAC LA placeholder +
-		 * cal del efuse real; reemplazar por EEPROM real a futuro. */
+		/* MT7603 2.4GHz -- synthetic inline EEPROM (wall 2). MAC is a placeholder +
+		 * cal from the real eFuse; replace with the real EEPROM in the future. */
 		compatible = "mediatek,mt76";
 		reg = <0x0000 0 0 0 0>;
-		/* MAC real de fabrica: base flash 0xf100 + 1 (per-device, universal) */
+		/* Real factory MAC: base flash 0xf100 + 1 (per-device, universal) */
 		nvmem-cells = <&macaddr_misc_f100>;
 		nvmem-cell-names = "mac-address";
 		mac-address-increment = <1>;

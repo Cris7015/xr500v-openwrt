@@ -2,11 +2,11 @@
 # 79_ubi_attach — attach UBI to openwrt_ubi partition (iter35+) AND
 # pre-mount the UBIFS volume at /tmp/overlay before mount_root runs.
 #
-# Pre-iter35: la UBI vivía en sub-partition "rootfs_data" auto-derivada
-# de rootfs1 (tras squashfs-split). Solo había 13MB.
-# iter35+: UBI propia en partition "openwrt_ubi" (64MB en área libre
-# 0x3000000-0x7000000). El nombre del volumen UBI sigue siendo
-# "rootfs_data" para compatibilidad con fstools/mount_root sin
+# Pre-iter35: the UBI lived in a "rootfs_data" sub-partition auto-derived
+# from rootfs1 (after squashfs-split). Only 13MB was available.
+# iter35+: dedicated UBI in the "openwrt_ubi" partition (64MB in the free
+# area 0x3000000-0x7000000). The UBI volume name is still
+# "rootfs_data" for compatibility with fstools/mount_root without
 # patches.
 #
 # Kernel-time UBI auto-attach via `ubi.mtd=` cmdline triggers OOB-marker

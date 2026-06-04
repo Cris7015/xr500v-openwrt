@@ -1087,7 +1087,7 @@ static int slic_play_show(struct seq_file *s, void *unused)
 		if (ret)
 			break;
 	}
-	seq_printf(s, "play_melody loops=%d ret=%d (escuchá el auricular)\n",
+	seq_printf(s, "play_melody loops=%d ret=%d (listen on the earpiece)\n",
 		   i, ret);
 	return 0;
 }
@@ -1425,7 +1425,7 @@ static int slic_voice_loopback_show(struct seq_file *s, void *unused)
 	mutex_unlock(&sd.lock);
 
 	ret = pcm_en751221_voice_loopback(15);
-	seq_printf(s, "voice_loopback ret=%d (hablá al mic, te escuchás en el auricular ~15s)\n", ret);
+	seq_printf(s, "voice_loopback ret=%d (speak into the mic, you hear yourself on the earpiece for ~15s)\n", ret);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(slic_voice_loopback);
