@@ -21,3 +21,7 @@ Thumbs.db
 *.bak
 *~
 docs/superpowers/
+
+# Python bytecode
+__pycache__/
+*.pyc
