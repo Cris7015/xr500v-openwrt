@@ -1,0 +1,4 @@
+#!/bin/sh
+# Enable the WPS LED daemon (drives green:wps from hostapd WPS state).
+/etc/init.d/wps-led enable
+exit 0

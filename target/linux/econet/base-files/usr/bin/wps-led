@@ -1,0 +1,38 @@
+#!/bin/sh
+# Drive green:wps LED from hostapd WPS state (per OEM manual behaviour):
+#  - flashing  : WPS PBC active (client connecting, up to 2 min)
+#  - solid on  : WPS established, auto-off ~5 min later
+#  - off       : otherwise
+LED=/sys/class/leds/green:wps
+ON=$(cat $LED/max_brightness 2>/dev/null); [ -n "$ON" ] || ON=1
+APS="hostapd.phy0-ap0 hostapd.phy1-ap0"
+HOLD=300
+state=""; success_until=0; prev="init"
+set_led(){ # $1=flash|on|off
+  [ "$1" = "$state" ] && return
+  case "$1" in
+    flash) echo timer > $LED/trigger; echo 180 > $LED/delay_on; echo 180 > $LED/delay_off;;
+    on)    echo none  > $LED/trigger; echo $ON > $LED/brightness;;
+    off)   echo none  > $LED/trigger; echo 0  > $LED/brightness;;
+  esac
+  state="$1"
+}
+while :; do
+  now=$(cut -d. -f1 /proc/uptime)
+  active=0; result="None"
+  for ap in $APS; do
+    s=$(ubus call $ap wps_status 2>/dev/null)
+    echo "$s" | grep -q "\"pbc_status\": \"Active\"" && active=1
+    echo "$s" | grep -q "\"last_wps_result\": \"Success\"" && result="Success"
+  done
+  # one-shot: new success -> hold solid 5 min (ignore the pre-existing state at boot)
+  if [ "$prev" != "init" ] && [ "$result" = "Success" ] && [ "$prev" != "Success" ]; then
+    success_until=$((now + HOLD))
+  fi
+  prev="$result"
+  if [ $active -eq 1 ]; then set_led flash
+  elif [ $now -lt $success_until ]; then set_led on
+  else set_led off
+  fi
+  sleep 1
+done
