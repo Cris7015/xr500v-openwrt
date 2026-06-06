@@ -525,14 +525,33 @@ static int slic_audio_setup(void)
 	 * (init only programmed channel 1). No-op on channel 1. */
 	slic_load_channel_profiles();
 
-	/* Switcher timing + params (from OEM profile) BEFORE enabling the switcher,
+	/*
+	 * Switcher timing + params (from OEM profile) BEFORE enabling the switcher,
 	 * so the buck-boost runs with calibrated edge timing instead of noisy
-	 * defaults (uncalibrated ripple couples broadband noise into the ADC). */
+	 * defaults (uncalibrated ripple couples broadband noise into the ADC).
+	 *
+	 * KNOWN ISSUE -- idle "tssss" DC-DC coil whine (TODO, not yet fixed here):
+	 * the buzz is light-load burst/PFM noise from holding the line in active
+	 * feed (STATE 0x23) at on-hook idle; it is loud unloaded (on-hook) and
+	 * vanishes under load (off-hook). It is NOT fixable from these three
+	 * switcher registers alone -- verified live on the Le9642 (an ABS part,
+	 * PCN 0x75): swctrl HP/MED/LP (0x6f/0x6a/0x65), the OEM buck-boost timing
+	 * word (0xf6 95 00 58 30 5c 30) and AUTO swparam variants (0x04/0x44) all
+	 * still buzz at idle; swparam POWER_MODE_MANUAL(0x80)/COUNTER(0x20) DO
+	 * silence it but only by starving the rail, which drops the off-hook loop
+	 * current below the SIGREG(0x4d) hook threshold -> live calls drop. The
+	 * real OEM fix is to put the line in a low-power STANDBY state at idle
+	 * (STATE SS_LOWPOWER 0x0c) with the LPM metallic-hook comparator armed
+	 * (LOOPSUP 0xc2) and a standby<->active state machine -- substantial work,
+	 * deferred. For now we keep the proven HP/AUTO active-feed config: calls
+	 * work, idle buzz remains (gone during calls). Live A/B knobs:
+	 * swtiming / swparam / swctrl / state debugfs nodes.
+	 */
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ static const u8 swt[] = { 0xf6, 0x66, 0x00, 0x64, 0x30, 0x74, 0x30 }; slic_write_mpi("swtiming", swt, sizeof(swt)); }
 	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
 	{ static const u8 swp[] = { 0xe4, 0x04, 0x92, 0x0a }; slic_write_mpi("swparam", swp, sizeof(swp)); }
-	/* switcher HP (simple direct write -- the robust CALCTRL sequence breaks it) */
+	/* switcher HP (proven config; off-hook loop current stays above the hook threshold) */
 	{ static const u8 sw[] = { 0xe6, 0x6f }; ret = slic_write_mpi("sw-hp", sw, sizeof(sw)); if (ret) return ret; }
 	/* feed active (no codec yet) */
 	ret = zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
@@ -891,6 +910,259 @@ static ssize_t swctrl_write(struct file *f, const char __user *ub,
 static const struct file_operations swctrl_fops = {
 	.owner	= THIS_MODULE,
 	.write	= swctrl_write,
+	.open	= simple_open,
+	.llseek	= default_llseek,
+};
+
+/*
+ * Write the System State register (0x56) directly, for experimenting with the
+ * line-feed states live: `echo 04 > state` (SS_IDLE, low-power standby),
+ * `echo 0c > state` (SS_LOWPOWER), `echo 23 > state` (active+codec, the
+ * in-call default), `echo 03 > state` (active). The buzz on the FXS line is
+ * the buck-boost DC-DC sustaining the active feed (0x23) -- a true low-power
+ * idle state should silence it while keeping SIGREG hook detection.
+ */
+static ssize_t state_write(struct file *f, const char __user *ub,
+			   size_t n, loff_t *off)
+{
+	u8 val;
+	int ret;
+
+	ret = kstrtou8_from_user(ub, n, 16, &val);
+	if (ret)
+		return ret;
+
+	mutex_lock(&sd.lock);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+	{ u8 st[2] = { 0x56, val }; ret = slic_write_mpi("state-dbg", st, 2); }
+	mutex_unlock(&sd.lock);
+
+	pr_info("econet-slic: state(0x56) <- 0x%02x (ret=%d)\n", val, ret);
+	return ret ? ret : n;
+}
+static const struct file_operations state_fops = {
+	.owner	= THIS_MODULE,
+	.write	= state_write,
+	.open	= simple_open,
+	.llseek	= default_llseek,
+};
+
+/*
+ * Write SWPARAM[0] (Switching Regulator Parameters byte0, reg 0xE4), keeping
+ * bytes 1-2 at the OEM defaults (0x92 0x0a). byte0 bit7 = POWER_MODE
+ * (0=AUTO/tracker, 0x80=MANUAL/fixed); low 5 bits = floor/ABS voltage.
+ * Hypothesis for the idle "coil whine" buzz: in AUTO the tracker collapses the
+ * rail at light load (on-hook) so the buck-boost runs in audible burst mode;
+ * MANUAL (0x80|floor) keeps a fixed rail -> continuous (inaudible) switching.
+ * e.g. `echo 84 > swparam` = MANUAL + floor 4 (~25V).
+ */
+static ssize_t swparam_write(struct file *f, const char __user *ub,
+			     size_t n, loff_t *off)
+{
+	u8 val;
+	int ret;
+
+	ret = kstrtou8_from_user(ub, n, 16, &val);
+	if (ret)
+		return ret;
+
+	mutex_lock(&sd.lock);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+	{ u8 sp[4] = { 0xe4, val, 0x92, 0x0a }; ret = slic_write_mpi("swparam-dbg", sp, 4); }
+	mutex_unlock(&sd.lock);
+
+	pr_info("econet-slic: swparam[0](0xe4) <- 0x%02x (ret=%d)\n", val, ret);
+	return ret ? ret : n;
+}
+static const struct file_operations swparam_fops = {
+	.owner	= THIS_MODULE,
+	.write	= swparam_write,
+	.open	= simple_open,
+	.llseek	= default_llseek,
+};
+
+/*
+ * Write the 6-byte SWTIMING register (0xF6, buck-boost on/off-time word) live,
+ * for A/B-testing the switcher timing without a rebuild:
+ *   echo "95 00 58 30 5c 30" > swtiming   (OEM Le9642 buck-boost word)
+ * The driver's old default 66 00 64 30 74 30 was a Le9661 flyback word and was
+ * the wrong-topology timing that made the converter burst (whine) at light load.
+ */
+static ssize_t swtiming_write(struct file *f, const char __user *ub,
+			      size_t n, loff_t *off)
+{
+	char buf[64];
+	u8 t[7] = { 0xf6 };
+	int ret;
+
+	if (n >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ub, n))
+		return -EFAULT;
+	buf[n] = '\0';
+	if (sscanf(buf, "%hhx %hhx %hhx %hhx %hhx %hhx",
+		   &t[1], &t[2], &t[3], &t[4], &t[5], &t[6]) != 6)
+		return -EINVAL;
+
+	mutex_lock(&sd.lock);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+	ret = slic_write_mpi("swtiming-dbg", t, sizeof(t));
+	mutex_unlock(&sd.lock);
+
+	pr_info("econet-slic: swtiming(0xf6) <- %02x %02x %02x %02x %02x %02x (ret=%d)\n",
+		t[1], t[2], t[3], t[4], t[5], t[6], ret);
+	return ret ? ret : n;
+}
+static const struct file_operations swtiming_fops = {
+	.owner	= THIS_MODULE,
+	.write	= swtiming_write,
+	.open	= simple_open,
+	.llseek	= default_llseek,
+};
+
+/*
+ * Generic MPI register write knob (any register), for experimenting with
+ * loop-supervision / low-power-standby register sequences live without a
+ * rebuild. Format: space-separated hex bytes, first byte = register address,
+ * rest = data. e.g. `echo "c2 60 00" > mpi` writes reg 0xC2 = 60 00.
+ * Up to 15 data bytes. Use with care -- arbitrary register writes.
+ */
+static ssize_t mpi_write(struct file *f, const char __user *ub,
+			 size_t n, loff_t *off)
+{
+	char buf[96];
+	u8 b[16];
+	int i = 0, ret, pos = 0, consumed = 0;
+	unsigned int v;
+
+	if (n >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ub, n))
+		return -EFAULT;
+	buf[n] = '\0';
+	while (i < (int)sizeof(b) && sscanf(buf + pos, " %x%n", &v, &consumed) == 1) {
+		b[i++] = (u8)v;
+		pos += consumed;
+	}
+	if (i < 1)
+		return -EINVAL;
+
+	mutex_lock(&sd.lock);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+	ret = slic_write_mpi("mpi-dbg", b, i);
+	mutex_unlock(&sd.lock);
+
+	pr_info("econet-slic: mpi reg 0x%02x <- %d byte(s) (ret=%d)\n", b[0], i - 1, ret);
+	return ret ? ret : n;
+}
+static const struct file_operations mpi_fops = {
+	.owner	= THIS_MODULE,
+	.write	= mpi_write,
+	.open	= simple_open,
+	.llseek	= default_llseek,
+};
+
+/*
+ * Generic MPI register READ knob: `echo "57 1" > mpi_rd` reads 1 byte of the
+ * read-side register 0x57 (STATE readback) on the active channel; result goes
+ * to dmesg. Format: "<reg> [<count>]" (count default 1, max 8). For verifying
+ * the low-power-standby register sequence (STATE readback 0x57, LOOPSUP, etc).
+ */
+static ssize_t mpi_rd_write(struct file *f, const char __user *ub,
+			    size_t n, loff_t *off)
+{
+	char buf[32];
+	u8 out[8];
+	unsigned int reg, cnt = 1;
+	int ret, i;
+	char hex[3 * sizeof(out) + 1];
+
+	if (n >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ub, n))
+		return -EFAULT;
+	buf[n] = '\0';
+	if (sscanf(buf, "%x %u", &reg, &cnt) < 1)
+		return -EINVAL;
+	if (cnt < 1 || cnt > sizeof(out))
+		cnt = 1;
+
+	mutex_lock(&sd.lock);
+	ret = zsi_mpi_read((u8)slic_ec, (u8)reg, out, (u8)cnt);
+	mutex_unlock(&sd.lock);
+
+	for (i = 0; i < (int)cnt; i++)
+		snprintf(hex + i * 3, 4, "%02x ", out[i]);
+	pr_info("econet-slic: mpi_rd reg 0x%02x [%u] = %s(ret=%d)\n", reg, cnt, hex, ret);
+	return ret ? ret : n;
+}
+static const struct file_operations mpi_rd_fops = {
+	.owner	= THIS_MODULE,
+	.write	= mpi_rd_write,
+	.open	= simple_open,
+	.llseek	= default_llseek,
+};
+
+/*
+ * Low-power standby control for the idle-line DC-DC coil-whine fix.
+ *   echo 1 > lpm   -> enter SS_LOWPOWER standby (silent): arm the LPM metallic-
+ *                     hook comparator (LOOPSUP 0xc2) + disable the chip's
+ *                     auto-LPM-exit (SSCFG 0x68 AUTO_SYSSTATE_LPM_DIS, so it
+ *                     stays parked in low power instead of self-jumping back to
+ *                     the active feed and whining), then STATE=0x0c + SWCTRL=LP.
+ *   echo 0 > lpm   -> active feed for a call: SWCTRL=HP first, then STATE=0x23.
+ * Off-hook is detected on the SAME hook node (SIGREG 0x4d bit0) in both states.
+ * Operates on the currently-selected slic_ec channel. Verified live: silent
+ * on-hook, hook=0 idle, hook=1 on lift, calls work. Driven by xr500v-callmgr:
+ * standby at IDLE, active on off-hook / in-call.
+ */
+static void slic_lpm_arm_locked(void)
+{
+	u8 ss[3] = { 0x68, 0, 0 };
+	/* LOOPSUP: byte3=0x8e LPM_HOOK_THRESH(~22V) + byte4=0x03 HOOK_AVG_EN|HSH_CTL_DBNC
+	 * -> arms the SS_LOWPOWER voltage hook comparator (API-init value). */
+	{ static const u8 ls[] = { 0xc2, 0x5b, 0x84, 0xb3, 0x8e, 0x03 };
+	  slic_write_mpi("lpm-loopsup", ls, sizeof(ls)); }
+	/* SSCFG read-modify-write: set AUTO_SYSSTATE_LPM_DIS (byte1 bit0x02) so the
+	 * silicon will not auto-exit LPM back to the (whining) active feed. */
+	if (zsi_mpi_read((u8)slic_ec, 0x69, &ss[1], 2) == 0) {
+		ss[2] |= 0x02;
+		slic_write_mpi("lpm-sscfg", ss, sizeof(ss));
+	}
+}
+
+static ssize_t lpm_write(struct file *f, const char __user *ub,
+			 size_t n, loff_t *off)
+{
+	u8 val;
+	int ret;
+
+	ret = kstrtou8_from_user(ub, n, 10, &val);
+	if (ret)
+		return ret;
+
+	mutex_lock(&sd.lock);
+	zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+	if (val) {
+		slic_lpm_arm_locked();
+		{ static const u8 st[] = { 0x56, 0x0c }; slic_write_mpi("lpm-standby", st, 2); }
+		mutex_unlock(&sd.lock);
+		msleep(20);	/* defer the power-down so the rail isn't cut mid-transition */
+		mutex_lock(&sd.lock);
+		zsi_write(CSLAC_EC_REG_WRT, (const u8[]){ (u8)slic_ec }, 1);
+		{ static const u8 sw[] = { 0xe6, 0x65 }; slic_write_mpi("lpm-sw-lp", sw, 2); }
+	} else {
+		/* up: switcher HP FIRST, then active feed (rail up before line on) */
+		{ static const u8 sw[] = { 0xe6, 0x6f }; slic_write_mpi("lpm-sw-hp", sw, 2); }
+		{ static const u8 st[] = { 0x56, 0x23 }; slic_write_mpi("lpm-active", st, 2); }
+	}
+	mutex_unlock(&sd.lock);
+	pr_info("econet-slic: lpm <- %s\n", val ? "standby" : "active");
+	return n;
+}
+static const struct file_operations lpm_fops = {
+	.owner	= THIS_MODULE,
+	.write	= lpm_write,
 	.open	= simple_open,
 	.llseek	= default_llseek,
 };
@@ -1451,6 +1723,12 @@ static int __init econet_slic_init(void)
 	debugfs_create_file("audio_setup", 0444, sd.dbg, NULL, &slic_audio_setup_fops);
 	debugfs_create_file("rx_scan", 0444, sd.dbg, NULL, &rx_scan_fops);
 	debugfs_create_file("swctrl", 0200, sd.dbg, NULL, &swctrl_fops);
+	debugfs_create_file("state", 0200, sd.dbg, NULL, &state_fops);
+	debugfs_create_file("swparam", 0200, sd.dbg, NULL, &swparam_fops);
+	debugfs_create_file("swtiming", 0200, sd.dbg, NULL, &swtiming_fops);
+	debugfs_create_file("mpi", 0200, sd.dbg, NULL, &mpi_fops);
+	debugfs_create_file("mpi_rd", 0200, sd.dbg, NULL, &mpi_rd_fops);
+	debugfs_create_file("lpm", 0200, sd.dbg, NULL, &lpm_fops);
 	debugfs_create_file("ring", 0200, sd.dbg, NULL, &ring_fops);
 	debugfs_create_file("hook", 0444, sd.dbg, NULL, &slic_hook_fops);
 	debugfs_create_file("hook_raw", 0444, sd.dbg, NULL, &slic_hook_raw_fops);
