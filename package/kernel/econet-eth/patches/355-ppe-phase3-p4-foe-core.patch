@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/econet_ppe.h
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,262 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* XR500v PPE phase 3 P4: FoE V1 (80B, mt7622/netsys-v1 class) structs +
 + * accessors, ported ~verbatim from mainline drivers/net/ethernet/mediatek/
@@ -204,6 +204,12 @@
 +extern bool en75_ppe_offload_enabled;
 +/* diagnostic: when true, the RX path logs crsn/ppe_entry/sport (rate-limited) */
 +extern bool en75_ppe_rxdump;
++/* diagnostic: dump the raw engine-built FoE entry at the reported slot (to RE the
++ * engine's exact tuple layout/endianness vs our en75_foe_entry_set_ipv4_tuple) */
++extern bool en75_ppe_foedump;
++void en75_ppe_dump_slot(struct en75_ppe *ppe, u16 hash);
++/* committest override: commit at this exact slot (the engine's reported hash) */
++extern u32 en75_force_hash;
 +
 +/* CDMA1_VLAN_CTRL: offset from fe_base (=0xBFB50400). OEM sets 0x81000001 =
 + * (TPID 0x8100 << 16) | urx(1) to POP the switch special tag on RX so the PPE
@@ -259,7 +265,7 @@
 +#endif /* __ECONET_PPE_H */
 --- /dev/null
 +++ b/econet_ppe.c
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,479 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* XR500v PPE phase 3 P4: FoE V1 entry builders + commit, ported from mainline
 + * mtk_ppe.c. V1 / offload_version=2 only (port_mg=0); IPv4 HNAPT/ROUTE only for
@@ -453,6 +459,19 @@
 +
 +bool en75_ppe_offload_enabled;	/* RX hook is inert until a test/offload arms it */
 +bool en75_ppe_rxdump;		/* diagnostic: dump crsn/ppe_entry on RX */
++bool en75_ppe_foedump;		/* diagnostic: dump the engine-built FoE entry */
++u32  en75_force_hash = 0xffffffff;  /* committest: if != ~0, commit at this slot (engine hash) */
++
++/* dump the raw words of the engine-built (unbind) FoE entry at 'hash' so we can
++ * reverse the engine's exact tuple byte-layout. w0=ib1, then orig tuple, ib2... */
++void en75_ppe_dump_slot(struct en75_ppe *ppe, u16 hash)
++{
++	u32 *w = (u32 *)((u8 *)ppe->foe_virt + (u32)hash * EN75_FOE_ENTRY_SIZE);
++
++	pr_info_ratelimited("XR500v FoE[%u]: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
++			    hash, w[0], w[1], w[2], w[3], w[4],
++			    w[5], w[6], w[7], w[8], w[9]);
++}
 +
 +/* write CDMA1_VLAN_CTRL (fe_base+0x400). 0x81000001 = OEM value that pops the
 + * MT7530 special tag on RX so the PPE can parse the inner IPv4 frame. */
@@ -620,23 +639,28 @@
 +{
 +	struct mtk_foe_entry *hwe =
 +		(struct mtk_foe_entry *)((u8 *)ppe->foe_virt + (u32)hash * EN75_FOE_ENTRY_SIZE);
-+	struct hlist_head *head = &ppe->foe_flow[hash / EN75_PPE_HASH_OFFSET];
 +	struct en75_flow_entry *e;
 +	struct hlist_node *n;
 +	bool found = false;
++	int b;
 +
 +	spin_lock_bh(&ppe->lock);
 +	if (FIELD_GET(MTK_FOE_IB1_STATE, hwe->ib1) == MTK_FOE_STATE_BIND)
 +		goto out;	/* engine already bound this slot */
-+	hlist_for_each_entry_safe(e, n, head, list) {
-+		if (found || !en75_flow_entry_match(e, hwe)) {
-+			if (e->hash != 0xffff && !e->static_entry)
-+				en75_foe_entry_clear_locked(ppe, e);
-+			continue;
++	/* The EN751221 engine hash != our SW hash, so the flow may be registered
++	 * in any bucket. Match by TUPLE against the engine-built unbind entry at
++	 * 'hash' (the engine reports its own slot in the RX desc's ppe_entry), and
++	 * bind at the engine's slot. O(NUM_FLOWS) but buckets are mostly empty;
++	 * a flat list / matched hash is the production optimization. */
++	for (b = 0; b < EN75_PPE_NUM_FLOWS && !found; b++) {
++		hlist_for_each_entry_safe(e, n, &ppe->foe_flow[b], list) {
++			if (!en75_flow_entry_match(e, hwe))
++				continue;
++			e->hash = hash;			/* raw engine slot */
++			en75_foe_entry_commit(ppe, &e->data, hash);
++			found = true;
++			break;
 +		}
-+		e->hash = hash;				/* raw engine slot */
-+		en75_foe_entry_commit(ppe, &e->data, hash);
-+		found = true;
 +	}
 +out:
 +	spin_unlock_bh(&ppe->lock);
@@ -690,7 +714,8 @@
 +
 +	en75_build_test_flow(&e, sip, dip, sport, dport, proto, smac, dmac,
 +			     dsa_port, passthrough, pse_port);
-+	hash = en75_ppe_hash_entry(&e);
++	hash = (en75_force_hash != 0xffffffff) ? (en75_force_hash & EN75_PPE_HASH_MASK)
++					       : en75_ppe_hash_entry(&e);
 +	spin_lock_bh(&ppe->lock);
 +	en75_foe_entry_commit(ppe, &e, hash);
 +	spin_unlock_bh(&ppe->lock);
@@ -760,7 +785,7 @@
  
  static int en75_ppe_engine_set(bool on)
  {
-@@ -375,6 +377,154 @@
+@@ -375,6 +377,156 @@
  /* echo 1 > /sys/module/econet_eth/parameters/ppe_engine (default off) */
  module_param_cb(ppe_engine, &en75_ppe_engine_ops, &en75_ppe_engine, 0644);
  
@@ -805,6 +830,8 @@
 +static unsigned int ppe_t_pseport = 1;	/* 1=GDM1, 7=DISCARD (divert oracle) */
 +module_param(ppe_t_pseport, uint, 0644);
 +module_param_named(ppe_rxdump, en75_ppe_rxdump, bool, 0644);
++module_param_named(ppe_foedump, en75_ppe_foedump, bool, 0644);
++module_param_named(ppe_t_hash, en75_force_hash, uint, 0644);
 +
 +static void en75_mac_from_hilo(u8 *m, u32 hi, u32 lo)
 +{
@@ -915,7 +942,7 @@
  static void en75_ppe_init(struct en75_eth_pvt *eth)
  {
  	void __iomem *base = (void __iomem *)eth->regs->ppe;
-@@ -392,6 +542,10 @@
+@@ -392,6 +544,10 @@
  	en75_ppe_foe_virt = tbl;
  	en75_ppe_foe_phys = phys;
  	en75_ppe_base = base;
@@ -936,7 +963,7 @@
  #include "qdma_desc.h"
  #include "qdma_regs.h"
  #include "econet_eth.h"
-@@ -188,13 +189,24 @@
+@@ -188,13 +189,29 @@
  	hash = get_erx_ppe_entry(&desc.msg.erx);
  	skb_set_hash(skb, jhash_1word(hash, 0),
  		     PKT_HASH_TYPE_L4);
@@ -951,9 +978,14 @@
 +	 * EN751221 the steered-but-unbound crsn is NO_FLOW(0x07) (mainline uses
 +	 * HIT_UNBIND_RATE_REACHED(0x0f) -- accept both). 'hash' is the RAW engine
 +	 * FoE slot. en75_ppe_check_skb() takes ppe->lock; never eats the skb. */
-+	if (READ_ONCE(en75_ppe_rxdump) || READ_ONCE(en75_ppe_offload_enabled)) {
++	if (READ_ONCE(en75_ppe_rxdump) || READ_ONCE(en75_ppe_offload_enabled) ||
++	    READ_ONCE(en75_ppe_foedump)) {
 +		u8 crsn = get_erx_crsn(&desc.msg.erx);
 +
++		if (READ_ONCE(en75_ppe_foedump) && q->qdma->eth->ppe &&
++		    (crsn == MTK_PPE_CPU_REASON_HIT_UNBIND ||
++		     crsn == MTK_PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED))
++			en75_ppe_dump_slot(q->qdma->eth->ppe, hash);
 +		if (READ_ONCE(en75_ppe_rxdump))
 +			pr_info_ratelimited("XR500v PPE rx: crsn=%u ppe_entry=%u sport=%u ip4=%u ip6=%u l2vld=%u l4f=%u untag=%u sp_tag=%04x tci=%04x\n",
 +				crsn, hash, get_erx_sport(&desc.msg.erx),
