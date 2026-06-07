@@ -1,0 +1,360 @@
+--- /dev/null
++++ b/econet_ppe.h
+@@ -0,0 +1,161 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* XR500v PPE phase 3 P4: FoE V1 (80B, mt7622/netsys-v1 class) structs +
++ * accessors, ported ~verbatim from mainline drivers/net/ethernet/mediatek/
++ * mtk_ppe.h. V1 ONLY (offload_version=2 only flips port_mg=0); every
++ * netsys-v2/v3 arm is intentionally dropped. Entry size is hardcoded 80B. */
++#ifndef __ECONET_PPE_H
++#define __ECONET_PPE_H
++
++#include <linux/bitfield.h>
++#include <linux/if_ether.h>
++
++#define EN75_PPE_ENTRIES_SHIFT		4
++#define EN75_PPE_ENTRIES		(1024 << EN75_PPE_ENTRIES_SHIFT)	/* 16384 */
++#define EN75_PPE_HASH_MASK		(EN75_PPE_ENTRIES - 1)
++#define EN75_FOE_ENTRY_SIZE		80
++
++/* --- ib1 (V1) --- */
++#define MTK_FOE_IB1_UNBIND_TIMESTAMP	GENMASK(7, 0)
++#define MTK_FOE_IB1_UNBIND_PACKETS	GENMASK(23, 8)
++#define MTK_FOE_IB1_UNBIND_PREBIND	BIT(24)
++
++#define MTK_FOE_IB1_BIND_TIMESTAMP	GENMASK(14, 0)
++#define MTK_FOE_IB1_BIND_KEEPALIVE	BIT(15)
++#define MTK_FOE_IB1_BIND_VLAN_LAYER	GENMASK(18, 16)
++#define MTK_FOE_IB1_BIND_PPPOE		BIT(19)
++#define MTK_FOE_IB1_BIND_VLAN_TAG	BIT(20)
++#define MTK_FOE_IB1_BIND_PKT_SAMPLE	BIT(21)
++#define MTK_FOE_IB1_BIND_CACHE		BIT(22)
++#define MTK_FOE_IB1_BIND_TUNNEL_DECAP	BIT(23)
++#define MTK_FOE_IB1_BIND_TTL		BIT(24)
++
++#define MTK_FOE_IB1_PACKET_TYPE		GENMASK(27, 25)
++#define MTK_FOE_IB1_STATE		GENMASK(29, 28)
++#define MTK_FOE_IB1_UDP			BIT(30)
++#define MTK_FOE_IB1_STATIC		BIT(31)
++
++enum {
++	MTK_PPE_PKT_TYPE_IPV4_HNAPT = 0,
++	MTK_PPE_PKT_TYPE_IPV4_ROUTE = 1,
++	MTK_PPE_PKT_TYPE_BRIDGE = 2,
++	MTK_PPE_PKT_TYPE_IPV4_DSLITE = 3,
++	MTK_PPE_PKT_TYPE_IPV6_ROUTE_3T = 4,
++	MTK_PPE_PKT_TYPE_IPV6_ROUTE_5T = 5,
++	MTK_PPE_PKT_TYPE_IPV6_6RD = 7,
++};
++
++/* --- ib2 (V1) --- */
++#define MTK_FOE_IB2_QID			GENMASK(3, 0)
++#define MTK_FOE_IB2_PSE_QOS		BIT(4)
++#define MTK_FOE_IB2_DEST_PORT		GENMASK(7, 5)
++#define MTK_FOE_IB2_MULTICAST		BIT(8)
++#define MTK_FOE_IB2_PORT_MG		GENMASK(17, 12)
++#define MTK_FOE_IB2_PORT_AG		GENMASK(23, 18)
++#define MTK_FOE_IB2_DSCP		GENMASK(31, 24)
++
++enum {
++	MTK_FOE_STATE_INVALID,
++	MTK_FOE_STATE_UNBIND,
++	MTK_FOE_STATE_BIND,
++	MTK_FOE_STATE_FIN
++};
++
++struct mtk_foe_mac_info {
++	u16 vlan1;
++	u16 etype;
++
++	u32 dest_mac_hi;
++
++	u16 vlan2;
++	u16 dest_mac_lo;
++
++	u32 src_mac_hi;
++
++	u16 pppoe_id;
++	u16 src_mac_lo;
++
++	/* unused on V1 (kept so the struct overlays the 80B entry the same way) */
++	u16 minfo;
++	u16 winfo;
++	u32 w3info;
++	u32 amsdu;
++};
++
++struct mtk_foe_bridge {
++	u8 dest_mac[ETH_ALEN];
++	u8 src_mac[ETH_ALEN];
++	u16 vlan;
++
++	struct {} key_end;
++
++	u32 ib2;
++
++	struct mtk_foe_mac_info l2;
++};
++
++struct mtk_ipv4_tuple {
++	u32 src_ip;
++	u32 dest_ip;
++	union {
++		struct {
++			u16 dest_port;
++			u16 src_port;
++		};
++		struct {
++			u8 protocol;
++			u8 _pad[3]; /* fill with 0xa5a5a5 */
++		};
++		u32 ports;
++	};
++};
++
++struct mtk_foe_ipv4 {
++	struct mtk_ipv4_tuple orig;
++
++	u32 ib2;
++
++	struct mtk_ipv4_tuple new;
++
++	u16 timestamp;
++	u16 _rsv0[3];
++
++	u32 udf_tsid;
++
++	struct mtk_foe_mac_info l2;
++};
++
++struct mtk_foe_entry {
++	u32 ib1;
++
++	union {
++		struct mtk_foe_bridge bridge;
++		struct mtk_foe_ipv4 ipv4;
++		u32 data[19];	/* V1 = 80 bytes = ib1 + 19 words */
++	};
++};
++
++enum {
++	MTK_PPE_CPU_REASON_TTL_EXCEEDED			= 0x02,
++	MTK_PPE_CPU_REASON_NO_FLOW			= 0x07,
++	MTK_PPE_CPU_REASON_UN_HIT			= 0x0d,
++	MTK_PPE_CPU_REASON_HIT_UNBIND			= 0x0e,
++	MTK_PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED	= 0x0f,
++	MTK_PPE_CPU_REASON_PPE_BYPASS			= 0x1e,
++};
++
++/* On the EN751221, RX of a steered-but-unbound flow comes up as NO_FLOW(0x07),
++ * NOT mainline's HIT_UNBIND_RATE_REACHED(0x0f) -- verified on hardware. The RX
++ * bind hook (P5) must treat 0x07 (and 0x0f) as the bind trigger. */
++
++/* econet_ppe.c (P4) */
++int en75_foe_entry_prepare(struct mtk_foe_entry *entry, int type, int l4proto,
++			   u8 pse_port, const u8 *src_mac, const u8 *dest_mac);
++int en75_foe_entry_set_ipv4_tuple(struct mtk_foe_entry *entry, bool egress,
++				  __be32 src_addr, __be16 src_port,
++				  __be32 dest_addr, __be16 dest_port);
++void en75_foe_entry_set_pse_port(struct mtk_foe_entry *entry, u8 port);
++u32 en75_ppe_hash_entry(struct mtk_foe_entry *e);
++void en75_foe_entry_commit(void *foe_virt, struct mtk_foe_entry *entry, u16 hash);
++u32 en75_ppe_test_commit(void *foe_virt, void __iomem *ppe_base);
++
++#endif /* __ECONET_PPE_H */
+--- /dev/null
++++ b/econet_ppe.c
+@@ -0,0 +1,151 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* XR500v PPE phase 3 P4: FoE V1 entry builders + commit, ported from mainline
++ * mtk_ppe.c. V1 / offload_version=2 only (port_mg=0); IPv4 HNAPT/ROUTE only for
++ * now (the cases the XR500v router path needs). The FoE table itself is the one
++ * phase-1a already allocated (16384 * 80B coherent); this just builds + commits
++ * entries into it. Indexing uses the 80B stride, NOT an array of (oversized)
++ * structs. */
++#include "econet_ppe.h"
++#include <linux/dma-mapping.h>
++#include <linux/etherdevice.h>
++#include <linux/io.h>
++#include <linux/ip.h>
++#include <linux/unaligned.h>
++
++/* PPE register offsets within the block (same as econet_eth.c phase 1a) */
++#define EN75_PPE_TB_USED		0x224
++#define EN75_PPE_CACHE_CTL		0x320
++
++/* --- entry builders (V1) --- */
++
++int en75_foe_entry_prepare(struct mtk_foe_entry *entry, int type, int l4proto,
++			   u8 pse_port, const u8 *src_mac, const u8 *dest_mac)
++{
++	struct mtk_foe_mac_info *l2;
++	u32 ports_pad, val;
++
++	memset(entry, 0, sizeof(*entry));
++
++	/* offload_version=2 -> port_mg=0 (mainline: >1 ? 0 : 0x3f) */
++	val = FIELD_PREP(MTK_FOE_IB1_STATE, MTK_FOE_STATE_BIND) |
++	      FIELD_PREP(MTK_FOE_IB1_PACKET_TYPE, type) |
++	      FIELD_PREP(MTK_FOE_IB1_UDP, l4proto == IPPROTO_UDP) |
++	      MTK_FOE_IB1_BIND_CACHE | MTK_FOE_IB1_BIND_TTL;
++	entry->ib1 = val;
++
++	val = FIELD_PREP(MTK_FOE_IB2_DEST_PORT, pse_port) |
++	      FIELD_PREP(MTK_FOE_IB2_PORT_MG, 0) |
++	      FIELD_PREP(MTK_FOE_IB2_PORT_AG, 0x1f);
++
++	if (is_multicast_ether_addr(dest_mac))
++		val |= MTK_FOE_IB2_MULTICAST;
++
++	ports_pad = 0xa5a5a500 | (l4proto & 0xff);
++	if (type == MTK_PPE_PKT_TYPE_IPV4_ROUTE)
++		entry->ipv4.orig.ports = ports_pad;
++
++	entry->ipv4.ib2 = val;
++	l2 = &entry->ipv4.l2;
++
++	l2->dest_mac_hi = get_unaligned_be32(dest_mac);
++	l2->dest_mac_lo = get_unaligned_be16(dest_mac + 4);
++	l2->src_mac_hi = get_unaligned_be32(src_mac);
++	l2->src_mac_lo = get_unaligned_be16(src_mac + 4);
++	l2->etype = ETH_P_IP;
++
++	return 0;
++}
++
++int en75_foe_entry_set_ipv4_tuple(struct mtk_foe_entry *entry, bool egress,
++				  __be32 src_addr, __be16 src_port,
++				  __be32 dest_addr, __be16 dest_port)
++{
++	int type = FIELD_GET(MTK_FOE_IB1_PACKET_TYPE, entry->ib1);
++	struct mtk_ipv4_tuple *t;
++
++	if (type == MTK_PPE_PKT_TYPE_IPV4_HNAPT && egress)
++		t = &entry->ipv4.new;
++	else
++		t = &entry->ipv4.orig;
++
++	t->src_ip = be32_to_cpu(src_addr);
++	t->dest_ip = be32_to_cpu(dest_addr);
++
++	if (type == MTK_PPE_PKT_TYPE_IPV4_ROUTE)
++		return 0;
++
++	t->src_port = be16_to_cpu(src_port);
++	t->dest_port = be16_to_cpu(dest_port);
++
++	return 0;
++}
++
++void en75_foe_entry_set_pse_port(struct mtk_foe_entry *entry, u8 port)
++{
++	u32 *ib2 = &entry->ipv4.ib2;
++
++	*ib2 &= ~MTK_FOE_IB2_DEST_PORT;
++	*ib2 |= FIELD_PREP(MTK_FOE_IB2_DEST_PORT, port);
++}
++
++u32 en75_ppe_hash_entry(struct mtk_foe_entry *e)
++{
++	u32 hv1, hv2, hv3, hash;
++
++	/* IPv4 HNAPT/ROUTE only */
++	hv1 = e->ipv4.orig.ports;
++	hv2 = e->ipv4.orig.dest_ip;
++	hv3 = e->ipv4.orig.src_ip;
++
++	hash = (hv1 & hv2) | ((~hv1) & hv3);
++	hash = (hash >> 24) | ((hash & 0xffffff) << 8);
++	hash ^= hv1 ^ hv2 ^ hv3;
++	hash ^= hash >> 16;
++	hash <<= 1;			/* hash_offset=2 -> ffs(2)-1 = 1 */
++	hash &= EN75_PPE_ENTRIES - 1;
++
++	return hash;
++}
++
++/* --- commit into the HW FoE table (80B stride) --- */
++
++void en75_foe_entry_commit(void *foe_virt, struct mtk_foe_entry *entry, u16 hash)
++{
++	struct mtk_foe_entry *hwe =
++		(struct mtk_foe_entry *)((u8 *)foe_virt + hash * EN75_FOE_ENTRY_SIZE);
++	u16 timestamp = 0;	/* TODO: EN751221 aging timestamp counter */
++
++	entry->ib1 &= ~MTK_FOE_IB1_BIND_TIMESTAMP;
++	entry->ib1 |= FIELD_PREP(MTK_FOE_IB1_BIND_TIMESTAMP, timestamp);
++
++	/* data first, then ib1 LAST so HW never sees STATE=BIND with a half-
++	 * written tuple (the table is dma_alloc_coherent -> dma_wmb suffices). */
++	memcpy(&hwe->data, &entry->data, EN75_FOE_ENTRY_SIZE - sizeof(hwe->ib1));
++	wmb();
++	hwe->ib1 = entry->ib1;
++	dma_wmb();
++}
++
++/* --- P4 self-test: hand-build one IPv4 HNAPT entry, commit it, return the
++ * slot + the live TB_USED so a debugfs poke can confirm the 80B layout takes. */
++u32 en75_ppe_test_commit(void *foe_virt, void __iomem *ppe_base)
++{
++	static const u8 smac[ETH_ALEN] = { 0x02, 0, 0, 0, 0, 0x01 };
++	static const u8 dmac[ETH_ALEN] = { 0x02, 0, 0, 0, 0, 0x02 };
++	struct mtk_foe_entry e;
++	u32 hash;
++
++	en75_foe_entry_prepare(&e, MTK_PPE_PKT_TYPE_IPV4_HNAPT, IPPROTO_TCP,
++			       1 /* GDM1 */, smac, dmac);
++	/* orig 5-tuple 10.0.0.1:1000 -> 10.0.0.2:2000 ; egress same (no NAT) */
++	en75_foe_entry_set_ipv4_tuple(&e, false, htonl(0x0a000001), htons(1000),
++				      htonl(0x0a000002), htons(2000));
++	en75_foe_entry_set_ipv4_tuple(&e, true, htonl(0x0a000001), htons(1000),
++				      htonl(0x0a000002), htons(2000));
++	hash = en75_ppe_hash_entry(&e);
++	en75_foe_entry_commit(foe_virt, &e, hash);
++
++	pr_info("XR500v PPE P4: committed test entry at hash=%u, TB_USED=0x%08x\n",
++		hash, readl(ppe_base + EN75_PPE_TB_USED));
++	return hash;
++}
+--- a/Kbuild
++++ b/Kbuild
+@@ -1,5 +1,5 @@
+ obj-m := econet-eth.o econet-gsw.o econet-gsw-mdio.o econet-gsw-mmio.o mtk-tag.o
+-econet-eth-y := econet_eth.o econet_eth_debug.o econet_qdma.o econet_port.o
++econet-eth-y := econet_eth.o econet_eth_debug.o econet_qdma.o econet_port.o econet_ppe.o
+ econet-gsw-y := gsw/mt7530.o
+ econet-gsw-mdio-y := gsw/mt7530-mdio.o
+ econet-gsw-mmio-y := gsw/mt7530-mmio.o
+--- a/econet_eth.c
++++ b/econet_eth.c
+@@ -40,6 +40,7 @@
+ #include <linux/dma-mapping.h>
+ #include <linux/io.h>
+ #include <linux/iopoll.h>
++#include "econet_ppe.h"
+ 
+ #include "gdm_regs.h"
+ #include "linux/dev_printk.h"
+@@ -375,6 +376,22 @@
+ /* echo 1 > /sys/module/econet_eth/parameters/ppe_engine (default off) */
+ module_param_cb(ppe_engine, &en75_ppe_engine_ops, &en75_ppe_engine, 0644);
+ 
++static int en75_ppe_test_param_set(const char *val,
++				   const struct kernel_param *kp)
++{
++	if (!en75_ppe_base || !en75_ppe_foe_virt)
++		return -ENODEV;
++	en75_ppe_test_commit(en75_ppe_foe_virt, en75_ppe_base);
++	return 0;
++}
++static const struct kernel_param_ops en75_ppe_test_ops = {
++	.set = en75_ppe_test_param_set,
++	.get = param_get_int,
++};
++static int en75_ppe_test;
++/* echo 1 > /sys/module/econet_eth/parameters/ppe_test -> commit 1 test FoE entry */
++module_param_cb(ppe_test, &en75_ppe_test_ops, &en75_ppe_test, 0644);
++
+ static void en75_ppe_init(struct en75_eth_pvt *eth)
+ {
+ 	void __iomem *base = (void __iomem *)eth->regs->ppe;
