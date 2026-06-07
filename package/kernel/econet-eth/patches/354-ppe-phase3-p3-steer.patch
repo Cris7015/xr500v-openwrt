@@ -1,0 +1,74 @@
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -15,6 +15,7 @@
+ 
+ #include "econet_eth.h"
+ #include "gdm_regs.h"
++#include <linux/moduleparam.h>
+ #include "qdma_desc.h"
+ 
+ struct en75_hw_stats {
+@@ -125,6 +126,54 @@
+ 	en75_wreg(fc, &port->regs->fwd_cfg);
+ }
+ 
++/* === XR500v PPE phase 3 P3: gated GDM ingress steering -> PPE ===
++ * Flips the conduit GDM (GDM1/eth0, which carries all DSA + pppoe traffic)
++ * default_fport between CPU(0) and PPE(4) via a default-off module_param.
++ * mymac/mcast/bcast stay on CPU so management/ARP/DHCP survive. Requires the
++ * engine enabled (P1) -- steering to PPE with the engine off black-holes. */
++static struct en75_gdm_port *en75_steer_port;
++
++static void en75_set_gdm_port_steer(struct en75_gdm_port *port,
++				    enum etx_fport val)
++{
++	struct fwd_cfg fc;
++
++	guard(spinlock)(&port->reg_lock);
++	fc = en75_rreg(&port->regs->fwd_cfg);
++	/* routed/NAT'd flows arrive with dst MAC = our MAC (mymac); bridged
++	 * unknown unicast = default. Steer BOTH to the PPE, leave mcast/bcast
++	 * on the CPU so ARP/mDNS/DHCP keep flowing. */
++	set_gdm_fwd_cfg_mymac_fport(&fc, val);
++	set_gdm_fwd_cfg_default_fport(&fc, val);
++	en75_wreg(fc, &port->regs->fwd_cfg);
++}
++
++static int en75_ppe_steer_param_set(const char *v,
++				    const struct kernel_param *kp)
++{
++	bool on;
++	int ret = kstrtobool(v, &on);
++
++	if (ret)
++		return ret;
++	if (!en75_steer_port)
++		return -ENODEV;
++	en75_set_gdm_port_steer(en75_steer_port,
++		on ? ETX_FPORT_PPE : ETX_FPORT_QDMA0_CPU);
++	*(bool *)kp->arg = on;
++	pr_info("XR500v PPE P3: GDM%d steer (mymac+default) -> %s\n",
++		en75_steer_port->fport, on ? "PPE(4)" : "CPU(0)");
++	return 0;
++}
++
++static const struct kernel_param_ops en75_ppe_steer_ops = {
++	.set = en75_ppe_steer_param_set,
++	.get = param_get_bool,
++};
++static bool en75_ppe_steer;
++/* echo 1 > /sys/module/econet_eth/parameters/ppe_steer (default off) */
++module_param_cb(ppe_steer, &en75_ppe_steer_ops, &en75_ppe_steer, 0644);
++
+ static int en75_dev_init(struct net_device *dev)
+ {
+ 	struct en75_gdm_port *port = netdev_priv(dev);
+@@ -133,6 +182,8 @@
+ 	/* TODO: When the PPE is setup, we will want to route
+ 	         evetything to that */
+ 	en75_set_gdm_port_fwd_cfg(port, ETX_FPORT_QDMA0_CPU);
++	if (port->fport == ETX_FPORT_GDM1)
++		en75_steer_port = port;
+ 
+ 	return 0;
+ }

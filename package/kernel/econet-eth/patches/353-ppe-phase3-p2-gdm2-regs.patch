@@ -1,0 +1,11 @@
+--- a/econet_eth.c
++++ b/econet_eth.c
+@@ -244,7 +244,7 @@
+ 					  false);
+ 	else if (id == 2)
+ 		dev = en75_alloc_gdm_port(&eth->pub, np,
+-					  &eth->regs->port0.regs,
++					  &eth->regs->port1.regs,
+ 					  eth->qdma[1],
+ 					  ETX_FPORT_GDM2,
+ 					  true);
