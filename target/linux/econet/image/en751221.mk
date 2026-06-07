@@ -66,7 +66,8 @@ define Device/tplink_archer-xr500v
   KERNEL_SIZE := 3072k
   IMAGE_SIZE := 16384k
   BLOCKSIZE := 128k
-  DEVICE_PACKAGES := kmod-mt76x2 kmod-mt7603 kmod-usb-ledtrig-usbport wpad-mbedtls luci kmod-econet-pcm kmod-gpio-button-hotplug kmod-leds-gpio
+  DEVICE_PACKAGES := kmod-mt76x2 kmod-mt7603 kmod-usb-ledtrig-usbport wpad-mbedtls luci kmod-econet-pcm kmod-gpio-button-hotplug kmod-leds-gpio \
+	baresip baresip-mod-g711 baresip-mod-l16 baresip-mod-ctrl_tcp xr500v-voip
   IMAGES := sysupgrade.bin
   # raw squashfs in slot B; mtd-split creates rootfs_data; UBI is provisioned
   # from running OpenWrt (see chosen.bootargs ubi.mtd=rootfs_data).

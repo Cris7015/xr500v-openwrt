@@ -27,6 +27,8 @@
 #define RING_PATH  "/sys/kernel/debug/econet-slic/ring"
 #define HOOK_RAW   "/sys/kernel/debug/econet-slic/hook_raw"	/* "b0 b1": b0=EC_1=phone2, b1=EC_2=phone1 */
 #define SLIC_EC_P  "/sys/module/econet_slic/parameters/slic_ec"	/* active channel (1 or 2) */
+#define LPM_PATH   "/sys/kernel/debug/econet-slic/lpm"		/* 1 = low-power standby (silent), 0 = active feed */
+#define AUDIO_SETUP_P "/sys/kernel/debug/econet-slic/audio_setup"	/* read re-runs slic_audio_setup() (wakes codec) */
 /* PHONE panel LEDs. Case labels are inverted vs the silicon: EC_2 (SLIC ch2) =
  * jack "phone1" = LED_PHONE1; EC_1 (ch1) = jack "phone2" = LED_PHONE2. We ring
  * both jacks so the single phone rings in whichever it is plugged into. */
@@ -110,6 +112,50 @@ static void ring(int on)
 
 	if (fd >= 0) {
 		if (write(fd, on ? "1\n" : "0\n", 2) < 0)
+			;
+		close(fd);
+	}
+}
+
+/* Drive the SLIC line feed on the CURRENT slic_ec channel via the driver's lpm
+ * node: standby=1 puts the line in SS_LOWPOWER (silent buck-boost, idle DC-DC
+ * coil-whine gone) with the LPM hook comparator armed; standby=0 raises the
+ * active feed for a call. */
+static void lpm_set(int standby)
+{
+	int fd = open(LPM_PATH, O_WRONLY);
+
+	if (fd >= 0) {
+		if (write(fd, standby ? "1\n" : "0\n", 2) < 0)
+			;
+		close(fd);
+	}
+}
+
+/* Idle: park BOTH jacks (EC_1=phone2, EC_2=phone1) in low-power standby so the
+ * line is silent in whichever jack the phone sits, and off-hook is still sensed
+ * on both via the armed LPM comparator. Leaves slic_ec back on the default (2). */
+static void line_standby_both(void)
+{
+	set_slic_ec(1); lpm_set(1);
+	set_slic_ec(2); lpm_set(1);
+}
+
+/* Off-hook / in-call: raise the active feed on the jack the call is on, and
+ * re-run audio_setup to wake the codec/ADC. Standby (STATE 0x0c) powers the
+ * codec down, so the FIRST call after boot would otherwise establish with no
+ * audio until a second attempt; reading the audio_setup debugfs node re-applies
+ * the full audio path (switcher HP + active+codec + slots/gains) every time. */
+static void line_active(int ec)
+{
+	int fd;
+
+	set_slic_ec(ec);
+	lpm_set(0);
+	fd = open(AUDIO_SETUP_P, O_RDONLY);
+	if (fd >= 0) {
+		char b[8];
+		if (read(fd, b, sizeof(b)) < 0)
 			;
 		close(fd);
 	}
@@ -229,6 +275,7 @@ int main(void)
 
 	logmsg("starting");
 	leds_off();			/* idle: both PHONE LEDs off */
+	line_standby_both();		/* idle: silent low-power feed on both jacks */
 	for (;;) {
 		struct pollfd pfd;
 		int rc, ringing_now = 0;
@@ -282,6 +329,7 @@ int main(void)
 					state = IDLE;
 					ring(0);
 					leds_off();	/* idle: both off */
+					line_standby_both();	/* back to silent low-power feed */
 					answered_ec = 2;
 					logmsg("CLOSED -> idle");
 				}
@@ -357,9 +405,11 @@ int main(void)
 								leds_answer(answered_ec);
 								ctrl_cmd(s, "accept", NULL);
 								ring(0);
+								line_active(answered_ec);	/* wake codec so incoming audio works first try */
 							} else if (state == IDLE) {
 								answered_ec = which;
 								set_slic_ec(answered_ec);
+								line_active(answered_ec);	/* raise active feed before dialing */
 								leds_answer(answered_ec);
 								speeddial(s);
 							} else {
@@ -381,10 +431,12 @@ int main(void)
 								ctrl_cmd(s, "hangup", NULL);
 								ring(0);
 								leds_off();
+								line_standby_both();	/* hang-up: back to silent standby */
 								state = IDLE;
 								answered_ec = 2;
 							} else if (state == IDLE) {
 								leds_off();
+								line_standby_both();	/* lifted then hung up w/o a call: re-park standby */
 							}
 							/* state == RINGING: keep ringing (bell + LEDs). */
 						}

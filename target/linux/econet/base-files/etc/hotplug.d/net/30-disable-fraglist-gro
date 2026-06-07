@@ -1,0 +1,10 @@
+# Work around a kernel panic in __qdisc_run under WiFi load: rx-gro-list
+# (NETIF_F_GRO_FRAGLIST) builds skbs with a frag_list that corrupts the egress
+# qdisc list (eth0/DSA) -> NULL deref in __qdisc_run
+# (path: napi/phyN -> mac80211 -> br_handle_frame -> __dev_queue_xmit -> __qdisc_run).
+# KEY: it must also be turned off on br-lan -- the bridge keeps its own copy ON and
+# RE-enables it when it recomputes features as ports join, so re-apply on every add.
+# Plain generic-receive-offload (GRO) is left intact.
+[ "$ACTION" = "add" ] || exit 0
+ethtool -K "$DEVICENAME" rx-gro-list off 2>/dev/null
+ethtool -K br-lan rx-gro-list off 2>/dev/null

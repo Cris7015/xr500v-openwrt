@@ -1,5 +1,6 @@
 #!/bin/bash
-# Downloads the latest image from the Azure VM and flashes it to slot B of the XR500v
+# Flashes the latest LOCAL build (the trendchip-patched image) to slot B of the XR500v.
+# Builds are local now (NOT Azure). Run build-local.sh first. Device must be in stock telnet :2323.
 # Usage: ./flash-from-wsl.sh
 
 set -e
@@ -7,21 +8,21 @@ ROUTER_IP="${ROUTER_IP:-192.168.68.99}"
 PC_IP="${PC_IP:-192.168.68.248}"
 ROUTER_PORT="${ROUTER_PORT:-2323}"
 TFTP_DIR="${TFTP_DIR:-/mnt/c/tftp}"
-AZURE_HOST="${AZURE_HOST:-azure-xr500v}"
+OWRT="${OWRT:-$HOME/openwrt}"
 
-# Detect the image filename (most recently built)
-IMAGE_NAME=$(ssh "$AZURE_HOST" 'ls -t ~/openwrt/bin/targets/econet/en751221/*xr500v*sysupgrade.bin 2>/dev/null | head -1' || true)
+# Use the trendchip-patched image from the local build (raw crashes the bldr at c0000000).
+IMAGE_NAME=$(ls -t "$OWRT"/bin/targets/econet/en751221/*xr500v*sysupgrade-patched.bin 2>/dev/null | head -1)
 
 if [[ -z "$IMAGE_NAME" ]]; then
-    echo "ERROR: no XR500v image found in ~/openwrt/bin/targets/" >&2
+    echo "ERROR: no patched XR500v image found in $OWRT/bin/targets/ (run build-local.sh first)" >&2
     exit 1
 fi
 
 LOCAL_NAME=$(basename "$IMAGE_NAME")
-echo "[+] Image: $LOCAL_NAME"
+echo "[+] Local patched image: $LOCAL_NAME"
 
-echo "[+] scp from Azure to WSL/$TFTP_DIR..."
-scp "$AZURE_HOST:$IMAGE_NAME" "$TFTP_DIR/$LOCAL_NAME"
+echo "[+] copy to $TFTP_DIR (TFTP-served by the Windows host)..."
+cp "$IMAGE_NAME" "$TFTP_DIR/$LOCAL_NAME"
 ls -la "$TFTP_DIR/$LOCAL_NAME"
 
 echo "[+] Extract kernel and rootfs sections from image..."

@@ -90,3 +90,9 @@ CONFIG_PACKAGE_wpad-mbedtls=y
 CONFIG_PACKAGE_xtables-nft=y
 CONFIG_PACKAGE_kmod-leds-gpio=m
 CONFIG_PACKAGE_kmod-gpio-tc3162=y
+# XR500v FXS VoIP (baresip + custom audio module + call-manager)
+CONFIG_PACKAGE_baresip=y
+CONFIG_PACKAGE_baresip-mod-g711=y
+CONFIG_PACKAGE_baresip-mod-l16=y
+CONFIG_PACKAGE_baresip-mod-ctrl_tcp=y
+CONFIG_PACKAGE_xr500v-voip=y
