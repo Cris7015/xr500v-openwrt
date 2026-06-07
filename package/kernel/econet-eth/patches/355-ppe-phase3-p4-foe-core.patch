@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/econet_ppe.h
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,253 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* XR500v PPE phase 3 P4: FoE V1 (80B, mt7622/netsys-v1 class) structs +
 + * accessors, ported ~verbatim from mainline drivers/net/ethernet/mediatek/
@@ -150,7 +150,8 @@
 + * NOT mainline's HIT_UNBIND_RATE_REACHED(0x0f) -- verified on hardware. The RX
 + * bind hook (P5) must treat 0x07 (and 0x0f) as the bind trigger. */
 +
-+/* econet_ppe.c (P4) */
++/* econet_ppe.c (P4) — note: commit/test_commit take struct en75_ppe* (defined below) */
++struct en75_ppe;
 +int en75_foe_entry_prepare(struct mtk_foe_entry *entry, int type, int l4proto,
 +			   u8 pse_port, const u8 *src_mac, const u8 *dest_mac);
 +int en75_foe_entry_set_ipv4_tuple(struct mtk_foe_entry *entry, bool egress,
@@ -158,14 +159,104 @@
 +				  __be32 dest_addr, __be16 dest_port);
 +void en75_foe_entry_set_pse_port(struct mtk_foe_entry *entry, u8 port);
 +u32 en75_ppe_hash_entry(struct mtk_foe_entry *e);
-+void en75_foe_entry_commit(void *foe_virt, void __iomem *ppe_base,
-+			   struct mtk_foe_entry *entry, u16 hash);
-+u32 en75_ppe_test_commit(void *foe_virt, void __iomem *ppe_base);
++void en75_foe_entry_commit(struct en75_ppe *ppe, struct mtk_foe_entry *entry, u16 hash);
++u32 en75_ppe_test_commit(struct en75_ppe *ppe);
++
++/* ===================================================================== */
++/* Phase 5 (binding): foe_flow registration + RX bind + egress builders   */
++/* ===================================================================== */
++#include <linux/spinlock.h>
++#include <linux/list.h>
++#include <linux/jiffies.h>
++#include <linux/types.h>
++
++#define EN75_PPE_HASH_OFFSET	2				/* mt7622/V1 hash_offset=2 */
++#define EN75_PPE_NUM_FLOWS	(EN75_PPE_ENTRIES / EN75_PPE_HASH_OFFSET) /* 8192 */
++#define EN75_PPE_GLO_CFG	0x200
++#define EN75_FE_TS_OFF		0x0010	/* FE free-running 15-bit timestamp (CONFIRM HW) */
++
++struct device;
++struct net_device;
++struct sk_buff;
++
++/* one offloaded flow: the prepared 80B FoE template + its HW slot once bound */
++struct en75_flow_entry {
++	struct hlist_node	list;		/* foe_flow[hash>>1] bucket linkage   */
++	struct mtk_foe_entry	data;		/* 80B FoE template (NAT-aware)       */
++	u16			hash;		/* 0xffff until check_skb binds it    */
++	unsigned long		cookie;		/* tc flow cookie (patch 359)         */
++	bool			static_entry;	/* test entry: never RX-cleared       */
++};
++
++struct en75_ppe {
++	struct device		*dev;
++	void __iomem		*base;		/* PPE reg block (eth->regs->ppe)     */
++	void __iomem		*fe_base;	/* FE reg block  (eth->regs->fe)      */
++	void			*foe_virt;	/* 16384*80B coherent FoE table       */
++	dma_addr_t		foe_phys;
++	struct net_device	*conduit;	/* GDM1 / eth0                        */
++	spinlock_t		lock;		/* protects foe_flow + HW FoE writes  */
++	struct hlist_head	*foe_flow;	/* [EN75_PPE_NUM_FLOWS]               */
++	u16			*foe_check_time;/* [EN75_PPE_ENTRIES] jiffies rate-lim*/
++};
++
++/* the global flag the RX hook in econet_qdma.c tests (default false = inert) */
++extern bool en75_ppe_offload_enabled;
++/* diagnostic: when true, the RX path logs crsn/ppe_entry/sport (rate-limited) */
++extern bool en75_ppe_rxdump;
++
++/* CDMA1_VLAN_CTRL: offset from fe_base (=0xBFB50400). OEM sets 0x81000001 =
++ * (TPID 0x8100 << 16) | urx(1) to POP the switch special tag on RX so the PPE
++ * can parse the inner frame. The mainline-equiv of MTK_CDMQ_STAG_EN. */
++#define EN75_CDMA1_VLAN_CTRL	0x400
++void en75_ppe_set_vlan_ctrl(struct en75_ppe *ppe, u32 val);
++
++/* patch 356 */
++struct en75_ppe *en75_ppe_attach(struct device *dev, void __iomem *base,
++				 void __iomem *fe_base, void *foe_virt,
++				 dma_addr_t foe_phys, struct net_device *conduit);
++
++/* patch 357 — foe_flow core */
++int  en75_foe_entry_register(struct en75_ppe *ppe, struct en75_flow_entry *e);
++void en75_foe_entry_unregister(struct en75_ppe *ppe, struct en75_flow_entry *e);
++void en75_ppe_flush_all(struct en75_ppe *ppe);
++void __en75_ppe_check_skb(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash);
++
++/* patch 357 — egress builders (V1) */
++void en75_foe_entry_set_dsa(struct mtk_foe_entry *entry, int port, bool passthrough);
++void en75_foe_entry_set_queue(struct mtk_foe_entry *entry, unsigned int queue);
++void en75_foe_entry_set_pppoe(struct mtk_foe_entry *entry, int sid);
++void en75_foe_entry_set_vlan(struct mtk_foe_entry *entry, int vid);
++
++/* patch 357 — manual first-light tests (driven by module params) */
++u32  en75_ppe_committest(struct en75_ppe *ppe, __be32 sip, __be32 dip,
++			 __be16 sport, __be16 dport, u8 proto,
++			 const u8 *smac, const u8 *dmac,
++			 int dsa_port, bool passthrough, u8 pse_port);
++u32  en75_ppe_bindtest_register(struct en75_ppe *ppe, __be32 sip, __be32 dip,
++				__be16 sport, __be16 dport, u8 proto,
++				const u8 *smac, const u8 *dmac,
++				int dsa_port, bool passthrough, u8 pse_port);
++
++/* rate-limited RX bind trigger (mainline mtk_ppe_check_skb) */
++static inline void en75_ppe_check_skb(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash)
++{
++	u16 now, diff;
++
++	if (!ppe || hash > EN75_PPE_HASH_MASK)
++		return;
++	now = (u16)jiffies;
++	diff = now - ppe->foe_check_time[hash];
++	if (diff < HZ / 10)
++		return;
++	ppe->foe_check_time[hash] = now;
++	__en75_ppe_check_skb(ppe, skb, hash);
++}
 +
 +#endif /* __ECONET_PPE_H */
 --- /dev/null
 +++ b/econet_ppe.c
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,447 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* XR500v PPE phase 3 P4: FoE V1 entry builders + commit, ported from mainline
 + * mtk_ppe.c. V1 / offload_version=2 only (port_mg=0); IPv4 HNAPT/ROUTE only for
@@ -178,6 +269,7 @@
 +#include <linux/etherdevice.h>
 +#include <linux/io.h>
 +#include <linux/ip.h>
++#include <linux/slab.h>
 +#include <linux/unaligned.h>
 +
 +/* PPE register offsets within the block (same as econet_eth.c phase 1a) */
@@ -278,12 +370,18 @@
 +
 +/* --- commit into the HW FoE table (80B stride) --- */
 +
-+void en75_foe_entry_commit(void *foe_virt, void __iomem *ppe_base,
-+			   struct mtk_foe_entry *entry, u16 hash)
++/* patch 358: EN751221 FE free-running 15-bit timestamp that the PPE aging
++ * scanner keys on (mainline mtk_eth_timestamp). Offset is a HW must-confirm. */
++static u16 en75_eth_timestamp(struct en75_ppe *ppe)
++{
++	return readl(ppe->fe_base + EN75_FE_TS_OFF) & MTK_FOE_IB1_BIND_TIMESTAMP;
++}
++
++void en75_foe_entry_commit(struct en75_ppe *ppe, struct mtk_foe_entry *entry, u16 hash)
 +{
 +	struct mtk_foe_entry *hwe =
-+		(struct mtk_foe_entry *)((u8 *)foe_virt + hash * EN75_FOE_ENTRY_SIZE);
-+	u16 timestamp = 0;	/* TODO: EN751221 aging timestamp counter */
++		(struct mtk_foe_entry *)((u8 *)ppe->foe_virt + hash * EN75_FOE_ENTRY_SIZE);
++	u16 timestamp = en75_eth_timestamp(ppe);
 +	u32 cc;
 +
 +	entry->ib1 &= ~MTK_FOE_IB1_BIND_TIMESTAMP;
@@ -298,14 +396,14 @@
 +
 +	/* flush the PPE lookup cache so the engine re-reads the table for this
 +	 * slot (mainline mtk_ppe_cache_clear: set then clear CACHE_CTL.CLEAR). */
-+	cc = readl(ppe_base + EN75_PPE_CACHE_CTL);
-+	writel(cc | EN75_PPE_CACHE_CTL_CLEAR, ppe_base + EN75_PPE_CACHE_CTL);
-+	writel(cc & ~EN75_PPE_CACHE_CTL_CLEAR, ppe_base + EN75_PPE_CACHE_CTL);
++	cc = readl(ppe->base + EN75_PPE_CACHE_CTL);
++	writel(cc | EN75_PPE_CACHE_CTL_CLEAR, ppe->base + EN75_PPE_CACHE_CTL);
++	writel(cc & ~EN75_PPE_CACHE_CTL_CLEAR, ppe->base + EN75_PPE_CACHE_CTL);
 +}
 +
 +/* --- P4 self-test: hand-build one IPv4 HNAPT entry, commit it, return the
 + * slot + the live TB_USED so a debugfs poke can confirm the 80B layout takes. */
-+u32 en75_ppe_test_commit(void *foe_virt, void __iomem *ppe_base)
++u32 en75_ppe_test_commit(struct en75_ppe *ppe)
 +{
 +	static const u8 smac[ETH_ALEN] = { 0x02, 0, 0, 0, 0, 0x01 };
 +	static const u8 dmac[ETH_ALEN] = { 0x02, 0, 0, 0, 0, 0x02 };
@@ -313,7 +411,7 @@
 +	struct mtk_foe_entry *hwe;
 +	u32 hash, tb_before, tb_after;
 +
-+	tb_before = readl(ppe_base + EN75_PPE_TB_USED) & 0x3fff;
++	tb_before = readl(ppe->base + EN75_PPE_TB_USED) & 0x3fff;
 +
 +	en75_foe_entry_prepare(&e, MTK_PPE_PKT_TYPE_IPV4_HNAPT, IPPROTO_TCP,
 +			       1 /* GDM1 */, smac, dmac);
@@ -323,14 +421,15 @@
 +	en75_foe_entry_set_ipv4_tuple(&e, true, htonl(0x0a000001), htons(1000),
 +				      htonl(0x0a000002), htons(2000));
 +	hash = en75_ppe_hash_entry(&e);
-+	en75_foe_entry_commit(foe_virt, ppe_base, &e, hash);
++	en75_foe_entry_commit(ppe, &e, hash);
 +
-+	tb_after = readl(ppe_base + EN75_PPE_TB_USED) & 0x3fff;
-+	hwe = (struct mtk_foe_entry *)((u8 *)foe_virt + hash * EN75_FOE_ENTRY_SIZE);
++	tb_after = readl(ppe->base + EN75_PPE_TB_USED) & 0x3fff;
++	hwe = (struct mtk_foe_entry *)((u8 *)ppe->foe_virt + hash * EN75_FOE_ENTRY_SIZE);
 +
 +	/* read the slot straight back out of the coherent FoE table -> validates
 +	 * the 80B struct overlay landed exactly as intended (no /dev/mem needed).
-+	 * expected: ib1=21400000 ib2=007c0020 orig/new=0a000001/0a000002:07d003e8
++	 * expected: ib1=2140xxxx (xxxx=live FE timestamp now) ib2=007c0020
++	 *           orig/new=0a000001/0a000002:07d003e8
 +	 *           dmac=020000000002 smac=020000000001 etype=0800 */
 +	pr_info("XR500v PPE P4: committed test entry at hash=%u, TB_USED %u->%u\n",
 +		hash, tb_before, tb_after);
@@ -344,6 +443,267 @@
 +		hwe->ipv4.l2.etype);
 +	return hash;
 +}
++
++/* ===================================================================== */
++/* Phase 5 (binding): attach + egress builders + foe_flow core + RX bind  */
++/* ===================================================================== */
++
++bool en75_ppe_offload_enabled;	/* RX hook is inert until a test/offload arms it */
++bool en75_ppe_rxdump;		/* diagnostic: dump crsn/ppe_entry on RX */
++
++/* write CDMA1_VLAN_CTRL (fe_base+0x400). 0x81000001 = OEM value that pops the
++ * MT7530 special tag on RX so the PPE can parse the inner IPv4 frame. */
++void en75_ppe_set_vlan_ctrl(struct en75_ppe *ppe, u32 val)
++{
++	u32 old = readl(ppe->fe_base + EN75_CDMA1_VLAN_CTRL);
++
++	writel(val, ppe->fe_base + EN75_CDMA1_VLAN_CTRL);
++	pr_info("XR500v PPE vlan_ctrl: CDMA1_VLAN_CTRL %08x -> %08x (rb=%08x)\n",
++		old, val, readl(ppe->fe_base + EN75_CDMA1_VLAN_CTRL));
++}
++
++/* patch 356: allocate the per-eth PPE state (struct + foe_flow + rate-limit). */
++struct en75_ppe *en75_ppe_attach(struct device *dev, void __iomem *base,
++				 void __iomem *fe_base, void *foe_virt,
++				 dma_addr_t foe_phys, struct net_device *conduit)
++{
++	struct en75_ppe *ppe = devm_kzalloc(dev, sizeof(*ppe), GFP_KERNEL);
++
++	if (!ppe)
++		return NULL;
++	ppe->dev = dev;
++	ppe->base = base;
++	ppe->fe_base = fe_base;
++	ppe->foe_virt = foe_virt;
++	ppe->foe_phys = foe_phys;
++	ppe->conduit = conduit;
++	spin_lock_init(&ppe->lock);
++	ppe->foe_flow = devm_kcalloc(dev, EN75_PPE_NUM_FLOWS,
++				     sizeof(*ppe->foe_flow), GFP_KERNEL);
++	ppe->foe_check_time = devm_kcalloc(dev, EN75_PPE_ENTRIES,
++					   sizeof(*ppe->foe_check_time), GFP_KERNEL);
++	if (!ppe->foe_flow || !ppe->foe_check_time)
++		return NULL;
++	return ppe;
++}
++
++/* --- V1 egress builders (mainline mtk_foe_entry_set_*; IPv4 l2 only) --- */
++
++void en75_foe_entry_set_dsa(struct mtk_foe_entry *entry, int port, bool passthrough)
++{
++	struct mtk_foe_mac_info *l2 = &entry->ipv4.l2;
++
++	l2->etype = BIT(port) & 0x3f;		/* DP bitmap GENMASK(5,0) */
++	if (passthrough)
++		l2->etype |= BIT(7);		/* XR500v: cascaded 2nd MT7530 passthrough */
++	if (!(entry->ib1 & MTK_FOE_IB1_BIND_VLAN_LAYER))
++		entry->ib1 |= FIELD_PREP(MTK_FOE_IB1_BIND_VLAN_LAYER, 1);
++	else
++		l2->etype |= BIT(8);
++	entry->ib1 &= ~MTK_FOE_IB1_BIND_VLAN_TAG;
++}
++
++void en75_foe_entry_set_queue(struct mtk_foe_entry *entry, unsigned int queue)
++{
++	u32 *ib2 = &entry->ipv4.ib2;
++
++	*ib2 &= ~MTK_FOE_IB2_QID;
++	*ib2 |= FIELD_PREP(MTK_FOE_IB2_QID, queue);
++	*ib2 |= MTK_FOE_IB2_PSE_QOS;
++}
++
++void en75_foe_entry_set_pppoe(struct mtk_foe_entry *entry, int sid)
++{
++	struct mtk_foe_mac_info *l2 = &entry->ipv4.l2;
++
++	if (!(entry->ib1 & MTK_FOE_IB1_BIND_VLAN_LAYER) ||
++	    (entry->ib1 & MTK_FOE_IB1_BIND_VLAN_TAG))
++		l2->etype = ETH_P_PPP_SES;
++	entry->ib1 |= MTK_FOE_IB1_BIND_PPPOE;
++	l2->pppoe_id = sid;
++}
++
++void en75_foe_entry_set_vlan(struct mtk_foe_entry *entry, int vid)
++{
++	struct mtk_foe_mac_info *l2 = &entry->ipv4.l2;
++
++	switch (FIELD_GET(MTK_FOE_IB1_BIND_VLAN_LAYER, entry->ib1)) {
++	case 0:
++		entry->ib1 |= MTK_FOE_IB1_BIND_VLAN_TAG |
++			      FIELD_PREP(MTK_FOE_IB1_BIND_VLAN_LAYER, 1);
++		l2->vlan1 = vid;
++		return;
++	case 1:
++		if (!(entry->ib1 & MTK_FOE_IB1_BIND_VLAN_TAG)) {
++			l2->vlan1 = vid;
++			l2->etype |= BIT(8);
++		} else {
++			l2->vlan2 = vid;
++			entry->ib1 += FIELD_PREP(MTK_FOE_IB1_BIND_VLAN_LAYER, 1);
++		}
++		return;
++	default:
++		return;
++	}
++}
++
++/* --- foe_flow registration + RX bind (mainline mtk_ppe.c core, V1/IPv4) --- */
++
++/* match the orig 5-tuple (12B after ib1) + the UDP bit */
++static bool en75_flow_entry_match(struct en75_flow_entry *e, struct mtk_foe_entry *hwe)
++{
++	if ((hwe->ib1 ^ e->data.ib1) & MTK_FOE_IB1_UDP)
++		return false;
++	return !memcmp(&e->data.data, &hwe->data,
++		       offsetof(struct mtk_foe_entry, ipv4.ib2) - sizeof(hwe->ib1));
++}
++
++/* caller holds ppe->lock; invalidate the HW slot this flow was bound to */
++static void en75_foe_entry_clear_locked(struct en75_ppe *ppe, struct en75_flow_entry *e)
++{
++	if (e->hash != 0xffff) {
++		struct mtk_foe_entry *hwe =
++			(struct mtk_foe_entry *)((u8 *)ppe->foe_virt +
++						 (u32)e->hash * EN75_FOE_ENTRY_SIZE);
++		u32 cc;
++
++		hwe->ib1 &= ~MTK_FOE_IB1_STATE;
++		hwe->ib1 |= FIELD_PREP(MTK_FOE_IB1_STATE, MTK_FOE_STATE_INVALID);
++		dma_wmb();
++		cc = readl(ppe->base + EN75_PPE_CACHE_CTL);
++		writel(cc | EN75_PPE_CACHE_CTL_CLEAR, ppe->base + EN75_PPE_CACHE_CTL);
++		writel(cc & ~EN75_PPE_CACHE_CTL_CLEAR, ppe->base + EN75_PPE_CACHE_CTL);
++	}
++	e->hash = 0xffff;
++}
++
++/* register a prepared flow into the SW bucket; NO HW write (mainline
++ * mtk_foe_entry_commit). The RX hook binds it on the first matching packet. */
++int en75_foe_entry_register(struct en75_ppe *ppe, struct en75_flow_entry *e)
++{
++	u32 hash = en75_ppe_hash_entry(&e->data);
++
++	e->hash = 0xffff;
++	spin_lock_bh(&ppe->lock);
++	hlist_add_head(&e->list, &ppe->foe_flow[hash / EN75_PPE_HASH_OFFSET]);
++	spin_unlock_bh(&ppe->lock);
++	return 0;
++}
++
++void en75_foe_entry_unregister(struct en75_ppe *ppe, struct en75_flow_entry *e)
++{
++	spin_lock_bh(&ppe->lock);
++	en75_foe_entry_clear_locked(ppe, e);
++	hlist_del_init(&e->list);
++	spin_unlock_bh(&ppe->lock);
++}
++
++/* RX path: a steered-but-unbound flow missed; if the engine FORWARD_BUILD'd a
++ * parsed unbind entry at 'hash', match it to a registered flow and bind it. */
++void __en75_ppe_check_skb(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash)
++{
++	struct mtk_foe_entry *hwe =
++		(struct mtk_foe_entry *)((u8 *)ppe->foe_virt + (u32)hash * EN75_FOE_ENTRY_SIZE);
++	struct hlist_head *head = &ppe->foe_flow[hash / EN75_PPE_HASH_OFFSET];
++	struct en75_flow_entry *e;
++	struct hlist_node *n;
++	bool found = false;
++
++	spin_lock_bh(&ppe->lock);
++	if (FIELD_GET(MTK_FOE_IB1_STATE, hwe->ib1) == MTK_FOE_STATE_BIND)
++		goto out;	/* engine already bound this slot */
++	hlist_for_each_entry_safe(e, n, head, list) {
++		if (found || !en75_flow_entry_match(e, hwe)) {
++			if (e->hash != 0xffff && !e->static_entry)
++				en75_foe_entry_clear_locked(ppe, e);
++			continue;
++		}
++		e->hash = hash;				/* raw engine slot */
++		en75_foe_entry_commit(ppe, &e->data, hash);
++		found = true;
++	}
++out:
++	spin_unlock_bh(&ppe->lock);
++}
++
++void en75_ppe_flush_all(struct en75_ppe *ppe)
++{
++	struct en75_flow_entry *e;
++	struct hlist_node *n;
++	int i;
++
++	spin_lock_bh(&ppe->lock);
++	for (i = 0; i < EN75_PPE_NUM_FLOWS; i++) {
++		hlist_for_each_entry_safe(e, n, &ppe->foe_flow[i], list) {
++			en75_foe_entry_clear_locked(ppe, e);
++			hlist_del_init(&e->list);
++			if (!e->static_entry)
++				kfree(e);
++		}
++	}
++	spin_unlock_bh(&ppe->lock);
++}
++
++/* --- manual first-light test helpers (driven from module params) --- */
++
++static void en75_build_test_flow(struct mtk_foe_entry *e, __be32 sip, __be32 dip,
++				 __be16 sport, __be16 dport, u8 proto,
++				 const u8 *smac, const u8 *dmac,
++				 int dsa_port, bool passthrough, u8 pse_port)
++{
++	en75_foe_entry_prepare(e, MTK_PPE_PKT_TYPE_IPV4_HNAPT, proto,
++			       pse_port, smac, dmac);
++	en75_foe_entry_set_ipv4_tuple(e, false, sip, sport, dip, dport);
++	en75_foe_entry_set_ipv4_tuple(e, true, sip, sport, dip, dport);	/* no NAT in test */
++	if (dsa_port >= 0)
++		en75_foe_entry_set_dsa(e, dsa_port, passthrough);
++	en75_foe_entry_set_queue(e, dsa_port >= 0 ? 3 + dsa_port : 0);
++	en75_foe_entry_set_pse_port(e, pse_port);	/* 1=GDM1, 7=DISCARD (divert test) */
++	e->ib1 |= MTK_FOE_IB1_STATIC;		/* test flow is never aged */
++}
++
++/* direct commit at the SW hash (STATE=BIND): tests whether the engine HONORS a
++ * SW-written entry on a matching packet (HIT) -> validates egress/tag, no RX dep. */
++u32 en75_ppe_committest(struct en75_ppe *ppe, __be32 sip, __be32 dip,
++			__be16 sport, __be16 dport, u8 proto,
++			const u8 *smac, const u8 *dmac,
++			int dsa_port, bool passthrough, u8 pse_port)
++{
++	struct mtk_foe_entry e;
++	u32 hash;
++
++	en75_build_test_flow(&e, sip, dip, sport, dport, proto, smac, dmac,
++			     dsa_port, passthrough, pse_port);
++	hash = en75_ppe_hash_entry(&e);
++	spin_lock_bh(&ppe->lock);
++	en75_foe_entry_commit(ppe, &e, hash);
++	spin_unlock_bh(&ppe->lock);
++	pr_info("XR500v PPE committest: hash=%u pse=%u dsa=%d pt=%d ib1=%08x ib2=%08x etype=%04x q=%lu\n",
++		hash, pse_port, dsa_port, passthrough, e.ib1, e.ipv4.ib2, e.ipv4.l2.etype,
++		FIELD_GET(MTK_FOE_IB2_QID, e.ipv4.ib2));
++	return hash;
++}
++
++/* register-only + arm the RX gate: tests the FORWARD_BUILD -> RX bind mechanism. */
++u32 en75_ppe_bindtest_register(struct en75_ppe *ppe, __be32 sip, __be32 dip,
++			       __be16 sport, __be16 dport, u8 proto,
++			       const u8 *smac, const u8 *dmac,
++			       int dsa_port, bool passthrough, u8 pse_port)
++{
++	struct en75_flow_entry *fe = kzalloc(sizeof(*fe), GFP_KERNEL);
++	u32 hash;
++
++	if (!fe)
++		return 0xffff;
++	en75_build_test_flow(&fe->data, sip, dip, sport, dport, proto, smac, dmac,
++			     dsa_port, passthrough, pse_port);
++	fe->static_entry = true;
++	en75_foe_entry_register(ppe, fe);
++	hash = en75_ppe_hash_entry(&fe->data);
++	WRITE_ONCE(en75_ppe_offload_enabled, true);
++	pr_info("XR500v PPE bindtest: registered flow sw-hash=%u, RX bind armed\n", hash);
++	return hash;
++}
 --- a/Kbuild
 +++ b/Kbuild
 @@ -1,5 +1,5 @@
@@ -353,6 +713,19 @@
  econet-gsw-y := gsw/mt7530.o
  econet-gsw-mdio-y := gsw/mt7530-mdio.o
  econet-gsw-mmio-y := gsw/mt7530-mmio.o
+--- a/econet_eth.h
++++ b/econet_eth.h
+@@ -159,8 +159,10 @@
+ 	DPORT_DISCARD		= 7,
+ };
+ 
++struct en75_ppe;
+ struct en75_eth {
+ 	struct device *dev;
++	struct en75_ppe *ppe;	/* PPE/HNAT offload state (NULL until inited) */
+ };
+ 
+ /* Called in softirq context */
 --- a/econet_eth.c
 +++ b/econet_eth.c
 @@ -40,6 +40,7 @@
@@ -363,16 +736,24 @@
  
  #include "gdm_regs.h"
  #include "linux/dev_printk.h"
-@@ -375,6 +376,22 @@
+@@ -331,6 +332,7 @@
+ #define EN75_PPE_GLO_CFG_ON	(EN75_PPE_GLO_CFG_EN | BIT(2) | BIT(3) | BIT(9))
+ 
+ static void __iomem *en75_ppe_base;	/* set in en75_ppe_init */
++static struct en75_ppe *en75_the_ppe;	/* binding-phase PPE state */
+ 
+ static int en75_ppe_engine_set(bool on)
+ {
+@@ -375,6 +377,103 @@
  /* echo 1 > /sys/module/econet_eth/parameters/ppe_engine (default off) */
  module_param_cb(ppe_engine, &en75_ppe_engine_ops, &en75_ppe_engine, 0644);
  
 +static int en75_ppe_test_param_set(const char *val,
 +				   const struct kernel_param *kp)
 +{
-+	if (!en75_ppe_base || !en75_ppe_foe_virt)
++	if (!en75_the_ppe)
 +		return -ENODEV;
-+	en75_ppe_test_commit(en75_ppe_foe_virt, en75_ppe_base);
++	en75_ppe_test_commit(en75_the_ppe);
 +	return 0;
 +}
 +static const struct kernel_param_ops en75_ppe_test_ops = {
@@ -383,6 +764,140 @@
 +/* echo 1 > /sys/module/econet_eth/parameters/ppe_test -> commit 1 test FoE entry */
 +module_param_cb(ppe_test, &en75_ppe_test_ops, &en75_ppe_test, 0644);
 +
++/* === PPE binding first-light test params (357) ===
++ * Set the flow (host-order ints + MAC hi/lo), then trigger:
++ *   ppe_t_proto/sip/sport/dip/dport/smac_hi/smac_lo/dmac_hi/dmac_lo/dsaport/pt
++ *   echo 1 > ppe_committest   (direct STATE=BIND commit at sw-hash)
++ *   echo 1 > ppe_bindtest     (register + arm RX bind)
++ * dsaport=-1 => no DSA tag (variant A). */
++static unsigned int ppe_t_proto = 6;
++static unsigned int ppe_t_sip, ppe_t_dip, ppe_t_sport, ppe_t_dport;
++static unsigned int ppe_t_smac_hi, ppe_t_smac_lo, ppe_t_dmac_hi, ppe_t_dmac_lo;
++static int ppe_t_dsaport = -1;
++static unsigned int ppe_t_pt;
++module_param(ppe_t_proto, uint, 0644);
++module_param(ppe_t_sip, uint, 0644);
++module_param(ppe_t_dip, uint, 0644);
++module_param(ppe_t_sport, uint, 0644);
++module_param(ppe_t_dport, uint, 0644);
++module_param(ppe_t_smac_hi, uint, 0644);
++module_param(ppe_t_smac_lo, uint, 0644);
++module_param(ppe_t_dmac_hi, uint, 0644);
++module_param(ppe_t_dmac_lo, uint, 0644);
++module_param(ppe_t_dsaport, int, 0644);
++module_param(ppe_t_pt, uint, 0644);
++static unsigned int ppe_t_pseport = 1;	/* 1=GDM1, 7=DISCARD (divert oracle) */
++module_param(ppe_t_pseport, uint, 0644);
++module_param_named(ppe_rxdump, en75_ppe_rxdump, bool, 0644);
++
++static void en75_mac_from_hilo(u8 *m, u32 hi, u32 lo)
++{
++	m[0] = hi >> 24; m[1] = hi >> 16; m[2] = hi >> 8; m[3] = hi;
++	m[4] = lo >> 8;  m[5] = lo;
++}
++static int en75_ppe_run_test(bool bind)
++{
++	u8 smac[ETH_ALEN], dmac[ETH_ALEN];
++
++	if (!en75_the_ppe)
++		return -ENODEV;
++	en75_mac_from_hilo(smac, ppe_t_smac_hi, ppe_t_smac_lo);
++	en75_mac_from_hilo(dmac, ppe_t_dmac_hi, ppe_t_dmac_lo);
++	if (bind)
++		en75_ppe_bindtest_register(en75_the_ppe, htonl(ppe_t_sip),
++			htonl(ppe_t_dip), htons(ppe_t_sport), htons(ppe_t_dport),
++			ppe_t_proto, smac, dmac, ppe_t_dsaport, ppe_t_pt, ppe_t_pseport);
++	else
++		en75_ppe_committest(en75_the_ppe, htonl(ppe_t_sip),
++			htonl(ppe_t_dip), htons(ppe_t_sport), htons(ppe_t_dport),
++			ppe_t_proto, smac, dmac, ppe_t_dsaport, ppe_t_pt, ppe_t_pseport);
++	return 0;
++}
++static int en75_ppe_committest_set(const char *val, const struct kernel_param *kp)
++{ return en75_ppe_run_test(false); }
++static int en75_ppe_bindtest_set(const char *val, const struct kernel_param *kp)
++{ return en75_ppe_run_test(true); }
++static const struct kernel_param_ops en75_ppe_committest_ops = {
++	.set = en75_ppe_committest_set, .get = param_get_int,
++};
++static const struct kernel_param_ops en75_ppe_bindtest_ops = {
++	.set = en75_ppe_bindtest_set, .get = param_get_int,
++};
++static int ppe_committest_v, ppe_bindtest_v;
++module_param_cb(ppe_committest, &en75_ppe_committest_ops, &ppe_committest_v, 0644);
++module_param_cb(ppe_bindtest, &en75_ppe_bindtest_ops, &ppe_bindtest_v, 0644);
++
++/* echo 0x81000001 > ppe_vlan_ctrl -> pop the MT7530 special tag so the PPE parses */
++static int en75_ppe_vlan_ctrl_set(const char *val, const struct kernel_param *kp)
++{
++	u32 v;
++
++	if (!en75_the_ppe)
++		return -ENODEV;
++	if (kstrtou32(val, 0, &v))
++		return -EINVAL;
++	en75_ppe_set_vlan_ctrl(en75_the_ppe, v);
++	return 0;
++}
++static const struct kernel_param_ops en75_ppe_vlan_ctrl_ops = {
++	.set = en75_ppe_vlan_ctrl_set, .get = param_get_int,
++};
++static int ppe_vlan_ctrl_v;
++module_param_cb(ppe_vlan_ctrl, &en75_ppe_vlan_ctrl_ops, &ppe_vlan_ctrl_v, 0644);
++
  static void en75_ppe_init(struct en75_eth_pvt *eth)
  {
  	void __iomem *base = (void __iomem *)eth->regs->ppe;
+@@ -392,6 +491,10 @@
+ 	en75_ppe_foe_virt = tbl;
+ 	en75_ppe_foe_phys = phys;
+ 	en75_ppe_base = base;
++	en75_the_ppe = en75_ppe_attach(eth->pub.dev, base,
++				       (void __iomem *)eth->regs->fe,
++				       tbl, phys, eth->ports[0]);
++	eth->pub.ppe = en75_the_ppe;
+ 
+ 	writel((u32)phys, base + EN75_PPE_TB_BASE);
+ 	tb_cfg = BIT(7) | BIT(8) | BIT(9) | BIT(10) | BIT(11)	/* AGE bits */
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -12,6 +12,7 @@
+ #include "linux/bitmap.h"
+ #include "linux/dev_printk.h"
+ #include "linux/types.h"
++#include "econet_ppe.h"
+ #include "qdma_desc.h"
+ #include "qdma_regs.h"
+ #include "econet_eth.h"
+@@ -188,13 +189,24 @@
+ 	hash = get_erx_ppe_entry(&desc.msg.erx);
+ 	skb_set_hash(skb, jhash_1word(hash, 0),
+ 		     PKT_HASH_TYPE_L4);
+-	{ /* XR500v PPE 2a: confirm the HW tags crsn/ppe_entry on RX */
+-	  u8 __crsn = get_erx_crsn(&desc.msg.erx);
+-	  pr_info_ratelimited("XR500v PPE rx: crsn=%u ppe_entry=%u sport=%u\n",
+-		  __crsn, hash, get_erx_sport(&desc.msg.erx)); }
+-
+-	/* TODO: When we begin supporting the PPE, we will handle
+-	 *       PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED here. */
++	/* PPE RX: optional crsn/ppe_entry diagnostic + the bind hook. On the
++	 * EN751221 the steered-but-unbound crsn is NO_FLOW(0x07) (mainline uses
++	 * HIT_UNBIND_RATE_REACHED(0x0f) -- accept both). 'hash' is the RAW engine
++	 * FoE slot. en75_ppe_check_skb() takes ppe->lock; never eats the skb. */
++	if (READ_ONCE(en75_ppe_rxdump) || READ_ONCE(en75_ppe_offload_enabled)) {
++		u8 crsn = get_erx_crsn(&desc.msg.erx);
++
++		if (READ_ONCE(en75_ppe_rxdump))
++			pr_info_ratelimited("XR500v PPE rx: crsn=%u ppe_entry=%u sport=%u ip4=%u ip6=%u l2vld=%u l4f=%u untag=%u sp_tag=%04x\n",
++				crsn, hash, get_erx_sport(&desc.msg.erx),
++				is_erx_ip4(&desc.msg.erx), is_erx_ip6(&desc.msg.erx),
++				is_erx_l2vld(&desc.msg.erx), is_erx_l4f(&desc.msg.erx),
++				is_erx_untag(&desc.msg.erx), desc.msg.erx.sp_tag);
++		if (READ_ONCE(en75_ppe_offload_enabled) && q->qdma->eth->ppe &&
++		    (crsn == MTK_PPE_CPU_REASON_NO_FLOW ||
++		     crsn == MTK_PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED))
++			en75_ppe_check_skb(q->qdma->eth->ppe, skb, hash);
++	}
+ 
+ 	sport = get_erx_sport(&desc.msg.erx);
+ 	if (en75_rx_before_recv(q->qdma->eth, skb, sport))
