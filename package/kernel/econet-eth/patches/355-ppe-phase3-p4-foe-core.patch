@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/econet_ppe.h
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,256 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* XR500v PPE phase 3 P4: FoE V1 (80B, mt7622/netsys-v1 class) structs +
 + * accessors, ported ~verbatim from mainline drivers/net/ethernet/mediatek/
@@ -211,6 +211,9 @@
 +#define EN75_CDMA1_VLAN_CTRL	0x400
 +void en75_ppe_set_vlan_ctrl(struct en75_ppe *ppe, u32 val);
 +
++/* generic FE register peek/poke (fe_base + off) for OEM-vs-OpenWrt diffing */
++void en75_ppe_fe_rw(struct en75_ppe *ppe, u32 off, bool write, u32 val);
++
 +/* patch 356 */
 +struct en75_ppe *en75_ppe_attach(struct device *dev, void __iomem *base,
 +				 void __iomem *fe_base, void *foe_virt,
@@ -256,7 +259,7 @@
 +#endif /* __ECONET_PPE_H */
 --- /dev/null
 +++ b/econet_ppe.c
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,460 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* XR500v PPE phase 3 P4: FoE V1 entry builders + commit, ported from mainline
 + * mtk_ppe.c. V1 / offload_version=2 only (port_mg=0); IPv4 HNAPT/ROUTE only for
@@ -460,6 +463,19 @@
 +	writel(val, ppe->fe_base + EN75_CDMA1_VLAN_CTRL);
 +	pr_info("XR500v PPE vlan_ctrl: CDMA1_VLAN_CTRL %08x -> %08x (rb=%08x)\n",
 +		old, val, readl(ppe->fe_base + EN75_CDMA1_VLAN_CTRL));
++}
++
++void en75_ppe_fe_rw(struct en75_ppe *ppe, u32 off, bool write, u32 val)
++{
++	u32 old = readl(ppe->fe_base + (off & 0xfffc));
++
++	if (write) {
++		writel(val, ppe->fe_base + (off & 0xfffc));
++		pr_info("XR500v PPE fe[%04x]: %08x -> %08x (rb=%08x)\n",
++			off & 0xfffc, old, val, readl(ppe->fe_base + (off & 0xfffc)));
++	} else {
++		pr_info("XR500v PPE fe[%04x] = %08x\n", off & 0xfffc, old);
++	}
 +}
 +
 +/* patch 356: allocate the per-eth PPE state (struct + foe_flow + rate-limit). */
@@ -744,7 +760,7 @@
  
  static int en75_ppe_engine_set(bool on)
  {
-@@ -375,6 +377,103 @@
+@@ -375,6 +377,129 @@
  /* echo 1 > /sys/module/econet_eth/parameters/ppe_engine (default off) */
  module_param_cb(ppe_engine, &en75_ppe_engine_ops, &en75_ppe_engine, 0644);
  
@@ -845,10 +861,36 @@
 +static int ppe_vlan_ctrl_v;
 +module_param_cb(ppe_vlan_ctrl, &en75_ppe_vlan_ctrl_ops, &ppe_vlan_ctrl_v, 0644);
 +
++/* echo 0x1c > ppe_fe (read fe[0x1c]); echo 0x1c=0x13000000 > ppe_fe (write) */
++static int en75_ppe_fe_set(const char *val, const struct kernel_param *kp)
++{
++	char buf[48], *eq;
++	u32 off, v = 0;
++
++	if (!en75_the_ppe)
++		return -ENODEV;
++	strscpy(buf, val, sizeof(buf));
++	eq = strchr(buf, '=');
++	if (eq) {
++		*eq = '\0';
++		if (kstrtou32(eq + 1, 0, &v))
++			return -EINVAL;
++	}
++	if (kstrtou32(buf, 0, &off))
++		return -EINVAL;
++	en75_ppe_fe_rw(en75_the_ppe, off, eq != NULL, v);
++	return 0;
++}
++static const struct kernel_param_ops en75_ppe_fe_ops = {
++	.set = en75_ppe_fe_set, .get = param_get_int,
++};
++static int ppe_fe_v;
++module_param_cb(ppe_fe, &en75_ppe_fe_ops, &ppe_fe_v, 0644);
++
  static void en75_ppe_init(struct en75_eth_pvt *eth)
  {
  	void __iomem *base = (void __iomem *)eth->regs->ppe;
-@@ -392,6 +491,10 @@
+@@ -392,6 +517,10 @@
  	en75_ppe_foe_virt = tbl;
  	en75_ppe_foe_phys = phys;
  	en75_ppe_base = base;
