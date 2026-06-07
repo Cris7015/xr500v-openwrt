@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/econet_ppe.h
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,162 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* XR500v PPE phase 3 P4: FoE V1 (80B, mt7622/netsys-v1 class) structs +
 + * accessors, ported ~verbatim from mainline drivers/net/ethernet/mediatek/
@@ -158,13 +158,14 @@
 +				  __be32 dest_addr, __be16 dest_port);
 +void en75_foe_entry_set_pse_port(struct mtk_foe_entry *entry, u8 port);
 +u32 en75_ppe_hash_entry(struct mtk_foe_entry *e);
-+void en75_foe_entry_commit(void *foe_virt, struct mtk_foe_entry *entry, u16 hash);
++void en75_foe_entry_commit(void *foe_virt, void __iomem *ppe_base,
++			   struct mtk_foe_entry *entry, u16 hash);
 +u32 en75_ppe_test_commit(void *foe_virt, void __iomem *ppe_base);
 +
 +#endif /* __ECONET_PPE_H */
 --- /dev/null
 +++ b/econet_ppe.c
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,178 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* XR500v PPE phase 3 P4: FoE V1 entry builders + commit, ported from mainline
 + * mtk_ppe.c. V1 / offload_version=2 only (port_mg=0); IPv4 HNAPT/ROUTE only for
@@ -180,8 +181,9 @@
 +#include <linux/unaligned.h>
 +
 +/* PPE register offsets within the block (same as econet_eth.c phase 1a) */
-+#define EN75_PPE_TB_USED		0x224
++#define EN75_PPE_TB_USED		0x224	/* GENMASK(13,0) = used-entry count */
 +#define EN75_PPE_CACHE_CTL		0x320
++#define EN75_PPE_CACHE_CTL_CLEAR	BIT(9)
 +
 +/* --- entry builders (V1) --- */
 +
@@ -276,11 +278,13 @@
 +
 +/* --- commit into the HW FoE table (80B stride) --- */
 +
-+void en75_foe_entry_commit(void *foe_virt, struct mtk_foe_entry *entry, u16 hash)
++void en75_foe_entry_commit(void *foe_virt, void __iomem *ppe_base,
++			   struct mtk_foe_entry *entry, u16 hash)
 +{
 +	struct mtk_foe_entry *hwe =
 +		(struct mtk_foe_entry *)((u8 *)foe_virt + hash * EN75_FOE_ENTRY_SIZE);
 +	u16 timestamp = 0;	/* TODO: EN751221 aging timestamp counter */
++	u32 cc;
 +
 +	entry->ib1 &= ~MTK_FOE_IB1_BIND_TIMESTAMP;
 +	entry->ib1 |= FIELD_PREP(MTK_FOE_IB1_BIND_TIMESTAMP, timestamp);
@@ -291,6 +295,12 @@
 +	wmb();
 +	hwe->ib1 = entry->ib1;
 +	dma_wmb();
++
++	/* flush the PPE lookup cache so the engine re-reads the table for this
++	 * slot (mainline mtk_ppe_cache_clear: set then clear CACHE_CTL.CLEAR). */
++	cc = readl(ppe_base + EN75_PPE_CACHE_CTL);
++	writel(cc | EN75_PPE_CACHE_CTL_CLEAR, ppe_base + EN75_PPE_CACHE_CTL);
++	writel(cc & ~EN75_PPE_CACHE_CTL_CLEAR, ppe_base + EN75_PPE_CACHE_CTL);
 +}
 +
 +/* --- P4 self-test: hand-build one IPv4 HNAPT entry, commit it, return the
@@ -300,7 +310,10 @@
 +	static const u8 smac[ETH_ALEN] = { 0x02, 0, 0, 0, 0, 0x01 };
 +	static const u8 dmac[ETH_ALEN] = { 0x02, 0, 0, 0, 0, 0x02 };
 +	struct mtk_foe_entry e;
-+	u32 hash;
++	struct mtk_foe_entry *hwe;
++	u32 hash, tb_before, tb_after;
++
++	tb_before = readl(ppe_base + EN75_PPE_TB_USED) & 0x3fff;
 +
 +	en75_foe_entry_prepare(&e, MTK_PPE_PKT_TYPE_IPV4_HNAPT, IPPROTO_TCP,
 +			       1 /* GDM1 */, smac, dmac);
@@ -310,10 +323,25 @@
 +	en75_foe_entry_set_ipv4_tuple(&e, true, htonl(0x0a000001), htons(1000),
 +				      htonl(0x0a000002), htons(2000));
 +	hash = en75_ppe_hash_entry(&e);
-+	en75_foe_entry_commit(foe_virt, &e, hash);
++	en75_foe_entry_commit(foe_virt, ppe_base, &e, hash);
 +
-+	pr_info("XR500v PPE P4: committed test entry at hash=%u, TB_USED=0x%08x\n",
-+		hash, readl(ppe_base + EN75_PPE_TB_USED));
++	tb_after = readl(ppe_base + EN75_PPE_TB_USED) & 0x3fff;
++	hwe = (struct mtk_foe_entry *)((u8 *)foe_virt + hash * EN75_FOE_ENTRY_SIZE);
++
++	/* read the slot straight back out of the coherent FoE table -> validates
++	 * the 80B struct overlay landed exactly as intended (no /dev/mem needed).
++	 * expected: ib1=21400000 ib2=007c0020 orig/new=0a000001/0a000002:07d003e8
++	 *           dmac=020000000002 smac=020000000001 etype=0800 */
++	pr_info("XR500v PPE P4: committed test entry at hash=%u, TB_USED %u->%u\n",
++		hash, tb_before, tb_after);
++	pr_info("XR500v PPE P4 rb: ib1=%08x ib2=%08x orig=%08x/%08x:%08x new=%08x/%08x:%08x\n",
++		hwe->ib1, hwe->ipv4.ib2,
++		hwe->ipv4.orig.src_ip, hwe->ipv4.orig.dest_ip, hwe->ipv4.orig.ports,
++		hwe->ipv4.new.src_ip, hwe->ipv4.new.dest_ip, hwe->ipv4.new.ports);
++	pr_info("XR500v PPE P4 rb: dmac=%08x%04x smac=%08x%04x etype=%04x\n",
++		hwe->ipv4.l2.dest_mac_hi, hwe->ipv4.l2.dest_mac_lo,
++		hwe->ipv4.l2.src_mac_hi, hwe->ipv4.l2.src_mac_lo,
++		hwe->ipv4.l2.etype);
 +	return hash;
 +}
 --- a/Kbuild
