@@ -1,0 +1,13 @@
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -188,6 +188,10 @@
+ 	hash = get_erx_ppe_entry(&desc.msg.erx);
+ 	skb_set_hash(skb, jhash_1word(hash, 0),
+ 		     PKT_HASH_TYPE_L4);
++	{ /* XR500v PPE 2a: confirm the HW tags crsn/ppe_entry on RX */
++	  u8 __crsn = get_erx_crsn(&desc.msg.erx);
++	  pr_info_ratelimited("XR500v PPE rx: crsn=%u ppe_entry=%u sport=%u\n",
++		  __crsn, hash, get_erx_sport(&desc.msg.erx)); }
+ 
+ 	/* TODO: When we begin supporting the PPE, we will handle
+ 	 *       PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED here. */

@@ -1,0 +1,97 @@
+--- a/econet_eth.c
++++ b/econet_eth.c
+@@ -37,6 +37,8 @@
+ #include <linux/platform_device.h>
+ #include <linux/reset.h>
+ #include <linux/of_net.h>
++#include <linux/dma-mapping.h>
++#include <linux/io.h>
+ 
+ #include "gdm_regs.h"
+ #include "linux/dev_printk.h"
+@@ -293,6 +295,76 @@
+ 	platform_set_drvdata(pdev, NULL);
+ }
+ 
++/* === XR500v PPE (HW NAT offload) phase 1a ===
++ * PPE config init + register-map verification via a TB_BASE readback. The
++ * engine is left DISABLED (GLO_CFG.EN=0) -> zero forwarding impact. Offsets
++ * and values are from mainline mtk_ppe (mt7622-class, FoE V1 80B, 16384
++ * entries). */
++#define EN75_PPE_GLO_CFG		0x200
++#define EN75_PPE_FLOW_CFG		0x204
++#define EN75_PPE_IP_PROTO_CHK		0x208
++#define EN75_PPE_TB_CFG			0x21c
++#define EN75_PPE_TB_BASE		0x220
++#define EN75_PPE_TB_USED		0x224
++#define EN75_PPE_BIND_RATE		0x228
++#define EN75_PPE_BIND_LIMIT0		0x22c
++#define EN75_PPE_BIND_LIMIT1		0x230
++#define EN75_PPE_UNBIND_AGE		0x238
++#define EN75_PPE_BIND_AGE0		0x23c
++#define EN75_PPE_BIND_AGE1		0x240
++#define EN75_PPE_DEFAULT_CPU_PORT	0x248
++#define EN75_PPE_CACHE_CTL		0x320
++#define EN75_PPE_NUM_ENTRIES		16384
++#define EN75_FOE_ENTRY_SIZE		80
++
++static void *en75_ppe_foe_virt;
++static dma_addr_t en75_ppe_foe_phys;
++
++static void en75_ppe_init(struct en75_eth_pvt *eth)
++{
++	void __iomem *base = (void __iomem *)eth->regs->ppe;
++	size_t sz = EN75_PPE_NUM_ENTRIES * EN75_FOE_ENTRY_SIZE;
++	dma_addr_t phys;
++	u32 tb_cfg;
++	void *tbl;
++
++	tbl = dmam_alloc_coherent(eth->pub.dev, sz, &phys, GFP_KERNEL);
++	if (!tbl) {
++		dev_err(eth->pub.dev, "XR500v PPE: FoE table alloc failed\n");
++		return;
++	}
++	memset(tbl, 0, sz);
++	en75_ppe_foe_virt = tbl;
++	en75_ppe_foe_phys = phys;
++
++	writel((u32)phys, base + EN75_PPE_TB_BASE);
++	tb_cfg = BIT(7) | BIT(8) | BIT(9) | BIT(10) | BIT(11)	/* AGE bits */
++	       | (3u << 4)					/* SEARCH_MISS=FORWARD_BUILD */
++	       | (1u << 14)					/* HASH_MODE=1 */
++	       | (1u << 16)					/* SCAN_MODE=CHECK_AGE */
++	       | (4u << 0)					/* ENTRY_NUM=ENTRIES_SHIFT */
++	       | BIT(3);					/* ENTRY_80B */
++	writel(tb_cfg, base + EN75_PPE_TB_CFG);
++	writel(0xffffffffu, base + EN75_PPE_IP_PROTO_CHK);
++	writel(BIT(0), base + EN75_PPE_CACHE_CTL);
++	writel((1u<<8)|(1u<<9)|(1u<<10)|(1u<<12)|(1u<<13)|(1u<<17),
++	       base + EN75_PPE_FLOW_CFG);
++	writel((1000u << 16) | 3u, base + EN75_PPE_UNBIND_AGE);
++	writel((12u << 0) | (1u << 16), base + EN75_PPE_BIND_AGE0);
++	writel((7u << 0) | (1u << 16), base + EN75_PPE_BIND_AGE1);
++	writel(GENMASK(13, 0) | GENMASK(29, 16), base + EN75_PPE_BIND_LIMIT0);
++	writel(GENMASK(13, 0) | (1u << 16), base + EN75_PPE_BIND_LIMIT1);
++	writel((30u << 0) | (1u << 16), base + EN75_PPE_BIND_RATE);
++	writel(0, base + EN75_PPE_DEFAULT_CPU_PORT);
++	/* GLO_CFG.EN intentionally left unset in phase 1a (engine off). */
++
++	dev_info(eth->pub.dev,
++		 "XR500v PPE 1a: foe_phys=0x%08x TB_BASE_rb=0x%08x TB_CFG_w=0x%08x TB_CFG_rb=0x%08x GLO_CFG_rb=0x%08x TB_USED_rb=0x%08x\n",
++		 (u32)phys, readl(base + EN75_PPE_TB_BASE),
++		 tb_cfg, readl(base + EN75_PPE_TB_CFG),
++		 readl(base + EN75_PPE_GLO_CFG), readl(base + EN75_PPE_TB_USED));
++}
++
+ static int en75_probe(struct platform_device *pdev)
+ {
+ 	struct en75_debug_conf debug_conf = {0};
+@@ -380,6 +452,8 @@
+ 	}
+ 
+ 	eth->debug = en75_debugfs_init(&debug_conf);
++
++	en75_ppe_init(eth);
+ 
+ 	/* Configure the MT7530 as a dumb switch */
+ 	// en75_wreg(EN75_PMCR_CONFIG, &regs->switch_regs[MT753X_PMCR_P(5) / 4]);
