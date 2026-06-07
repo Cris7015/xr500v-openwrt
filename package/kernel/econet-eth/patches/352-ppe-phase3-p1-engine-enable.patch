@@ -1,0 +1,89 @@
+--- a/econet_eth.c
++++ b/econet_eth.c
+@@ -39,6 +39,7 @@
+ #include <linux/of_net.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/io.h>
++#include <linux/iopoll.h>
+ 
+ #include "gdm_regs.h"
+ #include "linux/dev_printk.h"
+@@ -320,6 +321,60 @@
+ static void *en75_ppe_foe_virt;
+ static dma_addr_t en75_ppe_foe_phys;
+ 
++/* === XR500v PPE phase 3 P1: enable the engine behind a default-off gate ===
++ * GLO_CFG.EN is already set at reset (0x60d); this writes the explicit
++ * mainline mtk_ppe_start value and gives a live toggle to A/B test without a
++ * reflash. GDM fwd_cfg stays = CPU, so the engine is starved (no blast radius). */
++#define EN75_PPE_GLO_CFG_EN	BIT(0)
++#define EN75_PPE_GLO_CFG_BUSY	BIT(31)
++/* EN | IP4_L4_CS_DROP | IP4_CS_DROP | FLOW_DROP_UPDATE (mtk_ppe.c mtk_ppe_start) */
++#define EN75_PPE_GLO_CFG_ON	(EN75_PPE_GLO_CFG_EN | BIT(2) | BIT(3) | BIT(9))
++
++static void __iomem *en75_ppe_base;	/* set in en75_ppe_init */
++
++static int en75_ppe_engine_set(bool on)
++{
++	void __iomem *g;
++	u32 v;
++
++	if (!en75_ppe_base)
++		return -ENODEV;
++	g = en75_ppe_base + EN75_PPE_GLO_CFG;
++	if (on) {
++		if (readl_poll_timeout_atomic(g, v, !(v & EN75_PPE_GLO_CFG_BUSY),
++					      10, 10000))
++			return -EBUSY;
++		writel(EN75_PPE_GLO_CFG_ON, g);
++	} else {
++		writel(readl(g) & ~EN75_PPE_GLO_CFG_EN, g);
++	}
++	pr_info("XR500v PPE P1: engine %s, GLO_CFG=0x%08x\n",
++		on ? "ON" : "OFF", readl(g));
++	return 0;
++}
++
++static int en75_ppe_engine_param_set(const char *val,
++				     const struct kernel_param *kp)
++{
++	bool on;
++	int ret = kstrtobool(val, &on);
++
++	if (ret)
++		return ret;
++	*(bool *)kp->arg = on;
++	if (en75_ppe_base)	/* runtime toggle; at load time en75_ppe_init applies it */
++		return en75_ppe_engine_set(on);
++	return 0;
++}
++
++static const struct kernel_param_ops en75_ppe_engine_ops = {
++	.set = en75_ppe_engine_param_set,
++	.get = param_get_bool,
++};
++static bool en75_ppe_engine;
++/* echo 1 > /sys/module/econet_eth/parameters/ppe_engine (default off) */
++module_param_cb(ppe_engine, &en75_ppe_engine_ops, &en75_ppe_engine, 0644);
++
+ static void en75_ppe_init(struct en75_eth_pvt *eth)
+ {
+ 	void __iomem *base = (void __iomem *)eth->regs->ppe;
+@@ -336,6 +391,7 @@
+ 	memset(tbl, 0, sz);
+ 	en75_ppe_foe_virt = tbl;
+ 	en75_ppe_foe_phys = phys;
++	en75_ppe_base = base;
+ 
+ 	writel((u32)phys, base + EN75_PPE_TB_BASE);
+ 	tb_cfg = BIT(7) | BIT(8) | BIT(9) | BIT(10) | BIT(11)	/* AGE bits */
+@@ -363,6 +419,9 @@
+ 		 (u32)phys, readl(base + EN75_PPE_TB_BASE),
+ 		 tb_cfg, readl(base + EN75_PPE_TB_CFG),
+ 		 readl(base + EN75_PPE_GLO_CFG), readl(base + EN75_PPE_TB_USED));
++
++	if (en75_ppe_engine)
++		en75_ppe_engine_set(true);
+ }
+ 
+ static int en75_probe(struct platform_device *pdev)
