@@ -760,7 +760,7 @@
  
  static int en75_ppe_engine_set(bool on)
  {
-@@ -375,6 +377,129 @@
+@@ -375,6 +377,154 @@
  /* echo 1 > /sys/module/econet_eth/parameters/ppe_engine (default off) */
  module_param_cb(ppe_engine, &en75_ppe_engine_ops, &en75_ppe_engine, 0644);
  
@@ -887,10 +887,35 @@
 +static int ppe_fe_v;
 +module_param_cb(ppe_fe, &en75_ppe_fe_ops, &ppe_fe_v, 0644);
 +
++/* echo 1 > ppe_stag : FE side of STAG->VTAG -- GDMA1_VLAN_CHECK(0x510)=1 makes the
++ * GDM VLAN-aware so the PPE parses past the 0x8100-stamped special tag (untag stays
++ * 0, so the inline DSA tagger still works). Pair with gsw_stag (switch PVC_P). */
++static int en75_ppe_stag_set(const char *val, const struct kernel_param *kp)
++{
++	bool on;
++
++	if (kstrtobool(val, &on))
++		return -EINVAL;
++	if (!en75_the_ppe)
++		return -ENODEV;
++	writel(on ? 0x00000001 : 0x81000000, en75_the_ppe->fe_base + 0x510);
++	writel(on ? 0x81000001 : 0x81000000,
++	       en75_the_ppe->fe_base + EN75_CDMA1_VLAN_CTRL);
++	pr_info("XR500v ppe_stag %s: VLAN_CHECK=0x%08x VLAN_CTRL=0x%08x\n",
++		on ? "ON" : "OFF", readl(en75_the_ppe->fe_base + 0x510),
++		readl(en75_the_ppe->fe_base + EN75_CDMA1_VLAN_CTRL));
++	return 0;
++}
++static const struct kernel_param_ops en75_ppe_stag_ops = {
++	.set = en75_ppe_stag_set, .get = param_get_int,
++};
++static int ppe_stag_v;
++module_param_cb(ppe_stag, &en75_ppe_stag_ops, &ppe_stag_v, 0644);
++
  static void en75_ppe_init(struct en75_eth_pvt *eth)
  {
  	void __iomem *base = (void __iomem *)eth->regs->ppe;
-@@ -392,6 +517,10 @@
+@@ -392,6 +542,10 @@
  	en75_ppe_foe_virt = tbl;
  	en75_ppe_foe_phys = phys;
  	en75_ppe_base = base;
@@ -930,11 +955,11 @@
 +		u8 crsn = get_erx_crsn(&desc.msg.erx);
 +
 +		if (READ_ONCE(en75_ppe_rxdump))
-+			pr_info_ratelimited("XR500v PPE rx: crsn=%u ppe_entry=%u sport=%u ip4=%u ip6=%u l2vld=%u l4f=%u untag=%u sp_tag=%04x\n",
++			pr_info_ratelimited("XR500v PPE rx: crsn=%u ppe_entry=%u sport=%u ip4=%u ip6=%u l2vld=%u l4f=%u untag=%u sp_tag=%04x tci=%04x\n",
 +				crsn, hash, get_erx_sport(&desc.msg.erx),
 +				is_erx_ip4(&desc.msg.erx), is_erx_ip6(&desc.msg.erx),
 +				is_erx_l2vld(&desc.msg.erx), is_erx_l4f(&desc.msg.erx),
-+				is_erx_untag(&desc.msg.erx), desc.msg.erx.sp_tag);
++				is_erx_untag(&desc.msg.erx), desc.msg.erx.sp_tag, desc.msg.erx.tci);
 +		if (READ_ONCE(en75_ppe_offload_enabled) && q->qdma->eth->ppe &&
 +		    (crsn == MTK_PPE_CPU_REASON_NO_FLOW ||
 +		     crsn == MTK_PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED))

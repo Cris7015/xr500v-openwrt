@@ -1,0 +1,73 @@
+--- a/gsw/mt7530.c
++++ b/gsw/mt7530.c
+@@ -2554,6 +2554,61 @@
+ 	return n;
+ }
+ static DEVICE_ATTR_WO(en751221_trgmii_cal);
++
++/* --- XR500v: live switch register peek/poke (the ppe_fe analogue for 0xBFB58000).
++ * which: 0 = on-die (CPU port6 -> gmac0/GDM1), 1 = MCM. reg = switch-internal offset.
++ *   peek:  echo "0 2610"          > gsw_reg ; cat gsw_reg
++ *   poke:  echo "0 2610 81008020" > gsw_reg  (PVC_P(6) STAG_VPID=0x8100, STAG->VTAG) */
++static u32 g_gsw_reg_last;
++static ssize_t gsw_reg_store(struct device *d, struct device_attribute *a,
++			     const char *buf, size_t n)
++{
++	struct mt7530_priv *p;
++	unsigned int which, reg, val;
++	int got = sscanf(buf, "%u %x %x", &which, &reg, &val);
++
++	if (got < 2)
++		return -EINVAL;
++	p = which ? g_en751221_mcm : g_en751221_ondie;
++	if (!p)
++		return -ENODEV;
++	if ((reg & 0x3) || reg > 0x7ffc)
++		return -EINVAL;
++	if (got == 3) {
++		mt7530_write(p, reg, val);
++		dev_info(p->dev, "gsw[%u] poke 0x%04x <= 0x%08x (rb=0x%08x)\n",
++			 which, reg, val, mt7530_read(p, reg));
++	} else {
++		g_gsw_reg_last = mt7530_read(p, reg);
++		dev_info(p->dev, "gsw[%u] peek 0x%04x => 0x%08x\n",
++			 which, reg, g_gsw_reg_last);
++	}
++	return n;
++}
++static ssize_t gsw_reg_show(struct device *d, struct device_attribute *a, char *buf)
++{
++	return sysfs_emit(buf, "0x%08x\n", g_gsw_reg_last);
++}
++static DEVICE_ATTR_RW(gsw_reg);
++
++/* echo 1 > gsw_stag : restamp the on-die CPU port6 special-tag TPID to 0x8100
++ * (PVC_P(6) STAG_VPID|BIT15|PORT_SPEC_TAG). Pair with ppe_stag (FE VLAN_CHECK) so
++ * the PPE parses past it. This is the switch half of the STAG->VTAG unblock. */
++static ssize_t gsw_stag_store(struct device *d, struct device_attribute *a,
++			      const char *buf, size_t n)
++{
++	bool on;
++
++	if (kstrtobool(buf, &on))
++		return -EINVAL;
++	if (!g_en751221_ondie)
++		return -ENODEV;
++	mt7530_write(g_en751221_ondie, MT7530_PVC_P(6), on ? 0x81008020 : 0x00000120);
++	dev_info(g_en751221_ondie->dev, "gsw_stag %s: PVC_P(6)=0x%08x\n",
++		 on ? "ON" : "OFF", mt7530_read(g_en751221_ondie, MT7530_PVC_P(6)));
++	return n;
++}
++static DEVICE_ATTR_WO(gsw_stag);
+ /* --- end XR500v TRGMII cascade calibration --- */
+ 
+ static int
+@@ -2571,6 +2626,8 @@
+ 	if (g_en751221_ondie && g_en751221_mcm && !g_en751221_cal_sysfs) {
+ 		if (device_create_file(priv->dev, &dev_attr_en751221_trgmii_cal) == 0)
+ 			g_en751221_cal_sysfs = 1;
++		device_create_file(priv->dev, &dev_attr_gsw_reg);
++		device_create_file(priv->dev, &dev_attr_gsw_stag);
+ 		dev_info(priv->dev, "en751221: trgmii_cal sysfs %sready\n",
+ 			 g_en751221_cal_sysfs ? "" : "NOT ");
+ 	}
