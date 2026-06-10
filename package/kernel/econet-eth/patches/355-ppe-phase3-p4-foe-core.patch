@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/econet_ppe.h
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,373 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* XR500v PPE phase 3 P4: FoE V1 (80B, mt7622/netsys-v1 class) structs +
 + * accessors, ported ~verbatim from mainline drivers/net/ethernet/mediatek/
@@ -12,12 +12,15 @@
 +#include <linux/bitfield.h>
 +#include <linux/if_ether.h>
 +
-+/* OEM hw_nat.ko uses gPpeFoeNum=8192 (TB_CFG ENTRY_NUM=3), NOT 16384. Sizing
-+ * the table to 16384 broke the engine invariant "RX-descriptor entry_num ==
-+ * the slot the engine FORWARD_BUILDs into" (descriptor reported >8192 = bind
-+ * into an empty upper-half slot the engine never looks up). Match the OEM. */
-+#define EN75_PPE_ENTRIES_SHIFT		3
-+#define EN75_PPE_ENTRIES		(1024 << EN75_PPE_ENTRIES_SHIFT)	/* 8192 */
++/* OEM hw_nat.ko runs 16384 entries: the static gPpeFoeNum=0x2000 in .data is
++ * only the compile default — init_module overrides it from module param
++ * FOE_NUM=16 -> 0x4000, allocs 0x50*0x4000=0x140000 and sets TB_CFG
++ * ENTRY_NUM=4 (= the live 0xffbc read). See GHIDRA-FOENUM-2026-06-10.md.
++ * The old "16K broke descriptor==slot" objection assumed the RX-descriptor
++ * entry_num is the FoE slot, debunked in build #24 (slot is tuple-scanned).
++ * Requires DTS ppe-foe region >= 0x140000 (bumped to 0x180000). */
++#define EN75_PPE_ENTRIES_SHIFT		4
++#define EN75_PPE_ENTRIES		(1024 << EN75_PPE_ENTRIES_SHIFT)	/* 16384 */
 +#define EN75_PPE_FOE_NUM		EN75_PPE_ENTRIES	/* RX accept bound (OEM gPpeFoeNum) */
 +#define EN75_PPE_HASH_MASK		(EN75_PPE_ENTRIES - 1)
 +#define EN75_FOE_ENTRY_SIZE		80

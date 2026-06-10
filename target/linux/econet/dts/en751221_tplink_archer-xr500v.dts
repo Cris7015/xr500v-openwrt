@@ -24,7 +24,7 @@
 		ranges;
 
 		ppe_foe_rsv: ppe-foe@dc00000 {
-			reg = <0x0dc00000 0x00100000>;
+			reg = <0x0dc00000 0x00180000>;
 			no-map;
 		};
 	};
