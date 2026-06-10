@@ -9,7 +9,7 @@
  
  #include "gdm_regs.h"
  #include "linux/dev_printk.h"
-@@ -293,6 +295,76 @@
+@@ -293,6 +295,78 @@
  	platform_set_drvdata(pdev, NULL);
  }
  
@@ -32,7 +32,7 @@
 +#define EN75_PPE_BIND_AGE1		0x240
 +#define EN75_PPE_DEFAULT_CPU_PORT	0x248
 +#define EN75_PPE_CACHE_CTL		0x320
-+#define EN75_PPE_NUM_ENTRIES		16384
++#define EN75_PPE_NUM_ENTRIES		8192
 +#define EN75_FOE_ENTRY_SIZE		80
 +
 +static void *en75_ppe_foe_virt;
@@ -46,11 +46,13 @@
 +	u32 tb_cfg;
 +	void *tbl;
 +
-+	tbl = dmam_alloc_coherent(eth->pub.dev, sz, &phys, GFP_KERNEL);
-+	if (!tbl) {
-+		dev_err(eth->pub.dev, "XR500v PPE: FoE table alloc failed\n");
-+		return;
-+	}
++	/* build #63: OEM FoeAllocTbl ioremaps a FIXED reserved high phys (NOT
++	 * kernel dma_alloc). Test the hypothesis that the FE DMA master only
++	 * materializes its FORWARD_BUILD entries into that reserved window.
++	 * 0x0dc00000 = OEM live PPE_TB_BASE; reserved no-map in the DTS so the
++	 * kernel never touches it. Access uncached via the MIPS KSEG1 alias. */
++	phys = 0x0dc00000;
++	tbl = (void *)(unsigned long)(0xa0000000u | (u32)phys);
 +	memset(tbl, 0, sz);
 +	en75_ppe_foe_virt = tbl;
 +	en75_ppe_foe_phys = phys;
@@ -58,9 +60,9 @@
 +	writel((u32)phys, base + EN75_PPE_TB_BASE);
 +	tb_cfg = BIT(7) | BIT(8) | BIT(9) | BIT(10) | BIT(11)	/* AGE bits */
 +	       | (3u << 4)					/* SEARCH_MISS=FORWARD_BUILD */
-+	       | (1u << 14)					/* HASH_MODE=1 */
++	       | (3u << 14)					/* HASH_MODE=3 (OEM, build #47) */
 +	       | (1u << 16)					/* SCAN_MODE=CHECK_AGE */
-+	       | (4u << 0)					/* ENTRY_NUM=ENTRIES_SHIFT */
++	       | (3u << 0)					/* ENTRY_NUM=ENTRIES_SHIFT */
 +	       | BIT(3);					/* ENTRY_80B */
 +	writel(tb_cfg, base + EN75_PPE_TB_CFG);
 +	writel(0xffffffffu, base + EN75_PPE_IP_PROTO_CHK);
@@ -86,7 +88,7 @@
  static int en75_probe(struct platform_device *pdev)
  {
  	struct en75_debug_conf debug_conf = {0};
-@@ -380,6 +452,8 @@
+@@ -380,6 +454,8 @@
  	}
  
  	eth->debug = en75_debugfs_init(&debug_conf);

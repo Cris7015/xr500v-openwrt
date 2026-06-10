@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/econet_ppe.h
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,370 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* XR500v PPE phase 3 P4: FoE V1 (80B, mt7622/netsys-v1 class) structs +
 + * accessors, ported ~verbatim from mainline drivers/net/ethernet/mediatek/
@@ -12,8 +12,13 @@
 +#include <linux/bitfield.h>
 +#include <linux/if_ether.h>
 +
-+#define EN75_PPE_ENTRIES_SHIFT		4
-+#define EN75_PPE_ENTRIES		(1024 << EN75_PPE_ENTRIES_SHIFT)	/* 16384 */
++/* OEM hw_nat.ko uses gPpeFoeNum=8192 (TB_CFG ENTRY_NUM=3), NOT 16384. Sizing
++ * the table to 16384 broke the engine invariant "RX-descriptor entry_num ==
++ * the slot the engine FORWARD_BUILDs into" (descriptor reported >8192 = bind
++ * into an empty upper-half slot the engine never looks up). Match the OEM. */
++#define EN75_PPE_ENTRIES_SHIFT		3
++#define EN75_PPE_ENTRIES		(1024 << EN75_PPE_ENTRIES_SHIFT)	/* 8192 */
++#define EN75_PPE_FOE_NUM		EN75_PPE_ENTRIES	/* RX accept bound (OEM gPpeFoeNum) */
 +#define EN75_PPE_HASH_MASK		(EN75_PPE_ENTRIES - 1)
 +#define EN75_FOE_ENTRY_SIZE		80
 +
@@ -143,6 +148,10 @@
 +	MTK_PPE_CPU_REASON_UN_HIT			= 0x0d,
 +	MTK_PPE_CPU_REASON_HIT_UNBIND			= 0x0e,
 +	MTK_PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED	= 0x0f,
++	/* build #61: HNAT_V2 prebind handshake notify (OEM frame_engine.h:419,
++	 * HIT_PRE_BIND). The engine emits this for an entry whose udib1.preb=1 on the
++	 * next matching packet; ONLY then does the OEM flip state=UNBIND->BIND. */
++	MTK_PPE_CPU_REASON_HIT_PRE_BIND			= 0x1a,
 +	MTK_PPE_CPU_REASON_PPE_BYPASS			= 0x1e,
 +};
 +
@@ -204,10 +213,25 @@
 +extern bool en75_ppe_offload_enabled;
 +/* diagnostic: when true, the RX path logs crsn/ppe_entry/sport (rate-limited) */
 +extern bool en75_ppe_rxdump;
++/* build #41: one-shot atomic dump (DRAM[slot] + 16 CAH lines data-words) from the RX
++ * hook, to catch our flow IN the cache at the crsn=15 instant (no userspace race) */
++extern bool en75_ppe_atomic;
 +/* diagnostic: dump the raw engine-built FoE entry at the reported slot (to RE the
 + * engine's exact tuple layout/endianness vs our en75_foe_entry_set_ipv4_tuple) */
 +extern bool en75_ppe_foedump;
 +void en75_ppe_dump_slot(struct en75_ppe *ppe, u16 hash);
++/* dump the 16 CAH cache lines (RA_HWNAT FoeDumpCacheEntry) -- confirms whether
++ * the engine builds unbind entries into the cache instead of the DRAM table */
++void en75_ppe_dump_cache(struct en75_ppe *ppe);
++/* enable/disable+flush the PPE lookup cache (A/B for the cache hypothesis) */
++void en75_ppe_cache_set(struct en75_ppe *ppe, bool on);
++/* scan the whole DRAM FoE table, log non-zero entries (descriptor-slot vs
++ * table-slot mismatch diagnostic: find which slot the engine really used) */
++void en75_ppe_scan_table(struct en75_ppe *ppe);
++/* #25 fill+flip bind: find each registered flow's engine-built UNBIND entry by
++ * matching L4 ports, then flip it to BIND in place (sidesteps descriptor-slot +
++ * IP-encoding blockers). Returns #flows bound. Trigger via ppe_bindscan param. */
++int en75_ppe_bind_by_scan(struct en75_ppe *ppe);
 +/* committest override: commit at this exact slot (the engine's reported hash) */
 +extern u32 en75_force_hash;
 +
@@ -229,7 +253,26 @@
 +int  en75_foe_entry_register(struct en75_ppe *ppe, struct en75_flow_entry *e);
 +void en75_foe_entry_unregister(struct en75_ppe *ppe, struct en75_flow_entry *e);
 +void en75_ppe_flush_all(struct en75_ppe *ppe);
-+void __en75_ppe_check_skb(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash);
++void __en75_ppe_check_skb(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash, u8 crsn);
++
++enum en75_ppe_diag_event {
++	EN75_PPE_DIAG_GATE_PASS,
++	EN75_PPE_DIAG_PREBIND_PROMOTE,
++	EN75_PPE_DIAG_PREBIND_ARM,
++	EN75_PPE_DIAG_FLIP,
++	EN75_PPE_DIAG_RX_COMMIT,
++	EN75_PPE_DIAG_NOBIND,
++	EN75_PPE_DIAG_TX_ARM,
++};
++
++void en75_ppe_diag_sample(u16 hash, u8 crsn);
++void en75_ppe_diag_invalid(u16 hash, u8 crsn);
++void en75_ppe_diag_rate_limited(u16 hash, u8 crsn);
++void en75_ppe_diag_after_rate(u16 hash, u8 crsn);
++void en75_ppe_diag_gate_skip(u8 crsn);
++void en75_ppe_diag_event(enum en75_ppe_diag_event event);
++void en75_ppe_diag_dump(void);
++void en75_ppe_diag_reset(void);
 +
 +/* patch 357 — egress builders (V1) */
 +void en75_foe_entry_set_dsa(struct mtk_foe_entry *entry, int port, bool passthrough);
@@ -247,25 +290,90 @@
 +				const u8 *smac, const u8 *dmac,
 +				int dsa_port, bool passthrough, u8 pse_port);
 +
++/* ===================================================================== */
++/* TX-hook (build #42): OEM FoeBindToPpe model -- fill the COMPLETE entry  */
++/* from the EGRESS packet (real BRAS MAC, pppoe session-id, NAT'd tuple,   */
++/* DSA dp from the MTK tag) in the TX path, then commit BIND. The RX hook  */
++/* only ARMS the slot; the TX hook materializes the bind, exactly like the */
++/* OEM (PpeTxHandler->FoeBindToPpe). This tests "incomplete entry -> engine */
++/* rejects" AND is the production fix. EN751221 ib1 bit20=dvp (foe_fdb.h). */
++/* ===================================================================== */
++extern bool en75_ppe_tx_hook;	/* master enable for the TX bind hook       */
++extern bool en75_tx_bind_arm;	/* RX hook armed a pending TX commit        */
++extern u32  en75_tx_match_dip;	/* inner IPv4 dst (network order) of test flow */
++extern bool en75_ppe_flip;	/* build #43: flip-in-place the engine-built entry */
++extern u8   en75_flip_dp;	/* ib2.dp egress port for the flip (1=GSW,2=GMAC)  */
++extern u8   en75_ppe_tuple_swab;/* build #44: 1=store orig tuple swab32 (engine LOOKUP order) */
++extern u8   en75_ppe_cache_mode;/* build #46: 0=per-line 1=global clean-all 2=in-cache 3=both */
++extern bool en75_ppe_preserve_key;/* build #48: TX-bind keeps engine's UNBIND key, only adds rewrite */
++extern bool en75_ppe_mirror_lookup;/* build #56: also write BIND at the RX-descriptor lookup slot */
++extern bool en75_ppe_use_rxslot; /* build #57: commit at the per-flow RX-recorded lookup slot */
++extern bool en75_ppe_port_mg0;	 /* build #59: ib2 PORT_MG/AG=0 (vs OEM 0x3f) A/B */
++extern bool en75_ppe_cah_bind;	 /* build #60: in-cache BIND (flip the CAH line) */
++extern bool en75_ppe_prebind;	 /* build #61: OEM PREBIND handshake (preb=1, wait HIT_PRE_BIND, then state=BIND) */
++extern bool en75_ppe_bind_on_rate; /* build #68: bind ONLY on crsn=0x0f (RATE_REACHED), OEM timing */
++extern bool en75_ppe_oemregs;	 /* build #61: replicate OEM engine reg config (GLO_CFG/FLOW_CFG/aging) */
++/* build #61: called from the RX call-site when crsn==HIT_PRE_BIND(0x1a) -- the
++ * engine's handshake that it staged the prebind; flip the slot UNBIND->BIND. */
++void en75_ppe_prebind_promote(struct en75_ppe *ppe, u16 hash);
++void en75_ppe_rx_record(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash);
++void en75_ppe_tx_bind(struct en75_ppe *ppe, struct sk_buff *skb);
++void en75_ppe_cache_clean_all(struct en75_ppe *ppe);
++void en75_ppe_cah_scan(struct en75_ppe *ppe);	/* build #47: dump all 1024 CAH lines */
++
++/* hot-path guard: cheap flag checks before the (rare) parse+commit. Call from
++ * en75_dev_xmit AFTER skb_linearize (so skb->data is contiguous to parse).
++ * build #52: the EN751221 engine AUTO-binds the FoE entry to state=2 (ib2=0, no
++ * egress) WITHOUT ever raising crsn=HIT_UNBIND, so the RX-hook arm (tx_bind_arm)
++ * starved and the tx_hook never fired. The OEM PpeTxHandler instead runs on EVERY
++ * post-routing egress packet. Match that: fire on tx_hook set, regardless of arm.
++ * We scan 8192 slots per call, so throttle to ~20/s (binding a flow once suffices;
++ * a bound flow HW-forwards and never reaches the conduit TX again). */
++static inline void en75_ppe_tx_maybe_bind(struct en75_ppe *ppe, struct sk_buff *skb)
++{
++	static unsigned long en75_tx_bind_last;	/* 0 = never fired (jiffies starts <0) */
++	unsigned long now = jiffies;
++
++	if (!ppe || !READ_ONCE(en75_ppe_tx_hook))
++		return;
++	/* fire on first-ever call (!last avoids the INITIAL_JIFFIES<0 wrap that made
++	 * time_after_eq(now,0) false until uptime>300s) or once per ~50ms thereafter. */
++	if (READ_ONCE(en75_tx_bind_arm) || !en75_tx_bind_last ||
++	    time_after(now, en75_tx_bind_last + HZ / 20)) {
++		en75_tx_bind_last = now ? now : 1;
++		en75_ppe_tx_bind(ppe, skb);
++	}
++}
++
 +/* rate-limited RX bind trigger (mainline mtk_ppe_check_skb) */
-+static inline void en75_ppe_check_skb(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash)
++static inline void en75_ppe_check_skb(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash, u8 crsn)
 +{
 +	u16 now, diff;
 +
-+	if (!ppe || hash > EN75_PPE_HASH_MASK)
++	/* hash == EN75_PPE_HASH_MASK (0x3fff) is the engine's INVALID-slot marker,
++	 * not a real entry -- reject it (>= not >) so we never bind into slot 16383. */
++	if (!ppe)
 +		return;
++	en75_ppe_diag_sample(hash, crsn);
++	if (hash >= EN75_PPE_HASH_MASK) {
++		en75_ppe_diag_invalid(hash, crsn);
++		return;
++	}
 +	now = (u16)jiffies;
 +	diff = now - ppe->foe_check_time[hash];
-+	if (diff < HZ / 10)
++	if (diff < HZ / 10) {
++		en75_ppe_diag_rate_limited(hash, crsn);
 +		return;
++	}
 +	ppe->foe_check_time[hash] = now;
-+	__en75_ppe_check_skb(ppe, skb, hash);
++	en75_ppe_diag_after_rate(hash, crsn);
++	__en75_ppe_check_skb(ppe, skb, hash, crsn);
 +}
 +
 +#endif /* __ECONET_PPE_H */
 --- /dev/null
 +++ b/econet_ppe.c
-@@ -0,0 +1,479 @@
+@@ -0,0 +1,1683 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* XR500v PPE phase 3 P4: FoE V1 entry builders + commit, ported from mainline
 + * mtk_ppe.c. V1 / offload_version=2 only (port_mg=0); IPv4 HNAPT/ROUTE only for
@@ -274,17 +382,269 @@
 + * entries into it. Indexing uses the 80B stride, NOT an array of (oversized)
 + * structs. */
 +#include "econet_ppe.h"
++#include <linux/atomic.h>
 +#include <linux/dma-mapping.h>
++#include <linux/delay.h>
 +#include <linux/etherdevice.h>
 +#include <linux/io.h>
 +#include <linux/ip.h>
 +#include <linux/slab.h>
++#include <linux/swab.h>
 +#include <linux/unaligned.h>
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++#include <net/netfilter/nf_conntrack.h>
++#endif
 +
 +/* PPE register offsets within the block (same as econet_eth.c phase 1a) */
 +#define EN75_PPE_TB_USED		0x224	/* GENMASK(13,0) = used-entry count */
-+#define EN75_PPE_CACHE_CTL		0x320
-+#define EN75_PPE_CACHE_CTL_CLEAR	BIT(9)
++#define EN75_PPE_PPE_TB_CFG_OFF		0x21c	/* TB_CFG; bit16=1 -> 1024 CAH lines */
++#define EN75_PPE_CACHE_CTL		0x320	/* CAH_CTRL */
++#define EN75_PPE_CACHE_CTL_EN		BIT(0)	/* cache enable */
++#define EN75_PPE_CACHE_CTL_CLEAR	BIT(9)	/* invalidate-all pulse */
++/* CAH (FoE lookup cache) sw-access regs, ppe->base-relative (RA_HWNAT
++ * frame_engine.h: CAH_LINE_RW=0x328, CAH_RDATA=0x330; req bit = CAH_CTRL[8],
++ * cmd = CAH_CTRL[13:12], OFFSET_RW = CAH_LINE_RW[23:16], line = [14:0]). */
++#define EN75_PPE_CAH_LINE_RW		0x328
++#define EN75_PPE_CAH_RDATA		0x330
++#define EN75_PPE_CAH_REQ		BIT(8)
++#define EN75_PPE_CAH_CMD_SHIFT		12
++#define EN75_PPE_CAH_OFFRW_ENTRYNUM	0x1f
++#define EN75_PPE_CAH_LINES		16
++/* EN751221-SPECIFIC CAH protocol (RE'd from OEM PpeCleanCache751221/FoeDumpCacheData
++ * by Codex -- the MT7620 bit9-pulse flush does NOTHING here). CAH_CTRL[14:12]=cmd
++ * (4=clean-all, 2=read), [8]=go/trigger. A gate at PPE+0x334[0] must be lowered
++ * around the op and restored. */
++#define EN75_PPE_CAH_GATE		0x334	/* = CAH_EN_CFG: real enable/config (0x33=on) */
++#define EN75_PPE_CAH_TAG_SRH		0x324	/* search: [15:0]=idx in, [30:16]=matched line out */
++#define EN75_PPE_CAH_WDATA		0x32c
++#define EN75_PPE_CAH_CLEAN_ALL		0x4100	/* cmd=4 (clean-all) | BIT(8) trigger */
++#define EN75_PPE_CAH_READ_CMD		0x2100	/* cmd=2 (read) | BIT(8) trigger */
++
++/* EN751221 CAH cache flush: the real coherency op. Replaces the bogus bit9 pulse. */
++/* WORKFLOW RE FINDING (verified 3x from OEM PpeSetCacheEbl@0xc6fc): the EN751221
++ * CAH enable/disable register is PPE+0x334 (0x33=EN|cfg on enable), NOT CAH_CTRL
++ * 0x320 -- the 0x320 bit0/bit9 path is the MT7620 branch and a NO-OP on this die.
++ * Our old "flush" wrote 0x4100 to 0x320 but SET 0x334 bit0 at start+end, i.e. it
++ * RE-ENABLED the cache it claimed to flush, so the stale UNBIND survived ->
++ * crsn=15 forever, AND our cache-off A/B test (0x320) never actually disabled it.
++ * Fix: clear 0x334 bit0 = REAL cache OFF -> the engine reads every lookup from the
++ * coherent DRAM FoE table -> our BIND at slot=hash is honored next packet (OEM
++ * PpeSetEntryBind = 1 store, zero cache ops, because the cache is off/evicted). */
++/* issue a CAH sw-access command (cmd in [14:12]) + trigger, poll done. */
++static inline bool en75_cah_cmd(struct en75_ppe *ppe, u32 cmd)
++{
++	int n = 100000;
++
++	writel((cmd << 12) | BIT(8), ppe->base + EN75_PPE_CACHE_CTL);
++	while (n-- && (readl(ppe->base + EN75_PPE_CACHE_CTL) & BIT(8)))
++		udelay(1);
++	return !(readl(ppe->base + EN75_PPE_CACHE_CTL) & BIT(8));
++}
++
++/* SURGICAL evict (OEM ppeCacheClearOne@0x105a0): the engine FORWARD_BUILDs an
++ * UNBIND into the CAH and KEEPS serving that cached line even after we write a
++ * BIND to DRAM[idx] and even after clearing 0x334 bit0 (disable != evict). So:
++ * search the CAH for entry idx -> matched line -> read its meta word ->
++ * invalidate (state bits[17:16]=0) -> write back. Next lookup of idx cache-misses
++ * -> engine re-reads DRAM -> our BIND -> HIT. Needs the cache ENABLED (0x334&1). */
++static void en75_ppe_cah_clear_one(struct en75_ppe *ppe, u16 idx)
++{
++	u32 en = readl(ppe->base + EN75_PPE_CAH_GATE), t, line, sel, meta;
++
++	if (!(en & BIT(0)))
++		return;
++	writel(en & ~BIT(0), ppe->base + EN75_PPE_CAH_GATE);		/* gate down */
++	t = readl(ppe->base + EN75_PPE_CAH_TAG_SRH);
++	writel((t & ~0xffffu) | idx, ppe->base + EN75_PPE_CAH_TAG_SRH);
++	if (en75_cah_cmd(ppe, 0)) {					/* search idx */
++		line = (readl(ppe->base + EN75_PPE_CAH_TAG_SRH) >> 16) & 0x7fff;
++		sel = line | (0x1fu << 16);				/* meta word */
++		writel(sel, ppe->base + EN75_PPE_CAH_LINE_RW);
++		if (en75_cah_cmd(ppe, 2)) {				/* read meta */
++			meta = readl(ppe->base + EN75_PPE_CAH_RDATA) & 0xfffcffffu;
++			writel(meta, ppe->base + EN75_PPE_CAH_WDATA);	/* state->invalid */
++			writel(sel, ppe->base + EN75_PPE_CAH_LINE_RW);
++			en75_cah_cmd(ppe, 3);				/* write back */
++		}
++	}
++	writel(readl(ppe->base + EN75_PPE_CAH_GATE) | BIT(0),
++	       ppe->base + EN75_PPE_CAH_GATE);				/* gate up */
++}
++
++/* THE last move (fallback #2): the engine serves lookups from the CAH cache and
++ * never re-reads our DRAM BIND (DRAM-write+flush+disable+evict all fail). So bind
++ * IN the cache: search idx -> matched line -> flip the CACHED entry's ib1 word0 to
++ * state=BIND (+ ib2 word4 DEST_PORT=pse), KEEPING the engine's own cached tuple
++ * (words 1-3) which matches its lookup by construction. Engine HITs from cache. */
++static u32 en75_cah_read_word(struct en75_ppe *ppe, u32 line, u32 word)
++{
++	writel(line | (word << 16), ppe->base + EN75_PPE_CAH_LINE_RW);
++	return en75_cah_cmd(ppe, 2) ? readl(ppe->base + EN75_PPE_CAH_RDATA) : 0;
++}
++
++static void en75_cah_write_word(struct en75_ppe *ppe, u32 line, u32 word, u32 v)
++{
++	writel(v, ppe->base + EN75_PPE_CAH_WDATA);
++	writel(line | (word << 16), ppe->base + EN75_PPE_CAH_LINE_RW);
++	en75_cah_cmd(ppe, 3);
++}
++
++/* build #60: flip a CAH line's cached entry to BIND in place -- word0 ib1 state ->
++ * BIND, word4 ib2 DEST_PORT -> pse -- KEEPING the engine's own cached tuple. The
++ * engine HITs against the cached line so this bypasses DRAM + byte-order + the
++ * FORWARD_BUILD race entirely (Composer P1). */
++static void en75_cah_flip_line(struct en75_ppe *ppe, u32 line, u8 pse)
++{
++	u32 v = en75_cah_read_word(ppe, line, 0);
++
++	v &= ~MTK_FOE_IB1_STATE;
++	v |= FIELD_PREP(MTK_FOE_IB1_STATE, MTK_FOE_STATE_BIND) |
++	     MTK_FOE_IB1_BIND_CACHE | MTK_FOE_IB1_BIND_TTL;
++	en75_cah_write_word(ppe, line, 0, v);
++	v = en75_cah_read_word(ppe, line, 4);
++	v &= ~(MTK_FOE_IB2_DEST_PORT | MTK_FOE_IB2_PORT_AG);
++	v |= FIELD_PREP(MTK_FOE_IB2_DEST_PORT, pse) |
++	     FIELD_PREP(MTK_FOE_IB2_PORT_AG, 0x3f);
++	en75_cah_write_word(ppe, line, 4, v);
++}
++
++/* build #60: IN-CACHE BIND (Composer P1). Find the CAH line holding this flow and
++ * flip it to BIND in place. Try search-by-idx (the RX-descriptor FOE_ENTRY_NUM);
++ * if the CAH is tuple-hash-keyed (search misses), SCAN all lines and match word3
++ * (orig.ports) == want_ports (or its dport half). want_ports is in the engine's
++ * cached byte order (swab32 of network). TB_CFG[16]=1 -> up to 1024 lines. */
++static void en75_ppe_cah_bind_one(struct en75_ppe *ppe, u16 idx, u32 want_ports, u8 pse)
++{
++	u32 en = readl(ppe->base + EN75_PPE_CAH_GATE), t, tagrd;
++	u32 lines = (readl(ppe->base + EN75_PPE_PPE_TB_CFG_OFF) & BIT(16)) ? 1024 : 16;
++	int line = -1, i, scanned = 0;
++	u16 want_dphi = want_ports >> 16;		/* swab16(dport), NAT-invariant */
++
++	if (!(en & BIT(0)))
++		return;
++	writel(en & ~BIT(0), ppe->base + EN75_PPE_CAH_GATE);		/* gate down */
++
++	/* 1) search-by-idx (cheap) */
++	t = readl(ppe->base + EN75_PPE_CAH_TAG_SRH);
++	writel((t & ~0xffffu) | idx, ppe->base + EN75_PPE_CAH_TAG_SRH);
++	if (en75_cah_cmd(ppe, 0)) {
++		u32 l = (readl(ppe->base + EN75_PPE_CAH_TAG_SRH) >> 16) & 0x7fff;
++
++		tagrd = en75_cah_read_word(ppe, l, 0x1f);
++		if ((tagrd & 0x3fff) == idx)
++			line = (int)l;
++	}
++	/* 2) fallback: scan lines, match orig.ports (word3) */
++	if (line < 0) {
++		for (i = 0; i < (int)lines; i++) {
++			u32 meta = en75_cah_read_word(ppe, i, 0x1f);
++			u32 ib1, ports;
++
++			if (((meta >> 16) & 3) == 0)		/* invalid line */
++				continue;
++			scanned++;
++			ib1 = en75_cah_read_word(ppe, i, 0);
++			if (FIELD_GET(MTK_FOE_IB1_STATE, ib1) == MTK_FOE_STATE_BIND)
++				continue;			/* already bound */
++			ports = en75_cah_read_word(ppe, i, 3);
++			if (ports == want_ports || (ports >> 16) == want_dphi ||
++			    (ports & 0xffff) == want_dphi) {
++				line = i;
++				break;
++			}
++		}
++	}
++	if (line >= 0)
++		en75_cah_flip_line(ppe, (u32)line, pse);
++	writel(readl(ppe->base + EN75_PPE_CAH_GATE) | BIT(0),
++	       ppe->base + EN75_PPE_CAH_GATE);				/* gate up */
++	pr_info_ratelimited("XR500v CAH-bind(#60) idx=%u want_ports=%08x lines=%u scanned=%d line=%d dp=%u\n",
++			    idx, want_ports, lines, scanned, line, pse);
++}
++
++/* build #46: OEM PpeCleanCache751221 GLOBAL clean-all -- the real publish op (RE
++ * workflow, 4 agents). gate down (clear 0x334 bit0) -> CAH_CTRL=0x4100 (cmd4
++ * clean-all + go) -> gate up. Evicts EVERY cached line so the engine re-reads the
++ * coherent DRAM FoE table on its next lookup. Replaces cah_clear_one, whose
++ * per-entry tag-search never matched our flow (the long-standing CAH wall). */
++void en75_ppe_cache_clean_all(struct en75_ppe *ppe)
++{
++	u32 en = readl(ppe->base + EN75_PPE_CAH_GATE);
++
++	if (!(en & BIT(0))) {			/* cache OFF -> enable, else the flush is a no-op */
++		writel(0x33, ppe->base + EN75_PPE_CAH_GATE);
++		en = readl(ppe->base + EN75_PPE_CAH_GATE);
++	}
++	writel(en & ~BIT(0), ppe->base + EN75_PPE_CAH_GATE);	/* gate down */
++	en75_cah_cmd(ppe, 4);					/* CAH_CTRL = 0x4100 */
++	writel(en | BIT(0), ppe->base + EN75_PPE_CAH_GATE);	/* gate up */
++}
++
++/* build #46: live A/B of the cache publish strategy (no reflash): 0=per-line clear
++ * (old), 1=global clean-all (OEM), 2=in-cache bind, 3=clean-all+in-cache. */
++u8 en75_ppe_cache_mode = 1;
++
++static void en75_ppe_cache_publish(struct en75_ppe *ppe, u16 hash, u8 dp)
++{
++	struct mtk_foe_entry *hwe = (struct mtk_foe_entry *)
++		((u8 *)ppe->foe_virt + (u32)hash * EN75_FOE_ENTRY_SIZE);
++	u32 wp = hwe->ipv4.orig.ports;		/* committed entry's L4 ports */
++
++	switch (READ_ONCE(en75_ppe_cache_mode)) {
++	case 1:
++		en75_ppe_cache_clean_all(ppe);
++		break;
++	case 2:
++		en75_ppe_cah_bind_one(ppe, hash, wp, dp);
++		break;
++	case 3:
++		en75_ppe_cache_clean_all(ppe);
++		en75_ppe_cah_bind_one(ppe, hash, wp, dp);
++		break;
++	default:
++		en75_ppe_cah_clear_one(ppe, hash);
++		break;
++	}
++}
++
++/* build #47 (Codex gpt-5.5 xhigh): the CAH has 1024 lines when TB_CFG bit16 is set
++ * (our 0x14fbb has it) -- not 16. Dump ALL 1024 lines with their meta (entry#+state)
++ * + tuple words so we can find which line/entry# the engine ACTUALLY caches our flow
++ * at (match by L4 ports), vs the descriptor-reported slot. meta=word0x1f: [17:16]=
++ * state(1=valid,2=dirty,3=lock), [13:0]=entry#. words 0..4 = ib1/sip/dip/ports/ib2. */
++void en75_ppe_cah_scan(struct en75_ppe *ppe)
++{
++	u32 gate = readl(ppe->base + EN75_PPE_CAH_GATE);
++	int line, found = 0;
++
++	if (!(gate & BIT(0)))				/* need cache enabled for sw access */
++		writel(0x33, ppe->base + EN75_PPE_CAH_GATE);
++	writel(readl(ppe->base + EN75_PPE_CAH_GATE) & ~BIT(0),
++	       ppe->base + EN75_PPE_CAH_GATE);		/* gate down (sw access) */
++	pr_info("XR500v CAH scan (1024 lines, valid only):\n");
++	for (line = 0; line < 1024; line++) {
++		u32 w[5], meta;
++		int i;
++
++		writel((line & 0x7fff) | (0x1fu << 16),
++		       ppe->base + EN75_PPE_CAH_LINE_RW);
++		meta = en75_cah_cmd(ppe, 2) ? readl(ppe->base + EN75_PPE_CAH_RDATA) : 0;
++		if (!(meta & 0x30000))			/* state==invalid -> skip */
++			continue;
++		for (i = 0; i < 5; i++) {
++			writel((line & 0x7fff) | ((u32)i << 16),
++			       ppe->base + EN75_PPE_CAH_LINE_RW);
++			w[i] = en75_cah_cmd(ppe, 2) ?
++			       readl(ppe->base + EN75_PPE_CAH_RDATA) : 0;
++		}
++		if (++found <= 90)
++			pr_info("  cah[%d] entry=%u st=%u ib1=%08x sip=%08x dip=%08x ports=%08x ib2=%08x\n",
++				line, meta & 0x3fff, (meta >> 16) & 3,
++				w[0], w[1], w[2], w[3], w[4]);
++	}
++	writel(gate | BIT(0), ppe->base + EN75_PPE_CAH_GATE);	/* gate up (cache on) */
++	pr_info("XR500v CAH scan: %d valid lines\n", found);
++}
 +
 +/* --- entry builders (V1) --- */
 +
@@ -303,9 +663,12 @@
 +	      MTK_FOE_IB1_BIND_CACHE | MTK_FOE_IB1_BIND_TTL;
 +	entry->ib1 = val;
 +
++	/* OEM PpeSetForcePortInfo/PpeUpdateDp always write PORT_MG=PORT_AG=0x3f (the
++	 * 6-bit "no meter/account group" sentinel). We were writing MG=0 (= real
++	 * meter group 0, which can rate-limit/divert-to-CPU) and AG=0x1f. */
 +	val = FIELD_PREP(MTK_FOE_IB2_DEST_PORT, pse_port) |
-+	      FIELD_PREP(MTK_FOE_IB2_PORT_MG, 0) |
-+	      FIELD_PREP(MTK_FOE_IB2_PORT_AG, 0x1f);
++	      FIELD_PREP(MTK_FOE_IB2_PORT_MG, 0x3f) |
++	      FIELD_PREP(MTK_FOE_IB2_PORT_AG, 0x3f);
 +
 +	if (is_multicast_ether_addr(dest_mac))
 +		val |= MTK_FOE_IB2_MULTICAST;
@@ -355,7 +718,22 @@
 +	u32 *ib2 = &entry->ipv4.ib2;
 +
 +	*ib2 &= ~MTK_FOE_IB2_DEST_PORT;
-+	*ib2 |= FIELD_PREP(MTK_FOE_IB2_DEST_PORT, port);
++	*ib2 |= FIELD_PREP(MTK_FOE_IB2_DEST_PORT, port) | MTK_FOE_IB2_PSE_QOS;
++}
++
++static void en75_foe_entry_set_oem_bind_meta(struct mtk_foe_entry *entry)
++{
++	u8 port = FIELD_GET(MTK_FOE_IB2_DEST_PORT, entry->ipv4.ib2);
++
++	entry->ib1 &= ~MTK_FOE_IB1_BIND_VLAN_LAYER;
++	entry->ib1 |= FIELD_PREP(MTK_FOE_IB1_BIND_VLAN_LAYER, 1);
++
++	/* OEM hwnat_set_rule_according_to_state writes byte 0x28 and halfword 0x2c
++	 * for IPv4 HNAPT bind entries before setting ib1.vlan_layer=1. */
++	entry->ipv4.udf_tsid &= ~0xff;
++	entry->ipv4.udf_tsid |= port + 6;
++	entry->ipv4.l2.vlan1 = 0x8000 | port;
++	entry->ipv4.ib2 |= MTK_FOE_IB2_PSE_QOS;
 +}
 +
 +u32 en75_ppe_hash_entry(struct mtk_foe_entry *e)
@@ -391,10 +769,26 @@
 +	struct mtk_foe_entry *hwe =
 +		(struct mtk_foe_entry *)((u8 *)ppe->foe_virt + hash * EN75_FOE_ENTRY_SIZE);
 +	u16 timestamp = en75_eth_timestamp(ppe);
-+	u32 cc;
 +
 +	entry->ib1 &= ~MTK_FOE_IB1_BIND_TIMESTAMP;
 +	entry->ib1 |= FIELD_PREP(MTK_FOE_IB1_BIND_TIMESTAMP, timestamp);
++	if (!READ_ONCE(en75_ppe_prebind))
++		en75_foe_entry_set_oem_bind_meta(entry);
++	/* build #46: OEM PpeSetEntryBind sets bfib1.cah=1 + ttl=DFL_FOE_TTL_REGEN on
++	 * every bind; without cah the engine won't cache/forward the bound entry. */
++	entry->ib1 |= MTK_FOE_IB1_BIND_CACHE | MTK_FOE_IB1_BIND_TTL;
++
++	/* build #61: OEM PREBIND model -- commit the COMPLETE entry but as UNBIND + preb=1
++	 * (bit24, == the BIND_TTL bit we just set), NOT state=BIND. On this chip the HW owns
++	 * the state field of dynamic entries and ignores a SW-forced BIND; preb is a request
++	 * and the HW state-machine does the UNBIND->BIND transition itself, confirming via
++	 * crsn=HIT_PRE_BIND(0x1a) where en75_ppe_prebind_promote() finalizes it. Matches the
++	 * OEM PpeSetEntryBind (CONFIG_RA_HW_NAT_PREBIND: sets udib1.preb=1, never state=BIND). */
++	if (READ_ONCE(en75_ppe_prebind)) {
++		entry->ib1 &= ~MTK_FOE_IB1_STATE;
++		entry->ib1 |= FIELD_PREP(MTK_FOE_IB1_STATE, MTK_FOE_STATE_UNBIND) |
++			      MTK_FOE_IB1_UNBIND_PREBIND;
++	}
 +
 +	/* data first, then ib1 LAST so HW never sees STATE=BIND with a half-
 +	 * written tuple (the table is dma_alloc_coherent -> dma_wmb suffices). */
@@ -403,11 +797,18 @@
 +	hwe->ib1 = entry->ib1;
 +	dma_wmb();
 +
-+	/* flush the PPE lookup cache so the engine re-reads the table for this
-+	 * slot (mainline mtk_ppe_cache_clear: set then clear CACHE_CTL.CLEAR). */
-+	cc = readl(ppe->base + EN75_PPE_CACHE_CTL);
-+	writel(cc | EN75_PPE_CACHE_CTL_CLEAR, ppe->base + EN75_PPE_CACHE_CTL);
-+	writel(cc & ~EN75_PPE_CACHE_CTL_CLEAR, ppe->base + EN75_PPE_CACHE_CTL);
++	/* EN751221 CAH flush (NOT the MT7620 bit9 pulse, which does nothing here)
++	 * so the engine re-reads DRAM for this slot and serves our BIND instead of
++	 * its cached UNBIND -- the fix for the crsn=HIT_UNBIND coherency wall. */
++	/* build #40 (OEM ppeCacheClearOne@0x105a0 disasm): the OEM does NOT bind-flip
++	 * the cache -- it INVALIDATES the stale cached UNBIND (clears the cache-line
++	 * state meta[17:16]) so the engine cache-misses and RE-READS DRAM, where our
++	 * committed BIND now sits. cah_clear_one is an exact port (no bogus tag verify).
++	 * Build #36 tried this with the SWAB tuple in DRAM (mismatch); now the DRAM BIND
++	 * holds the CORRECT network-order tuple (rank-1), so re-read -> match -> HIT. */
++	/* build #46: publish via ppe_cache_mode (default 1 = OEM global clean-all). */
++	en75_ppe_cache_publish(ppe, hash,
++			       FIELD_GET(MTK_FOE_IB2_DEST_PORT, entry->ipv4.ib2));
 +}
 +
 +/* --- P4 self-test: hand-build one IPv4 HNAPT entry, commit it, return the
@@ -459,8 +860,274 @@
 +
 +bool en75_ppe_offload_enabled;	/* RX hook is inert until a test/offload arms it */
 +bool en75_ppe_rxdump;		/* diagnostic: dump crsn/ppe_entry on RX */
++bool en75_ppe_atomic;		/* build #41: one-shot atomic cache+DRAM dump from RX hook */
 +bool en75_ppe_foedump;		/* diagnostic: dump the engine-built FoE entry */
 +u32  en75_force_hash = 0xffffffff;  /* committest: if != ~0, commit at this slot (engine hash) */
++
++/* build #42 TX-hook (OEM FoeBindToPpe model): RX arms the slot, TX fills the
++ * COMPLETE entry from the egress packet and commits. See econet_ppe.h. */
++bool en75_ppe_tx_hook;		/* master enable */
++bool en75_tx_bind_arm;		/* set by RX hook, cleared by TX hook after commit */
++u32  en75_tx_match_dip;		/* network-order inner IPv4 dst that flags the test egress frame */
++u8   en75_ppe_tuple_swab;	/* build #44: 1 = store orig tuple swab32 (engine LOOKUP encoding) */
++bool en75_ppe_preserve_key = true;	/* build #48: keep the engine's UNBIND key, only add rewrite */
++bool en75_ppe_mirror_lookup;		/* build #56: also write BIND at the RX-descriptor lookup slot */
++bool en75_ppe_use_rxslot = true;	/* build #57: commit at the RX-recorded descriptor (lookup) slot */
++bool en75_ppe_port_mg0;			/* build #59: ib2 PORT_MG/AG=0 (vs OEM 0x3f) A/B */
++bool en75_ppe_cah_bind = true;		/* build #60: in-cache BIND (flip the CAH line) */
++bool en75_ppe_prebind = true;		/* build #61: OEM PREBIND handshake (preb=1, NOT state=BIND) */
++bool en75_ppe_oemregs;			/* build #61: OEM reg-config toggle (default OFF; PPE-block
++					 * GLO_CFG=0x763 has bit6 which HUNG the device in cont15 --
++					 * placeholder param, NOT wired this build; prebind is the lever) */
++
++/* build #57: per-flow RX->TX carry of the engine's LOOKUP slot (the RX-descriptor
++ * FOE_ENTRY_NUM). The RX hook records (pre-NAT tuple -> descriptor slot) for our
++ * test flow; the TX hook (post-NAT) looks it up by the NAT-invariant dst + dport
++ * and binds at THAT slot, where the engine actually looks up (foedump proved the
++ * tuple-scan write-slot is NOT the lookup slot). Ring is small + best-effort. */
++struct en75_rx_slot { u32 sip, dip; u16 sport, dport, slot; u8 valid; };
++static struct en75_rx_slot en75_rx_ring[32];
++static u8 en75_rx_ring_idx;
++
++void en75_ppe_rx_record(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash)
++{
++	const u8 *d = skb->data, *iph, *l4;
++	unsigned int len = skb->len;
++	int eo = 0;
++	u8 ihl, proto, i;
++
++	if (!READ_ONCE(en75_ppe_tx_hook) || hash >= EN75_PPE_ENTRIES || len < 40)
++		return;
++	/* locate the IPv4 ethertype past the optional 4-byte MTK special tag / VLAN */
++	if (get_unaligned_be16(d + 12) == ETH_P_IP)
++		eo = 14;
++	else if (get_unaligned_be16(d + 16) == ETH_P_IP)
++		eo = 18;					/* 4-byte special tag at d[12] */
++	else if (get_unaligned_be16(d + 12) == ETH_P_8021Q &&
++		 get_unaligned_be16(d + 16) == ETH_P_IP)
++		eo = 18;
++	else
++		return;
++	iph = d + eo;
++	if ((iph[0] >> 4) != 4)
++		return;
++	proto = iph[9];
++	if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
++		return;
++	if (get_unaligned_be32(iph + 16) != en75_tx_match_dip)	/* only our test flow */
++		return;
++	ihl = (iph[0] & 0x0f) * 4;
++	l4 = iph + ihl;
++	i = en75_rx_ring_idx++ & 31;
++	en75_rx_ring[i].sip   = get_unaligned_be32(iph + 12);
++	en75_rx_ring[i].dip   = get_unaligned_be32(iph + 16);
++	en75_rx_ring[i].sport = get_unaligned_be16(l4);
++	en75_rx_ring[i].dport = get_unaligned_be16(l4 + 2);
++	en75_rx_ring[i].slot  = hash;
++	en75_rx_ring[i].valid = 1;
++	pr_info_ratelimited("XR500v RX-rec(#57) slot=%u eo=%d %08x:%u -> %08x:%u\n",
++		hash, eo, en75_rx_ring[i].sip, en75_rx_ring[i].sport,
++		en75_rx_ring[i].dip, en75_rx_ring[i].dport);
++}
++
++/* find the RX-record (ring index) for an egress flow, matched by the NAT-invariant
++ * dst+dport; prefer the entry whose sport matches (NAT preserved it). Returns the
++ * ring index (caller reads .slot/.sip/.sport) or -1. */
++static int en75_ppe_rxslot_lookup(u32 ndip, u16 nsport, u16 ndport)
++{
++	int i, idx = -1;
++
++	for (i = 0; i < 32; i++) {
++		if (!en75_rx_ring[i].valid || en75_rx_ring[i].dip != ndip ||
++		    en75_rx_ring[i].dport != ndport)
++			continue;
++		idx = i;
++		if (en75_rx_ring[i].sport == nsport)
++			break;				/* exact (sport preserved) */
++	}
++	return idx;
++}
++static u16 en75_tx_bind_slot;	/* the engine-reported FoE slot to bind (from RX) */
++
++/* build #43: FLIP-IN-PLACE (OEM model) -- patch the engine-built entry, not from-scratch */
++bool en75_ppe_flip;		/* master enable for the flip-in-place RX hook */
++u8   en75_flip_dp = 1;		/* ib2.dp egress port: 1=GSW(LAN switch), 2=GMAC(WAN) */
++/* build #68: act only when the engine ASKS for the bind (crsn=0x0f RATE_REACHED),
++ * like the OEM PpeRxHandler. Binding mid-build (crsn=0x0e) loses the race: the
++ * engine re-FORWARD_BUILDs over our BIND (~100ms fight, ppeV5/V6 2026-06-10). */
++bool en75_ppe_bind_on_rate;
++
++#define EN75_PPE_DIAG_CRSN_BUCKETS	32
++
++struct en75_ppe_diag_counters {
++	atomic_t pre_total;
++	atomic_t post_total;
++	atomic_t rate_limited;
++	atomic_t invalid_hash;
++	atomic_t gate_pass;
++	atomic_t gate_skip;
++	atomic_t prebind_promote;
++	atomic_t prebind_arm;
++	atomic_t flip;
++	atomic_t rx_commit;
++	atomic_t nobind;
++	atomic_t tx_arm;
++	atomic_t first_slot;
++	atomic_t last_slot;
++	atomic_t slot_changes;
++	atomic_t pre_hist[EN75_PPE_DIAG_CRSN_BUCKETS];
++	atomic_t post_hist[EN75_PPE_DIAG_CRSN_BUCKETS];
++	atomic_t limited_hist[EN75_PPE_DIAG_CRSN_BUCKETS];
++	atomic_t gate_skip_hist[EN75_PPE_DIAG_CRSN_BUCKETS];
++};
++
++static struct en75_ppe_diag_counters en75_ppe_diag = {
++	.first_slot = ATOMIC_INIT(-1),
++	.last_slot = ATOMIC_INIT(-1),
++};
++
++static void en75_ppe_diag_hist_inc(atomic_t *hist, u8 crsn)
++{
++	if (crsn < EN75_PPE_DIAG_CRSN_BUCKETS)
++		atomic_inc(&hist[crsn]);
++}
++
++static void en75_ppe_diag_note_slot(u16 hash)
++{
++	int old;
++
++	atomic_cmpxchg(&en75_ppe_diag.first_slot, -1, hash);
++	old = atomic_xchg(&en75_ppe_diag.last_slot, hash);
++	if (old >= 0 && old != hash)
++		atomic_inc(&en75_ppe_diag.slot_changes);
++}
++
++void en75_ppe_diag_sample(u16 hash, u8 crsn)
++{
++	atomic_inc(&en75_ppe_diag.pre_total);
++	en75_ppe_diag_hist_inc(en75_ppe_diag.pre_hist, crsn);
++	en75_ppe_diag_note_slot(hash);
++}
++
++void en75_ppe_diag_invalid(u16 hash, u8 crsn)
++{
++	atomic_inc(&en75_ppe_diag.invalid_hash);
++	en75_ppe_diag_note_slot(hash);
++}
++
++void en75_ppe_diag_rate_limited(u16 hash, u8 crsn)
++{
++	atomic_inc(&en75_ppe_diag.rate_limited);
++	en75_ppe_diag_hist_inc(en75_ppe_diag.limited_hist, crsn);
++	en75_ppe_diag_note_slot(hash);
++}
++
++void en75_ppe_diag_after_rate(u16 hash, u8 crsn)
++{
++	atomic_inc(&en75_ppe_diag.post_total);
++	en75_ppe_diag_hist_inc(en75_ppe_diag.post_hist, crsn);
++	en75_ppe_diag_note_slot(hash);
++}
++
++void en75_ppe_diag_gate_skip(u8 crsn)
++{
++	atomic_inc(&en75_ppe_diag.gate_skip);
++	en75_ppe_diag_hist_inc(en75_ppe_diag.gate_skip_hist, crsn);
++}
++
++void en75_ppe_diag_event(enum en75_ppe_diag_event event)
++{
++	switch (event) {
++	case EN75_PPE_DIAG_GATE_PASS:
++		atomic_inc(&en75_ppe_diag.gate_pass);
++		break;
++	case EN75_PPE_DIAG_PREBIND_PROMOTE:
++		atomic_inc(&en75_ppe_diag.prebind_promote);
++		break;
++	case EN75_PPE_DIAG_PREBIND_ARM:
++		atomic_inc(&en75_ppe_diag.prebind_arm);
++		break;
++	case EN75_PPE_DIAG_FLIP:
++		atomic_inc(&en75_ppe_diag.flip);
++		break;
++	case EN75_PPE_DIAG_RX_COMMIT:
++		atomic_inc(&en75_ppe_diag.rx_commit);
++		break;
++	case EN75_PPE_DIAG_NOBIND:
++		atomic_inc(&en75_ppe_diag.nobind);
++		break;
++	case EN75_PPE_DIAG_TX_ARM:
++		atomic_inc(&en75_ppe_diag.tx_arm);
++		break;
++	}
++}
++
++static void en75_ppe_diag_print_hist(const char *name, atomic_t *hist)
++{
++	int i, v, any = 0;
++
++	for (i = 0; i < EN75_PPE_DIAG_CRSN_BUCKETS; i++) {
++		v = atomic_read(&hist[i]);
++		if (!v)
++			continue;
++		any = 1;
++		pr_info("XR500v PPE diag %s[%02x]=%d\n", name, i, v);
++	}
++	if (!any)
++		pr_info("XR500v PPE diag %s: empty\n", name);
++}
++
++void en75_ppe_diag_dump(void)
++{
++	pr_info("XR500v PPE diag: pre=%d post=%d ratelimited=%d invalid=%d gate_pass=%d gate_skip=%d promote=%d arm=%d flip=%d rx_commit=%d tx_arm=%d nobind=%d first_slot=%d last_slot=%d slot_changes=%d\n",
++		atomic_read(&en75_ppe_diag.pre_total),
++		atomic_read(&en75_ppe_diag.post_total),
++		atomic_read(&en75_ppe_diag.rate_limited),
++		atomic_read(&en75_ppe_diag.invalid_hash),
++		atomic_read(&en75_ppe_diag.gate_pass),
++		atomic_read(&en75_ppe_diag.gate_skip),
++		atomic_read(&en75_ppe_diag.prebind_promote),
++		atomic_read(&en75_ppe_diag.prebind_arm),
++		atomic_read(&en75_ppe_diag.flip),
++		atomic_read(&en75_ppe_diag.rx_commit),
++		atomic_read(&en75_ppe_diag.tx_arm),
++		atomic_read(&en75_ppe_diag.nobind),
++		atomic_read(&en75_ppe_diag.first_slot),
++		atomic_read(&en75_ppe_diag.last_slot),
++		atomic_read(&en75_ppe_diag.slot_changes));
++	en75_ppe_diag_print_hist("pre", en75_ppe_diag.pre_hist);
++	en75_ppe_diag_print_hist("post", en75_ppe_diag.post_hist);
++	en75_ppe_diag_print_hist("limited", en75_ppe_diag.limited_hist);
++	en75_ppe_diag_print_hist("gate_skip", en75_ppe_diag.gate_skip_hist);
++}
++
++void en75_ppe_diag_reset(void)
++{
++	int i;
++
++	atomic_set(&en75_ppe_diag.pre_total, 0);
++	atomic_set(&en75_ppe_diag.post_total, 0);
++	atomic_set(&en75_ppe_diag.rate_limited, 0);
++	atomic_set(&en75_ppe_diag.invalid_hash, 0);
++	atomic_set(&en75_ppe_diag.gate_pass, 0);
++	atomic_set(&en75_ppe_diag.gate_skip, 0);
++	atomic_set(&en75_ppe_diag.prebind_promote, 0);
++	atomic_set(&en75_ppe_diag.prebind_arm, 0);
++	atomic_set(&en75_ppe_diag.flip, 0);
++	atomic_set(&en75_ppe_diag.rx_commit, 0);
++	atomic_set(&en75_ppe_diag.nobind, 0);
++	atomic_set(&en75_ppe_diag.tx_arm, 0);
++	atomic_set(&en75_ppe_diag.first_slot, -1);
++	atomic_set(&en75_ppe_diag.last_slot, -1);
++	atomic_set(&en75_ppe_diag.slot_changes, 0);
++	for (i = 0; i < EN75_PPE_DIAG_CRSN_BUCKETS; i++) {
++		atomic_set(&en75_ppe_diag.pre_hist[i], 0);
++		atomic_set(&en75_ppe_diag.post_hist[i], 0);
++		atomic_set(&en75_ppe_diag.limited_hist[i], 0);
++		atomic_set(&en75_ppe_diag.gate_skip_hist[i], 0);
++	}
++	pr_info("XR500v PPE diag: reset\n");
++}
 +
 +/* dump the raw words of the engine-built (unbind) FoE entry at 'hash' so we can
 + * reverse the engine's exact tuple byte-layout. w0=ib1, then orig tuple, ib2... */
@@ -471,6 +1138,197 @@
 +	pr_info_ratelimited("XR500v FoE[%u]: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
 +			    hash, w[0], w[1], w[2], w[3], w[4],
 +			    w[5], w[6], w[7], w[8], w[9]);
++}
++
++/* poll the CAH sw-access request bit clear (RA_HWNAT is_request_done, 1ms*1000) */
++static bool en75_cah_wait(struct en75_ppe *ppe)
++{
++	int n = 1000;
++
++	while (n--) {
++		if (!(readl(ppe->base + EN75_PPE_CACHE_CTL) & EN75_PPE_CAH_REQ))
++			return true;
++		udelay(1000);
++	}
++	return false;
++}
++
++/* port of RA_HWNAT FoeDumpCacheEntry (foe_fdb.c:143): read each of the 16 CAH
++ * cache lines' resident entry-number + state. THE diagnostic for our central
++ * blocker -- on the EN751221 the engine FORWARD_BUILDs unbind entries into this
++ * cache, NOT the DRAM table (which is why TB_USED stays 0 and en75_ppe_dump_slot
++ * reads zeros). A 'valid'/'dirty' line here with the test flow's slot proves it. */
++void en75_ppe_dump_cache(struct en75_ppe *ppe)
++{
++	u32 gate = readl(ppe->base + EN75_PPE_CAH_GATE);
++	u32 ctrl;
++	int line;
++
++	/* build #39: the REAL cache enable is CAH_GATE (0x334) bit0, NOT CACHE_CTL
++	 * 0x320 -- the old check read 0x320 (which sits at 0x4000 after a clean-all)
++	 * and always bailed "DISABLED" so we never saw the cache lines. */
++	if (!(gate & BIT(0))) {
++		pr_info("XR500v PPE cache: DISABLED (CAH_GATE=%08x)\n", gate);
++		return;
++	}
++	pr_info("XR500v PPE cache dump (CAH_GATE=%08x):\n", gate);
++	/* RA_HWNAT FoeDumpCacheEntry disables the cache before the sw-access read
++	 * loop so the engine isn't racing us. Restore at the end. */
++	writel(gate & ~BIT(0), ppe->base + EN75_PPE_CAH_GATE);
++	for (line = 0; line < EN75_PPE_CAH_LINES; line++) {
++		u32 rd, tag, state;
++
++		/* line number [14:0] + OFFSET_RW=0x1f [23:16] (== get entry number) */
++		writel((line & 0x7fff) |
++		       (EN75_PPE_CAH_OFFRW_ENTRYNUM << 16),
++		       ppe->base + EN75_PPE_CAH_LINE_RW);
++		/* sw-access cmd = read (2) at CAH_CTRL[13:12] */
++		ctrl = readl(ppe->base + EN75_PPE_CACHE_CTL);
++		ctrl &= ~(0x3u << EN75_PPE_CAH_CMD_SHIFT);
++		ctrl |= 0x2u << EN75_PPE_CAH_CMD_SHIFT;
++		writel(ctrl, ppe->base + EN75_PPE_CACHE_CTL);
++		/* trigger the request */
++		writel(ctrl | EN75_PPE_CAH_REQ, ppe->base + EN75_PPE_CACHE_CTL);
++		if (!en75_cah_wait(ppe)) {
++			pr_info("  line %2d: timeout\n", line);
++			continue;
++		}
++		rd = readl(ppe->base + EN75_PPE_CAH_RDATA);
++		tag = rd & 0xffff;
++		state = (rd >> 16) & 0x3;
++		pr_info("  line %2d: state=%-7s entry=%u (rdata=%08x)\n", line,
++			state == 3 ? "lock" : state == 2 ? "dirty" :
++			state == 1 ? "valid" : "invalid", tag, rd);
++		/* foe_fdb.c: for a resident line, read the first 16 words of the
++		 * cached FoE entry (OFFSET_RW=0..15) -> the engine's OWN parse:
++		 * w0=ib1, w1=sip, w2=dip, w3=ports, w4=ib2. THE answer to whether the
++		 * routed flow's engine-parsed tuple == our committed swab tuple. */
++		if (state) {
++			int w;
++
++			for (w = 0; w < 16; w++) {
++				u32 dc;
++
++				writel((line & 0x7fff) | ((u32)w << 16),
++				       ppe->base + EN75_PPE_CAH_LINE_RW);
++				dc = readl(ppe->base + EN75_PPE_CACHE_CTL);
++				dc &= ~(0x3u << EN75_PPE_CAH_CMD_SHIFT);
++				dc |= 0x2u << EN75_PPE_CAH_CMD_SHIFT;
++				writel(dc, ppe->base + EN75_PPE_CACHE_CTL);
++				writel(dc | EN75_PPE_CAH_REQ, ppe->base + EN75_PPE_CACHE_CTL);
++				if (en75_cah_wait(ppe))
++					pr_info("      w%02d=%08x\n", w,
++						readl(ppe->base + EN75_PPE_CAH_RDATA));
++			}
++		}
++	}
++	writel(gate, ppe->base + EN75_PPE_CAH_GATE);	/* restore cache enable */
++}
++
++/* enable/disable + flush the PPE lookup cache (RA_HWNAT PpeSetCacheEbl). With
++ * the cache OFF the engine works straight on the DRAM FoE table, so unbind
++ * entries become visible to en75_ppe_dump_slot and the mainline tuple-match in
++ * __en75_ppe_check_skb -- the decisive A/B for the cache hypothesis. */
++/* EN751221: operate the REAL cache enable/config register (0x334), NOT 0x320.
++ * ON = full-word 0x33 (OEM PpeSetCacheEbl); OFF = clear bit0. The old 0x320
++ * version was a NO-OP, so every prior cache A/B test was invalid. */
++void en75_ppe_cache_set(struct en75_ppe *ppe, bool on)
++{
++	if (on)
++		writel(0x33, ppe->base + EN75_PPE_CAH_GATE);
++	else
++		writel(readl(ppe->base + EN75_PPE_CAH_GATE) & ~BIT(0),
++		       ppe->base + EN75_PPE_CAH_GATE);
++	pr_info("XR500v PPE cache %s: 0x334=%08x\n", on ? "ON" : "OFF",
++		readl(ppe->base + EN75_PPE_CAH_GATE));
++}
++
++/* scan the whole 16384-slot DRAM FoE table and log every non-zero entry (slot +
++ * ib1 + orig tuple). Diagnostic for the descriptor-slot vs table-slot mismatch:
++ * run it after a flow to find which slot the engine ACTUALLY put our tuple in
++ * (match by ports), vs the slot the RX descriptor reported. One-shot, ~ms. */
++void en75_ppe_scan_table(struct en75_ppe *ppe)
++{
++	int i, found = 0;
++
++	pr_info("XR500v PPE table scan (non-zero entries, max 256):\n");
++	for (i = 0; i < EN75_PPE_ENTRIES; i++) {
++		struct mtk_foe_entry *e =
++			(struct mtk_foe_entry *)((u8 *)ppe->foe_virt + (u32)i * EN75_FOE_ENTRY_SIZE);
++
++		if (!e->ib1)
++			continue;
++		if (++found <= 256)
++			pr_info("  [%u] ib1=%08x state=%lu sip=%08x dip=%08x ports=%08x ib2=%08x\n",
++				i, e->ib1, FIELD_GET(MTK_FOE_IB1_STATE, e->ib1),
++				e->ipv4.orig.src_ip, e->ipv4.orig.dest_ip,
++				e->ipv4.orig.ports, e->ipv4.ib2);
++	}
++	pr_info("XR500v PPE table scan: %d non-zero entries total\n", found);
++}
++
++/* THE fill+flip bind (RA_HWNAT model, #25): the engine already FORWARD_BUILT an
++ * UNBIND entry for our flow at ITS OWN hash slot (NOT the descriptor's ppe_entry,
++ * which we proved is unrelated). Find that entry by matching the L4 PORTS (which
++ * the engine stores correctly, unlike the IPs whose encoding we couldn't crack),
++ * then bind IN PLACE: keep the engine's tuple untouched, just set egress dest_port
++ * (pse) + flip STATE to BIND + cache-clear. The engine matches incoming packets
++ * against its OWN stored tuple, so the IP-encoding mismatch becomes irrelevant. */
++int en75_ppe_bind_by_scan(struct en75_ppe *ppe)
++{
++	struct en75_flow_entry *e;
++	struct hlist_node *n;
++	int b, i, bound = 0, scanned = 0;
++	u32 cc;
++
++	spin_lock_bh(&ppe->lock);
++	for (b = 0; b < EN75_PPE_NUM_FLOWS; b++) {
++		hlist_for_each_entry_safe(e, n, &ppe->foe_flow[b], list) {
++			u32 want_ports = e->data.ipv4.orig.ports;
++			u8 pse = FIELD_GET(MTK_FOE_IB2_DEST_PORT, e->data.ipv4.ib2);
++
++			scanned++;
++			for (i = 0; i < EN75_PPE_ENTRIES; i++) {
++				struct mtk_foe_entry *hwe =
++					(struct mtk_foe_entry *)((u8 *)ppe->foe_virt +
++						(u32)i * EN75_FOE_ENTRY_SIZE);
++
++				u32 cur_state, cur_dp;
++
++				if (!hwe->ib1 || hwe->ipv4.orig.ports != want_ports)
++					continue;
++				cur_state = FIELD_GET(MTK_FOE_IB1_STATE, hwe->ib1);
++				cur_dp = FIELD_GET(MTK_FOE_IB2_DEST_PORT, hwe->ipv4.ib2);
++				/* #27: the EN751221 engine FORWARD_BUILDs its UNBIND entry as
++				 * state=2 + DEST_PORT=7 (its unbind->CPU format), so the old
++				 * "skip if state==BIND" never flipped it. Flip IN PLACE: change
++				 * DEST_PORT to our pse (forward) + (re)assert BIND + ttl/cah,
++				 * KEEP the engine's tuple. Skip only once we've already set it. */
++				if (cur_dp == pse && cur_state == MTK_FOE_STATE_BIND)
++					continue;	/* already flipped by us */
++				pr_info("XR500v PPE bind_by_scan: ports=%08x @slot %d FOUND cur_state=%u cur_dp=%u ib1=%08x ib2=%08x -> flip dp=%u\n",
++					want_ports, i, cur_state, cur_dp, hwe->ib1, hwe->ipv4.ib2, pse);
++
++				hwe->ipv4.ib2 &= ~MTK_FOE_IB2_DEST_PORT;
++				hwe->ipv4.ib2 |= FIELD_PREP(MTK_FOE_IB2_DEST_PORT, pse);
++				hwe->ib1 |= MTK_FOE_IB1_BIND_CACHE | MTK_FOE_IB1_BIND_TTL;
++				hwe->ib1 &= ~MTK_FOE_IB1_STATE;
++				hwe->ib1 |= FIELD_PREP(MTK_FOE_IB1_STATE, MTK_FOE_STATE_BIND);
++				dma_wmb();
++				cc = readl(ppe->base + EN75_PPE_CACHE_CTL);
++				writel(cc | EN75_PPE_CACHE_CTL_CLEAR, ppe->base + EN75_PPE_CACHE_CTL);
++				writel(cc & ~EN75_PPE_CACHE_CTL_CLEAR, ppe->base + EN75_PPE_CACHE_CTL);
++				e->hash = i;
++				bound++;
++				pr_info("XR500v PPE bind_by_scan: flow ports=%08x -> engine slot %d FLIPPED state=BIND dp=%u ib1=%08x ib2=%08x\n",
++					want_ports, i, pse, hwe->ib1, hwe->ipv4.ib2);
++				break;
++			}
++		}
++	}
++	spin_unlock_bh(&ppe->lock);
++	pr_info("XR500v PPE bind_by_scan: %d flows scanned, %d bound\n", scanned, bound);
++	return bound;
 +}
 +
 +/* write CDMA1_VLAN_CTRL (fe_base+0x400). 0x81000001 = OEM value that pops the
@@ -509,6 +1367,11 @@
 +	ppe->dev = dev;
 +	ppe->base = base;
 +	ppe->fe_base = fe_base;
++	/* build #47 (Codex): HASH_SEED (ppe+0x244) must be set before the engine runs;
++	 * our phase-1a init left it at reset (0). OEM writes 0x12345678. phase-1a's
++	 * TB_CFG write does NOT touch 0x244, so setting it here (probe, pre-enable)
++	 * survives. HASH_MODE (TB_CFG bits[15:14]) was bumped 1->3 in patch 350. */
++	writel(0x12345678u, base + 0x244);
 +	ppe->foe_virt = foe_virt;
 +	ppe->foe_phys = foe_phys;
 +	ppe->conduit = conduit;
@@ -544,6 +1407,9 @@
 +
 +	*ib2 &= ~MTK_FOE_IB2_QID;
 +	*ib2 |= FIELD_PREP(MTK_FOE_IB2_QID, queue);
++	/* build #62: OEM ib2 -- switch-egress (dp=1, GSW) uses PSE_QOS=0 (0x..020);
++	 * only QDMA/GPON upstream (dp=6) uses PSE_QOS=1 (0x..0d0). We were always
++	 * forcing PSE_QOS=1 (-> 0x..030), wrong for our nested-DSA switch egress. */
 +	*ib2 |= MTK_FOE_IB2_PSE_QOS;
 +}
 +
@@ -585,7 +1451,7 @@
 +/* --- foe_flow registration + RX bind (mainline mtk_ppe.c core, V1/IPv4) --- */
 +
 +/* match the orig 5-tuple (12B after ib1) + the UDP bit */
-+static bool en75_flow_entry_match(struct en75_flow_entry *e, struct mtk_foe_entry *hwe)
++static bool __maybe_unused en75_flow_entry_match(struct en75_flow_entry *e, struct mtk_foe_entry *hwe)
 +{
 +	if ((hwe->ib1 ^ e->data.ib1) & MTK_FOE_IB1_UDP)
 +		return false;
@@ -633,55 +1499,502 @@
 +	spin_unlock_bh(&ppe->lock);
 +}
 +
-+/* RX path: a steered-but-unbound flow missed; if the engine FORWARD_BUILD'd a
-+ * parsed unbind entry at 'hash', match it to a registered flow and bind it. */
-+void __en75_ppe_check_skb(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash)
++/* RX path: a steered-but-unbound flow missed and the engine reported its own
++ * FoE slot in 'hash'. Bind a registered flow there. TWO match strategies:
++ *
++ *  (1) mainline fast-path: if the engine wrote a DRAM-visible UNBIND entry at
++ *      'hash', tuple-match it (en75_flow_entry_match) and bind the matching
++ *      flow. This is what mtk_ppe does.
++ *
++ *  (2) EN751221 fall-back: the engine FORWARD_BUILDs unbind entries into its
++ *      CAH *cache*, NOT the DRAM table (TB_USED stays 0, the slot reads zeros),
++ *      so (1) finds nothing to match. When exactly ONE flow is registered and
++ *      still unbound, it IS this flow -> bind it at the engine's reported slot.
++ *      en75_foe_entry_commit() writes DRAM + pulses CACHE_CTL.CLEAR, so the
++ *      engine drops its cached unbind entry and re-reads our BIND entry.
++ *      (Multi-flow disambiguation will need the CAH read or an skb parse; this
++ *      single-flow path is the first-light proof that binding HITs at all.) */
++/* P5 RX-bind: pse the bound flow forwards to. 1 = GDM1 (CPU, HIT observable via
++ * crsn>=16); 7 = DISCARD oracle (flow stops). Tunable live via ppe_rx_bind_pse. */
++static u8 en75_rx_bind_pse = 1;
++
++/* build #41: ATOMIC dump (ChatGPT "Test C") -- fired from the RX hook on a crsn frame so
++ * we catch the cache AT the crsn=15 instant (no userspace race that evicts our flow).
++ * Reads DRAM[the engine-reported slot] + the 16 CAH lines' DATA words (w0=ib1,w1=sip,
++ * w2=dip,w3=ports,w4=ib2 -- these READ FINE; only the meta 0x1f echoes, so we skip it).
++ * Runs under the caller's spin_lock_bh (atomic; en75_cah_cmd busy-waits, cmd completes in
++ * us). Answers: is OUR flow (sip=c0a844f8) in the cache RIGHT NOW, under which line, and
++ * what does DRAM[reported-slot] actually hold (state)? */
++static void en75_ppe_atomic_dump(struct en75_ppe *ppe, u16 hash)
 +{
 +	struct mtk_foe_entry *hwe =
-+		(struct mtk_foe_entry *)((u8 *)ppe->foe_virt + (u32)hash * EN75_FOE_ENTRY_SIZE);
-+	struct en75_flow_entry *e;
++		(struct mtk_foe_entry *)((u8 *)ppe->foe_virt +
++					 (u32)hash * EN75_FOE_ENTRY_SIZE);
++	u32 gate = readl(ppe->base + EN75_PPE_CAH_GATE);
++	int line, i;
++
++	pr_info("XR500v ATOMIC: slot=%u DRAM ib1=%08x state=%lu sip=%08x dip=%08x ports=%08x ib2=%08x\n",
++		hash, hwe->ib1, FIELD_GET(MTK_FOE_IB1_STATE, hwe->ib1),
++		hwe->ipv4.orig.src_ip, hwe->ipv4.orig.dest_ip,
++		hwe->ipv4.orig.ports, hwe->ipv4.ib2);
++	writel(gate & ~BIT(0), ppe->base + EN75_PPE_CAH_GATE);		/* gate down */
++	for (line = 0; line < EN75_PPE_CAH_LINES; line++) {
++		u32 w[5];
++
++		for (i = 0; i < 5; i++) {
++			writel((line & 0x7fff) | ((u32)i << 16),
++			       ppe->base + EN75_PPE_CAH_LINE_RW);
++			w[i] = en75_cah_cmd(ppe, 2) ?
++			       readl(ppe->base + EN75_PPE_CAH_RDATA) : 0xdeaddead;
++		}
++		pr_info("XR500v ATOMIC: cah[%2d] ib1=%08x sip=%08x dip=%08x ports=%08x ib2=%08x\n",
++			line, w[0], w[1], w[2], w[3], w[4]);
++	}
++	writel(gate, ppe->base + EN75_PPE_CAH_GATE);			/* gate up */
++}
++
++/* P5 RX-bind (build #31) -- Codex/OEM-disasm finding: the engine's FORWARD_BUILT
++ * unbind entry is CACHE-resident, NOT in the DRAM table, and CACHE_CTL.CLEAR
++ * DISCARDS the cache (no write-back). PpeSetEntryBind flips ib1 only because the
++ * OEM first MATERIALIZES the entry in DRAM from the packet. So:
++ *  - if the DRAM slot already holds an entry (engine evicted it) -> FLIP in place
++ *    (byte-order safe, keeps the engine's tuple);
++ *  - if the slot is empty (cache-resident) -> COMMIT the registered flow's entry
++ *    to DRAM at slot=hash (en75_foe_entry_commit: full 80B + ib1-last + dma_wmb +
++ *    cache-clear) so the engine re-reads our BIND. The committed tuple must match
++ *    the engine's lookup byte order (engine stores swab32 of network order) --
++ *    set via ppe_t_* params (test swab vs raw without reflashing). */
++/* build #61: PREBIND promote. Called from the RX call-site when the engine raised
++ * crsn=HIT_PRE_BIND(0x1a) -- its handshake that it accepted our preb=1 and staged
++ * the bind internally. ONLY now (per OEM ra_nat.c:3150) do we flip UNBIND->BIND.
++ * This is the step the direct state=BIND write skipped: on the EN751221 the HW owns
++ * the state field of dynamic entries and ignores a SW-forced BIND; preb is the only
++ * lever, and the engine confirms via this crsn. Target bound format = OEM entry2726
++ * (state=BIND, ttl/cah/ka set, vlan_layer preserved). bit24 stays set (preb->ttl). */
++void en75_ppe_prebind_promote(struct en75_ppe *ppe, u16 hash)
++{
++	struct mtk_foe_entry *hwe;
++	u32 state;
++
++	if (!READ_ONCE(en75_ppe_prebind) || hash >= EN75_PPE_ENTRIES)
++		return;
++	spin_lock_bh(&ppe->lock);
++	hwe = (struct mtk_foe_entry *)((u8 *)ppe->foe_virt +
++				       (u32)hash * EN75_FOE_ENTRY_SIZE);
++	state = FIELD_GET(MTK_FOE_IB1_STATE, hwe->ib1);
++	if (hwe->ib1 && (hwe->ib1 & MTK_FOE_IB1_UNBIND_PREBIND) &&
++	    state != MTK_FOE_STATE_BIND) {
++		hwe->ib1 &= ~MTK_FOE_IB1_STATE;
++		hwe->ib1 |= FIELD_PREP(MTK_FOE_IB1_STATE, MTK_FOE_STATE_BIND) |
++			    MTK_FOE_IB1_BIND_TTL | MTK_FOE_IB1_BIND_CACHE |
++			    MTK_FOE_IB1_BIND_KEEPALIVE;
++		en75_foe_entry_set_oem_bind_meta(hwe);
++		dma_wmb();
++		en75_ppe_cache_clean_all(ppe);
++		en75_ppe_diag_event(EN75_PPE_DIAG_PREBIND_PROMOTE);
++		pr_info_ratelimited("XR500v PREBIND promote: slot=%u UNBIND->BIND (crsn=0x1a) ib1=%08x ib2=%08x\n",
++				    hash, hwe->ib1, hwe->ipv4.ib2);
++	}
++	spin_unlock_bh(&ppe->lock);
++}
++
++void __en75_ppe_check_skb(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash, u8 crsn)
++{
++	struct mtk_foe_entry *hwe;
++	struct en75_flow_entry *e, *cand = NULL;
 +	struct hlist_node *n;
-+	bool found = false;
-+	int b;
++	u32 state, cur_dp;
++	int b, ncand = 0;
++
++	/* build #57: this RX frame's descriptor 'hash' IS the engine LOOKUP slot.
++	 * Record it keyed by the inner pre-NAT tuple so the TX bind lands here. */
++	en75_ppe_rx_record(ppe, skb, hash);
++
++	/* build #68: OEM bind timing -- act only when the engine asks (0x0f). */
++	if (READ_ONCE(en75_ppe_bind_on_rate)) {
++		if (crsn != 0x0f) {
++			en75_ppe_diag_gate_skip(crsn);
++			pr_info_ratelimited("XR500v PPE rate-gate: skip crsn=%u slot=%u\n",
++					    crsn, hash);
++			return;
++		}
++		en75_ppe_diag_event(EN75_PPE_DIAG_GATE_PASS);
++	}
 +
 +	spin_lock_bh(&ppe->lock);
-+	if (FIELD_GET(MTK_FOE_IB1_STATE, hwe->ib1) == MTK_FOE_STATE_BIND)
-+		goto out;	/* engine already bound this slot */
-+	/* The EN751221 engine hash != our SW hash, so the flow may be registered
-+	 * in any bucket. Match by TUPLE against the engine-built unbind entry at
-+	 * 'hash' (the engine reports its own slot in the RX desc's ppe_entry), and
-+	 * bind at the engine's slot. O(NUM_FLOWS) but buckets are mostly empty;
-+	 * a flat list / matched hash is the production optimization. */
-+	for (b = 0; b < EN75_PPE_NUM_FLOWS && !found; b++) {
-+		hlist_for_each_entry_safe(e, n, &ppe->foe_flow[b], list) {
-+			if (!en75_flow_entry_match(e, hwe))
-+				continue;
-+			e->hash = hash;			/* raw engine slot */
-+			en75_foe_entry_commit(ppe, &e->data, hash);
-+			found = true;
-+			break;
++	hwe = (struct mtk_foe_entry *)((u8 *)ppe->foe_virt +
++				       (u32)hash * EN75_FOE_ENTRY_SIZE);
++	state = FIELD_GET(MTK_FOE_IB1_STATE, hwe->ib1);
++	cur_dp = FIELD_GET(MTK_FOE_IB2_DEST_PORT, hwe->ipv4.ib2);
++
++	/* build #41: one-shot atomic dump (cache+DRAM at this exact crsn frame). */
++	if (READ_ONCE(en75_ppe_atomic)) {
++		WRITE_ONCE(en75_ppe_atomic, false);
++		en75_ppe_atomic_dump(ppe, hash);
++	}
++
++	/* build #43 FLIP-IN-PLACE (OEM PpeTxHandler model, workflow w7h8wpopm high-conf,
++	 * 3 agents converged): the ENGINE itself FORWARD_BUILDs the FoE skeleton at THIS
++	 * slot (requires FLOW_CFG=0x0600f700 so the engine writes DRAM) and reports the
++	 * index in the RX descriptor. The OEM only PATCHES that engine-built entry in
++	 * place -- sets dest_port + flips ib1.state=BIND, KEEPING the engine's own match
++	 * tuple -- it NEVER writes a from-scratch entry (= our 42-build rank-1 mistake;
++	 * the engine ignores foreign slots/tuples). Then CAH-flush so the engine re-reads
++	 * its now-BIND entry instead of the stale cached UNBIND. dest_port via en75_flip_dp
++	 * (1=GSW/LAN-switch egress for our nested-DSA, 2=GMAC/WAN). HW-forward verifiable
++	 * via RXHWF_OK_CNT(fe+0x594) climbing vs RXCPU_OK_CNT(fe+0x590). */
++	if (READ_ONCE(en75_ppe_flip) && hwe->ib1 &&
++	    state != MTK_FOE_STATE_BIND) {
++		/* set egress dest_port + PORT_MG/AG=0x3f and PSE_QOS=0 -- the OEM
++		 * switch-egress ib2 is 0x00FFF020 (dp=1, fqos/PSE_QOS=0); only the
++		 * GPON/QDMA dp=6 upstream path uses PSE_QOS=1 (ib2=0x00FFF0D0). */
++		hwe->ipv4.ib2 &= ~(MTK_FOE_IB2_DEST_PORT | MTK_FOE_IB2_PSE_QOS |
++				   MTK_FOE_IB2_PORT_MG | MTK_FOE_IB2_PORT_AG);
++		hwe->ipv4.ib2 |= FIELD_PREP(MTK_FOE_IB2_DEST_PORT, en75_flip_dp) |
++				 FIELD_PREP(MTK_FOE_IB2_PORT_MG, 0x3f) |
++				 FIELD_PREP(MTK_FOE_IB2_PORT_AG, 0x3f);
++		if (READ_ONCE(en75_ppe_prebind)) {
++			/* build #61: OEM PREBIND model -- set preb(bit24)+cache, KEEP
++			 * state=UNBIND. The engine raises crsn=HIT_PRE_BIND(0x1a) on the
++			 * next matching packet; en75_ppe_prebind_promote() then flips to
++			 * BIND. The OEM never SW-forces BIND on a dynamic entry (the HW
++			 * owns the state field); preb is the handshake we'd been skipping. */
++			hwe->ib1 |= MTK_FOE_IB1_UNBIND_PREBIND | MTK_FOE_IB1_BIND_CACHE;
++			dma_wmb();
++			en75_ppe_cache_clean_all(ppe);
++			en75_ppe_diag_event(EN75_PPE_DIAG_PREBIND_ARM);
++			pr_info_ratelimited("XR500v PREBIND arm: slot=%u preb=1 dp=%u ib1=%08x ib2=%08x ports=%08x\n",
++					    hash, en75_flip_dp, hwe->ib1,
++					    hwe->ipv4.ib2, hwe->ipv4.orig.ports);
++			goto out;
 +		}
++		hwe->ib1 &= ~MTK_FOE_IB1_STATE;
++		hwe->ib1 |= FIELD_PREP(MTK_FOE_IB1_STATE, MTK_FOE_STATE_BIND) |
++			    MTK_FOE_IB1_BIND_CACHE | MTK_FOE_IB1_BIND_TTL;
++		dma_wmb();
++		/* build #49: publish with the OEM GLOBAL clean-all (cache_mode), not the
++		 * per-line clear whose tag-search never matched our slot. In-driver here so
++		 * the engine drops its cached UNBIND and re-reads our BIND -- an external
++		 * clean-all loop starved the flip (FLIPs=0). */
++		if (READ_ONCE(en75_ppe_cache_mode) == 1)
++			en75_ppe_cache_clean_all(ppe);
++		else
++			en75_ppe_cah_clear_one(ppe, hash);
++		en75_ppe_diag_event(EN75_PPE_DIAG_FLIP);
++		pr_info_ratelimited("XR500v FLIP slot=%u UNBIND->BIND dp=%u sip=%08x dip=%08x ports=%08x\n",
++				    hash, en75_flip_dp, hwe->ipv4.orig.src_ip,
++				    hwe->ipv4.orig.dest_ip, hwe->ipv4.orig.ports);
++		goto out;
++	}
++
++	/* build #42 TX-hook mode: the engine reported its FoE slot for this flow --
++	 * record it + arm the TX commit, then bail. en75_ppe_tx_bind() fills the
++	 * COMPLETE entry (egress MACs/pppoe/NAT'd tuple/DSA dp) from the egress
++	 * packet and commits at this slot, exactly like the OEM PpeTxHandler. The
++	 * RX rank-1 commit below (incomplete entry) is what the engine rejects. */
++	if (READ_ONCE(en75_ppe_tx_hook)) {
++		WRITE_ONCE(en75_tx_bind_slot, hash);
++		WRITE_ONCE(en75_tx_bind_arm, true);
++		en75_ppe_diag_event(EN75_PPE_DIAG_TX_ARM);
++		goto out;
++	}
++
++	/* already bound by us (EN751221 unbind is state=2+dp=7, so key "done" on dp). */
++	if (hwe->ib1 && state == MTK_FOE_STATE_BIND && cur_dp == en75_rx_bind_pse)
++		goto out;
++
++	/* RANK-1 FIX (workflow wf_ca253665, OEM-disasm high-conf): the engine has TWO
++	 * parsers -- LOOKUP (parses the real frame OK; this is why classify works and why
++	 * the engine HITs entries holding the REAL tuple) and FORWARD_BUILD (byte-lane
++	 * shifts -> stores .64). The OEM NEVER trusts the HW-built tuple: it builds the
++	 * 5-tuple in SOFTWARE (PpeFillInL3Info, real IPs) and commits it; PpeSetEntryBind
++	 * only flips state. The old code FLIPped the engine's shifted DRAM entry in place
++	 * (keeping .64) -> the engine's LOOKUP of the real packet (.64) never matched its
++	 * stored shifted tuple -> MISS -> rebuild -> crsn=15 forever. FIX: ALWAYS COMMIT
++	 * the registered flow's REAL-IP tuple at slot=hash (the descriptor's slot), exactly
++	 * like the OEM. Inline+per-packet so it wins the race vs the engine's auto-rebuild.
++	 * Do NOT use en75_flow_entry_match (memcmps vs the shifted hwe->data -> never hits);
++	 * single registered flow = commit it. Re-commit each frame until the engine HITs
++	 * (then the BIND survives and the dp-guard above short-circuits). */
++	for (b = 0; b < EN75_PPE_NUM_FLOWS; b++)
++		hlist_for_each_entry_safe(e, n, &ppe->foe_flow[b], list) {
++			cand = e;
++			ncand++;
++		}
++	if (ncand == 1) {
++		cand->hash = hash;
++		en75_foe_entry_set_pse_port(&cand->data, en75_rx_bind_pse);
++		en75_foe_entry_commit(ppe, &cand->data, hash);
++		en75_ppe_diag_event(EN75_PPE_DIAG_RX_COMMIT);
++		pr_info_ratelimited("XR500v PPE RX-bind: COMMIT reg-flow to DRAM slot=%u dp=%u (SW-build)\n",
++				    hash, en75_rx_bind_pse);
++	} else {
++		en75_ppe_diag_event(EN75_PPE_DIAG_NOBIND);
++		pr_info_ratelimited("XR500v PPE RX-bind NObind: slot=%u empty, ncand=%d\n",
++				    hash, ncand);
 +	}
 +out:
 +	spin_unlock_bh(&ppe->lock);
++}
++
++/* build #42: the OEM FoeBindToPpe -- called from en75_dev_xmit (conduit TX) on
++ * the EGRESS frame after the RX hook armed a slot. Parse the real egress packet
++ * (post-NAT, post-pppoe-encap, post-DSA-tag), LOG it (ground truth for the BRAS
++ * MAC / pppoe session-id / DSA dp / SNAT'd tuple we can't read otherwise), fill
++ * the COMPLETE EN751221 FoE entry, and commit BIND at the armed slot.
++ *
++ * Egress frame at the conduit (lan3 DSA user -> tagger -> GDM1):
++ *   [0:5] dst=BRAS  [6:11] src=router  [12:15] MTK tag  [16:17] etype 0x8864
++ *   [18:23] pppoe hdr (sid@+4)  [24:25] ppp 0x0021  [26:] IPv4 (NAT'd)
++ * The MTK tag may be absent (direct eth0) -> etype at 12; we locate 0x8864. */
++void en75_ppe_tx_bind(struct en75_ppe *ppe, struct sk_buff *skb)
++{
++	const u8 *d = skb->data, *iph, *l4, *dmac, *smac;
++	unsigned int len = skb->len;
++	struct en75_flow_entry *fe, *cand = NULL;
++	struct mtk_foe_entry e;
++	u32 nsip, ndip;
++	u16 sid = 0, ppp, nsport = 0, ndport = 0, dp_bm = 0;
++	u8 ipproto, ihl;
++	int eo, b, ncand = 0;
++
++	if (len < 48)
++		return;
++	dmac = d;		/* egress dest MAC (BRAS / next-hop) */
++	smac = d + 6;		/* egress src  MAC (router on lan3)  */
++
++	/* locate the PPPoE-session ethertype (0x8864): offset 16 if the MTK special
++	 * tag is present (DSA user-port egress), 12 if not. */
++	if (get_unaligned_be16(d + 16) == ETH_P_PPP_SES) {
++		eo = 16;
++		dp_bm = d[13];		/* MTK tag[1] = (1<<dp_index) | passthrough(bit7) */
++	} else if (get_unaligned_be16(d + 12) == ETH_P_PPP_SES) {
++		eo = 12;
++	} else {
++		return;			/* not a pppoe-session frame -> ignore */
++	}
++	sid = get_unaligned_be16(d + eo + 4);		/* pppoe session-id */
++	ppp = get_unaligned_be16(d + eo + 8);		/* ppp protocol */
++	if (ppp != 0x0021)				/* IPv4 only */
++		return;
++	iph = d + eo + 10;
++	if ((iph[0] >> 4) != 4)
++		return;
++	ihl = (iph[0] & 0x0f) * 4;
++	ipproto = iph[9];
++	nsip = get_unaligned_be32(iph + 12);		/* NAT'd src (pppoe-wan IP) */
++	ndip = get_unaligned_be32(iph + 16);
++	if (ndip != en75_tx_match_dip)			/* not our test flow */
++		return;
++	l4 = iph + ihl;
++	if (ipproto == IPPROTO_UDP || ipproto == IPPROTO_TCP) {
++		nsport = get_unaligned_be16(l4);	/* NAT'd src port (SNAT) */
++		ndport = get_unaligned_be16(l4 + 2);
++	}
++
++	/* GROUND-TRUTH log: the egress fields we cannot read from userspace.
++	 * ratelimited so the per-packet flood doesn't bury the COMMIT log. */
++	pr_info_ratelimited("XR500v TX-bind EGRESS slot=%u dmac=%pM smac=%pM eo=%d dp_bm=%02x sid=0x%04x\n",
++		en75_tx_bind_slot, dmac, smac, eo, dp_bm, sid);
++	pr_info_ratelimited("XR500v TX-bind EGRESS new=%08x:%u -> %08x:%u proto=%u ihl=%u\n",
++		nsip, nsport, ndip, ndport, ipproto, ihl);
++
++	spin_lock_bh(&ppe->lock);
++	for (b = 0; b < EN75_PPE_NUM_FLOWS; b++)
++		hlist_for_each_entry(fe, &ppe->foe_flow[b], list) {
++			cand = fe;
++			ncand++;
++		}
++	if (ncand != 1) {
++		spin_unlock_bh(&ppe->lock);
++		pr_info_ratelimited("XR500v TX-bind: ncand=%d (need 1), skip\n", ncand);
++		return;
++	}
++
++	/* base = the registered flow (carries the ORIG/match 5-tuple the engine
++	 * looks up + ib1 STATE=BIND/cah/ttl + ib2 sentinels), then overlay the
++	 * COMPLETE egress fields (OEM FoeBindToPpe): NAT'd new-tuple, real egress
++	 * MACs, pppoe session, EN751221 dvp, and the DSA dp so the engine re-inserts
++	 * the special tag for lan3. */
++	memcpy(&e, &cand->data, sizeof(e));
++	en75_foe_entry_set_ipv4_tuple(&e, true, htonl(nsip), htons(nsport),
++				      htonl(ndip), htons(ndport));
++	e.ipv4.l2.dest_mac_hi = get_unaligned_be32(dmac);
++	e.ipv4.l2.dest_mac_lo = get_unaligned_be16(dmac + 4);
++	e.ipv4.l2.src_mac_hi  = get_unaligned_be32(smac);
++	e.ipv4.l2.src_mac_lo  = get_unaligned_be16(smac + 4);
++	if (dp_bm & 0x3f)				/* DSA tag: set BEFORE pppoe */
++		en75_foe_entry_set_dsa(&e, __ffs(dp_bm & 0x3f), !!(dp_bm & 0x80));
++	if (sid)
++		en75_foe_entry_set_pppoe(&e, sid);	/* psn=1 + pppoe_id (+keeps DSA etype) */
++	e.ib1 |= BIT(20);	/* EN751221 ib1 bit20 = dvp (keep VPRI); OEM sets it on
++				 * routed binds. NOTE: mainline calls bit20 VLAN_TAG -- on
++				 * THIS chip it is dvp (hwnat-disasm/foe_fdb.h #else). */
++	/* build #45: dest_port tunable via ppe_flip_dp (stock recipe: upstream
++	 * LAN->WAN = 6 QDMA_HW, downstream WAN->LAN = 1 GSW). */
++	en75_foe_entry_set_pse_port(&e, en75_flip_dp);
++	/* build #59: ib2 PORT_MG/AG. OEM stock uses 0x3f (ib2=0x00fff0d0); Codex says
++	 * mainline mt7622 uses 0 for offload v>1 + Composer warns 0x3f (meter group)
++	 * can divert to CPU. ppe_port_mg0=1 -> use 0 to A/B. */
++	e.ipv4.ib2 &= ~(MTK_FOE_IB2_PORT_MG | MTK_FOE_IB2_PORT_AG);
++	if (!READ_ONCE(en75_ppe_port_mg0))
++		e.ipv4.ib2 |= FIELD_PREP(MTK_FOE_IB2_PORT_MG, 0x3f) |
++			      FIELD_PREP(MTK_FOE_IB2_PORT_AG, 0x3f);
++	/* tuple-order A/B for the engine LOOKUP (ppe_tuple_swab, live toggle):
++	 * 0 = network order (OEM PpeFillInL3Info), 1 = swab32 (engine FORWARD_BUILD). */
++	if (READ_ONCE(en75_ppe_tuple_swab)) {
++		e.ipv4.orig.src_ip  = swab32(e.ipv4.orig.src_ip);
++		e.ipv4.orig.dest_ip = swab32(e.ipv4.orig.dest_ip);
++		e.ipv4.orig.ports   = swab32(e.ipv4.orig.ports);
++	}
++	/* build #50: the engine NOW (bidirectional) materializes its keyed UNBIND in
++	 * DRAM, but the global en75_tx_bind_slot is set by the LAST RX crsn (wrong flow
++	 * under concurrency). FIND this egress flow's engine UNBIND by its INVARIANT
++	 * inner dst (dip survives SNAT) -- the engine stores the key swab32(network),
++	 * so match orig.dest_ip == swab32(ndip). PRESERVE that key (real ephemeral ports
++	 * + the exact byte layout the engine's lookup compares) and commit the rewrite
++	 * there. This is OEM PpeSetEntryBind: ib1+rewrite only, never the key. */
++	/* build #55: nf_ct_get(skb) returns NULL at the conduit TX (conntrack is gone
++	 * after pppoe/DSA), so #51's conntrack key failed (ports=0). Use the EGRESS frame
++	 * instead: dip (143.x) and dport (8080) are NAT-INVARIANT -> match the engine's
++	 * upstream UNBIND by dip + dport, no conntrack needed. The engine stores orig.ports
++	 * as swab32(net[sport,dport]) so high16(orig.ports) == swab16(dport). Prefer an
++	 * exact sport match (Linux NAT usually PRESERVES the source port -> nsport ==
++	 * ephemeral), else take any dip+dport entry (the lone live flow). PRESERVE the
++	 * engine's key + commit rewrite (OEM PpeSetEntryBind). */
++	{
++		u32 want_dip   = swab32(ndip);
++		u32 want_ports = swab32(((u32)nsport << 16) | ndport); /* if NAT kept sport */
++		u16 want_dphi  = swab16(ndport);		/* high16 of orig.ports */
++		int i, slot = -1, slot_loose = -1, rx;
++		int dipmatch = 0, st_hist[4] = {0, 0, 0, 0};
++		bool have_key = false;
++
++		/* build #58: the engine's LOOKUP slot for this flow (RX-descriptor
++		 * FOE_ENTRY_NUM recorded per-flow at RX), and its pre-NAT 5-tuple. */
++		rx = en75_ppe_rxslot_lookup(ndip, nsport, ndport);
++
++		if (READ_ONCE(en75_ppe_preserve_key)) {
++			for (i = 0; i < EN75_PPE_ENTRIES; i++) {
++				struct mtk_foe_entry *hwe = (struct mtk_foe_entry *)
++					((u8 *)ppe->foe_virt + (u32)i * EN75_FOE_ENTRY_SIZE);
++				u32 st, dp;
++
++				if (!hwe->ib1 || hwe->ipv4.orig.dest_ip != want_dip)
++					continue;
++				if ((hwe->ipv4.orig.ports >> 16) != want_dphi)	/* dport != 8080 */
++					continue;
++				st = FIELD_GET(MTK_FOE_IB1_STATE, hwe->ib1);
++				dp = FIELD_GET(MTK_FOE_IB2_DEST_PORT, hwe->ipv4.ib2);
++				if (st == MTK_FOE_STATE_INVALID)
++					continue;				/* free slot */
++				dipmatch++;
++				st_hist[st & 3]++;
++				if (st == MTK_FOE_STATE_BIND && dp == en75_flip_dp)
++					continue;			/* already our completed bind */
++				if (hwe->ipv4.orig.ports == want_ports) {
++					slot = i;			/* exact (sport preserved) */
++					e.ipv4.orig = hwe->ipv4.orig;
++					have_key = true;
++					break;
++				}
++				if (slot_loose < 0)
++					slot_loose = i;		/* first dip+dport match */
++			}
++			if (!have_key && slot_loose >= 0) {
++				struct mtk_foe_entry *hwe = (struct mtk_foe_entry *)
++					((u8 *)ppe->foe_virt + (u32)slot_loose * EN75_FOE_ENTRY_SIZE);
++				slot = slot_loose;
++				e.ipv4.orig = hwe->ipv4.orig;
++				have_key = true;
++			}
++		}
++		/* build #58: if the engine has not materialized a DRAM entry to copy the
++		 * exact key from (it's sporadic), RECONSTRUCT orig from the RX-recorded
++		 * pre-NAT tuple, in the engine byte order (swab32 of network). */
++		if (!have_key && rx >= 0) {
++			/* network order by default (the engine LOOKUP parser reads the real
++			 * frame bytes); ppe_tuple_swab=1 -> swab32 (the FORWARD_BUILD layout).
++			 * A/B the two at runtime since we cannot read the lookup byte order. */
++			e.ipv4.orig.src_ip  = en75_rx_ring[rx].sip;
++			e.ipv4.orig.dest_ip = en75_rx_ring[rx].dip;
++			e.ipv4.orig.ports   = ((u32)en75_rx_ring[rx].sport << 16) |
++					      en75_rx_ring[rx].dport;
++			if (READ_ONCE(en75_ppe_tuple_swab)) {
++				e.ipv4.orig.src_ip  = swab32(e.ipv4.orig.src_ip);
++				e.ipv4.orig.dest_ip = swab32(e.ipv4.orig.dest_ip);
++				e.ipv4.orig.ports   = swab32(e.ipv4.orig.ports);
++			}
++			have_key = true;
++		}
++		if (!have_key || rx < 0) {
++			spin_unlock_bh(&ppe->lock);
++			pr_info_ratelimited("XR500v TX-bind(#58): rx=%d scan_key=%d dip=%08x dport=%u (dipmatch=%d st[I/U/B/F]=%d/%d/%d/%d) -- retry\n",
++					    rx, have_key, ndip, ndport, dipmatch,
++					    st_hist[0], st_hist[1], st_hist[2], st_hist[3]);
++			return;
++		}
++		/* commit at the engine LOOKUP slot (RX descriptor) -- foedump proved this
++		 * is where the engine looks up, not the tuple-scan write slot. */
++		cand->hash = en75_rx_ring[rx].slot;
++		en75_foe_entry_commit(ppe, &e, en75_rx_ring[rx].slot);
++		pr_info_ratelimited("XR500v TX-bind(#58) commit LOOKUP slot=%u (scan_slot=%d key=%s) sip=%08x dip=%08x ports=%08x dp=%u ib2=%08x\n",
++			en75_rx_ring[rx].slot, slot, slot >= 0 ? "engine" : "RXrecon",
++			e.ipv4.orig.src_ip, e.ipv4.orig.dest_ip, e.ipv4.orig.ports,
++			en75_flip_dp, e.ipv4.ib2);
++		/* also mirror at the engine write-slot if it materialized + differs */
++		if (slot >= 0 && (u16)slot != en75_rx_ring[rx].slot)
++			en75_foe_entry_commit(ppe, &e, (u16)slot);
++		/* build #60 (Composer P1): the engine serves lookups CAH-first and never
++		 * re-reads our DRAM BIND. Flip the CACHED line to BIND in place so the
++		 * engine HITs it -- the DRAM BIND above supplies the rewrite. */
++		if (READ_ONCE(en75_ppe_cah_bind))
++			en75_ppe_cah_bind_one(ppe, en75_rx_ring[rx].slot,
++				swab32(((u32)en75_rx_ring[rx].sport << 16) |
++				       en75_rx_ring[rx].dport), en75_flip_dp);
++	}
++	WRITE_ONCE(en75_tx_bind_arm, false);		/* one commit per RX arm */
++	spin_unlock_bh(&ppe->lock);
++
++	pr_info_ratelimited("XR500v TX-bind COMMIT(#45 descr) slot=%u swab=%u ib1=%08x ib2=%08x etype=%04x sid=0x%04x dp_bm=%02x\n",
++		en75_tx_bind_slot, READ_ONCE(en75_ppe_tuple_swab), e.ib1, e.ipv4.ib2,
++		e.ipv4.l2.etype, sid, dp_bm);
 +}
 +
 +void en75_ppe_flush_all(struct en75_ppe *ppe)
 +{
 +	struct en75_flow_entry *e;
 +	struct hlist_node *n;
-+	int i;
++	int i, removed = 0, freed = 0, kept = 0;
++
++	WRITE_ONCE(en75_ppe_offload_enabled, false);
++	WRITE_ONCE(en75_tx_bind_arm, false);
++	en75_tx_bind_slot = 0xffff;
++	memset(en75_rx_ring, 0, sizeof(en75_rx_ring));
++	en75_rx_ring_idx = 0;
 +
 +	spin_lock_bh(&ppe->lock);
 +	for (i = 0; i < EN75_PPE_NUM_FLOWS; i++) {
 +		hlist_for_each_entry_safe(e, n, &ppe->foe_flow[i], list) {
 +			en75_foe_entry_clear_locked(ppe, e);
 +			hlist_del_init(&e->list);
-+			if (!e->static_entry)
++			removed++;
++			if (!e->static_entry) {
 +				kfree(e);
++				freed++;
++			} else {
++				kept++;
++			}
 +		}
 +	}
++	memset(ppe->foe_virt, 0, EN75_PPE_ENTRIES * EN75_FOE_ENTRY_SIZE);
++	memset(ppe->foe_check_time, 0,
++	       EN75_PPE_ENTRIES * sizeof(*ppe->foe_check_time));
++	dma_wmb();
 +	spin_unlock_bh(&ppe->lock);
++	en75_ppe_cache_clean_all(ppe);
++	pr_info("XR500v PPE flow_clear: removed=%d freed=%d kept=%d FoE=%u entries zeroed\n",
++		removed, freed, kept, EN75_PPE_ENTRIES);
 +}
 +
 +/* --- manual first-light test helpers (driven from module params) --- */
@@ -738,7 +2051,6 @@
 +		return 0xffff;
 +	en75_build_test_flow(&fe->data, sip, dip, sport, dport, proto, smac, dmac,
 +			     dsa_port, passthrough, pse_port);
-+	fe->static_entry = true;
 +	en75_foe_entry_register(ppe, fe);
 +	hash = en75_ppe_hash_entry(&fe->data);
 +	WRITE_ONCE(en75_ppe_offload_enabled, true);
@@ -785,10 +2097,11 @@
  
  static int en75_ppe_engine_set(bool on)
  {
-@@ -375,6 +377,156 @@
+@@ -374,6 +376,320 @@
+ static bool en75_ppe_engine;
  /* echo 1 > /sys/module/econet_eth/parameters/ppe_engine (default off) */
  module_param_cb(ppe_engine, &en75_ppe_engine_ops, &en75_ppe_engine, 0644);
- 
++
 +static int en75_ppe_test_param_set(const char *val,
 +				   const struct kernel_param *kp)
 +{
@@ -831,7 +2144,64 @@
 +module_param(ppe_t_pseport, uint, 0644);
 +module_param_named(ppe_rxdump, en75_ppe_rxdump, bool, 0644);
 +module_param_named(ppe_foedump, en75_ppe_foedump, bool, 0644);
++module_param_named(ppe_atomic, en75_ppe_atomic, bool, 0644);
 +module_param_named(ppe_t_hash, en75_force_hash, uint, 0644);
++/* build #42 TX-hook: ppe_tx_hook=1 -> RX arms, TX (en75_dev_xmit) fills the
++ * COMPLETE entry from the egress packet + commits. ppe_t_match_dip = the inner
++ * IPv4 dst (host int, e.g. 2399185552 for 143.0.170.144) that flags our flow. */
++module_param_named(ppe_tx_hook, en75_ppe_tx_hook, bool, 0644);
++module_param_named(ppe_t_match_dip, en75_tx_match_dip, uint, 0644);
++/* build #43 FLIP-IN-PLACE: ppe_flip=1 -> RX hook patches the engine-built entry
++ * (dest_port=ppe_flip_dp + state=BIND, keep engine tuple) instead of from-scratch.
++ * Needs FLOW_CFG=0x0600f700 (engine writes DRAM). ppe_flip_dp: 1=GSW/LAN, 2=GMAC/WAN. */
++module_param_named(ppe_flip, en75_ppe_flip, bool, 0644);
++module_param_named(ppe_flip_dp, en75_flip_dp, byte, 0644);
++/* build #44: ppe_tuple_swab=1 -> store the orig 5-tuple swab32 (the engine's own
++ * forward-build encoding) instead of network order, to A/B the LOOKUP match order
++ * live without reflashing. The TX-bind already commits at the scan-found engine slot. */
++module_param_named(ppe_tuple_swab, en75_ppe_tuple_swab, byte, 0644);
++/* build #46: ppe_cache_mode live A/B of the cache publish op: 0=per-line clear,
++ * 1=global clean-all (OEM PpeCleanCache751221), 2=in-cache bind, 3=both. */
++module_param_named(ppe_cache_mode, en75_ppe_cache_mode, byte, 0644);
++/* build #48: ppe_preserve_key=1 -> TX-bind keeps the engine's materialized UNBIND
++ * orig key (real ephemeral ports) and only overlays rewrite; 0 -> author (old). */
++module_param_named(ppe_preserve_key, en75_ppe_preserve_key, bool, 0644);
++/* build #56: ppe_mirror_lookup=1 -> also write the BIND at the RX-descriptor
++ * lookup slot (en75_tx_bind_slot), where foedump proved the engine looks up. */
++module_param_named(ppe_mirror_lookup, en75_ppe_mirror_lookup, bool, 0644);
++/* build #57: ppe_use_rxslot=1 -> commit the BIND at the per-flow RX-recorded
++ * descriptor (lookup) slot, where the engine actually looks up. */
++module_param_named(ppe_use_rxslot, en75_ppe_use_rxslot, bool, 0644);
++/* build #59: ppe_port_mg0=1 -> ib2 PORT_MG/AG=0 instead of OEM 0x3f (A/B). */
++module_param_named(ppe_port_mg0, en75_ppe_port_mg0, bool, 0644);
++/* build #61: ppe_prebind=1 -> OEM PREBIND handshake. The bind paths set
++ * preb=1 (NOT state=BIND); the engine confirms via crsn=HIT_PRE_BIND(0x1a),
++ * then en75_ppe_prebind_promote() flips UNBIND->BIND. The likely fix for the
++ * 60-build wall (HW owns dynamic-entry state; SW-forced BIND is ignored). */
++module_param_named(ppe_prebind, en75_ppe_prebind, bool, 0644);
++/* build #61: ppe_oemregs=1 -> replicate OEM PPE engine reg config (gated). */
++module_param_named(ppe_oemregs, en75_ppe_oemregs, bool, 0644);
++/* build #68: ppe_bind_on_rate=1 -> bind paths act ONLY on crsn=0x0f
++ * (HIT_UNBIND_RATE_REACHED) = when the engine ASKS, OEM timing. */
++module_param_named(ppe_bind_on_rate, en75_ppe_bind_on_rate, bool, 0644);
++/* build #69: pre-ratelimit crsn diagnostics. ppe_crsn_reset clears counters;
++ * ppe_crsn_dump prints pre/post/throttled histograms plus bind events. */
++static int en75_ppe_crsn_dump_set(const char *val, const struct kernel_param *kp)
++{ bool go; if (kstrtobool(val, &go) || !go) return 0; en75_ppe_diag_dump(); return 0; }
++static int en75_ppe_crsn_reset_set(const char *val, const struct kernel_param *kp)
++{ bool go; if (kstrtobool(val, &go) || !go) return 0; en75_ppe_diag_reset(); return 0; }
++static const struct kernel_param_ops en75_ppe_crsn_dump_ops = {
++	.set = en75_ppe_crsn_dump_set, .get = param_get_int,
++};
++static const struct kernel_param_ops en75_ppe_crsn_reset_ops = {
++	.set = en75_ppe_crsn_reset_set, .get = param_get_int,
++};
++static int ppe_crsn_dump_v, ppe_crsn_reset_v;
++module_param_cb(ppe_crsn_dump, &en75_ppe_crsn_dump_ops, &ppe_crsn_dump_v, 0644);
++module_param_cb(ppe_crsn_reset, &en75_ppe_crsn_reset_ops, &ppe_crsn_reset_v, 0644);
++/* build #60: ppe_cah_bind=1 -> in-cache BIND (flip the CAH line to BIND so the
++ * CAH-first engine HITs it; the DRAM BIND supplies the rewrite). */
++module_param_named(ppe_cah_bind, en75_ppe_cah_bind, bool, 0644);
 +
 +static void en75_mac_from_hilo(u8 *m, u32 hi, u32 lo)
 +{
@@ -856,10 +2226,12 @@
 +			ppe_t_proto, smac, dmac, ppe_t_dsaport, ppe_t_pt, ppe_t_pseport);
 +	return 0;
 +}
++/* only act on a non-zero write: 'echo 0' (used in test revert) must NOT
++ * re-register a flow (that doubled NUM_FLOWS and broke the single-flow bind). */
 +static int en75_ppe_committest_set(const char *val, const struct kernel_param *kp)
-+{ return en75_ppe_run_test(false); }
++{ bool go; if (kstrtobool(val, &go) || !go) return 0; return en75_ppe_run_test(false); }
 +static int en75_ppe_bindtest_set(const char *val, const struct kernel_param *kp)
-+{ return en75_ppe_run_test(true); }
++{ bool go; if (kstrtobool(val, &go) || !go) return 0; return en75_ppe_run_test(true); }
 +static const struct kernel_param_ops en75_ppe_committest_ops = {
 +	.set = en75_ppe_committest_set, .get = param_get_int,
 +};
@@ -869,6 +2241,25 @@
 +static int ppe_committest_v, ppe_bindtest_v;
 +module_param_cb(ppe_committest, &en75_ppe_committest_ops, &ppe_committest_v, 0644);
 +module_param_cb(ppe_bindtest, &en75_ppe_bindtest_ops, &ppe_bindtest_v, 0644);
++
++/* echo 1 > ppe_flow_clear -> drop registered test flows and zero the FoE
++ * table so the next bindtest is a clean single-flow run without rebooting. */
++static int en75_ppe_flow_clear_set(const char *val, const struct kernel_param *kp)
++{
++	bool go;
++
++	if (!en75_the_ppe)
++		return -ENODEV;
++	if (kstrtobool(val, &go) || !go)
++		return 0;
++	en75_ppe_flush_all(en75_the_ppe);
++	return 0;
++}
++static const struct kernel_param_ops en75_ppe_flow_clear_ops = {
++	.set = en75_ppe_flow_clear_set, .get = param_get_int,
++};
++static int ppe_flow_clear_v;
++module_param_cb(ppe_flow_clear, &en75_ppe_flow_clear_ops, &ppe_flow_clear_v, 0644);
 +
 +/* echo 0x81000001 > ppe_vlan_ctrl -> pop the MT7530 special tag so the PPE parses */
 +static int en75_ppe_vlan_ctrl_set(const char *val, const struct kernel_param *kp)
@@ -914,6 +2305,92 @@
 +static int ppe_fe_v;
 +module_param_cb(ppe_fe, &en75_ppe_fe_ops, &ppe_fe_v, 0644);
 +
++/* echo 1 > ppe_cache_dump : dump the 16 CAH cache lines. THE diagnostic for
++ * the central blocker -- does the engine FORWARD_BUILD unbind entries into
++ * the cache (not the DRAM table)? A valid/dirty line == yes. */
++static int en75_ppe_cache_dump_set(const char *val, const struct kernel_param *kp)
++{
++	if (!en75_the_ppe)
++		return -ENODEV;
++	en75_ppe_dump_cache(en75_the_ppe);
++	return 0;
++}
++static const struct kernel_param_ops en75_ppe_cache_dump_ops = {
++	.set = en75_ppe_cache_dump_set, .get = param_get_int,
++};
++static int ppe_cache_dump_v;
++module_param_cb(ppe_cache_dump, &en75_ppe_cache_dump_ops, &ppe_cache_dump_v, 0644);
++
++/* echo 1 > ppe_scan : scan the whole DRAM FoE table, log non-zero slots+tuples.
++ * Run after a flow to see which slot the engine REALLY used (match by ports)
++ * vs the slot the RX descriptor reported -> the descriptor<->table mapping. */
++static int en75_ppe_scan_set(const char *val, const struct kernel_param *kp)
++{
++	if (!en75_the_ppe)
++		return -ENODEV;
++	en75_ppe_scan_table(en75_the_ppe);
++	return 0;
++}
++static const struct kernel_param_ops en75_ppe_scan_ops = {
++	.set = en75_ppe_scan_set, .get = param_get_int,
++};
++static int ppe_scan_v;
++module_param_cb(ppe_scan, &en75_ppe_scan_ops, &ppe_scan_v, 0644);
++
++/* build #47: echo 1 > ppe_cahscan : dump ALL 1024 CAH cache lines (entry#+state+
++ * tuple) to find where the engine REALLY caches our flow (match by L4 ports). */
++static int en75_ppe_cahscan_set(const char *val, const struct kernel_param *kp)
++{
++	if (!en75_the_ppe)
++		return -ENODEV;
++	en75_ppe_cah_scan(en75_the_ppe);
++	return 0;
++}
++static const struct kernel_param_ops en75_ppe_cahscan_ops = {
++	.set = en75_ppe_cahscan_set, .get = param_get_int,
++};
++static int ppe_cahscan_v;
++module_param_cb(ppe_cahscan, &en75_ppe_cahscan_ops, &ppe_cahscan_v, 0644);
++
++/* echo 1 > ppe_bindscan : THE #25 fill+flip bind. Find each registered flow's
++ * engine-built UNBIND entry (by L4 ports) and flip it to BIND in place. Run it
++ * mid-flow (after the engine has built the unbind entry). */
++static int en75_ppe_bindscan_set(const char *val, const struct kernel_param *kp)
++{
++	bool go;
++
++	if (!en75_the_ppe)
++		return -ENODEV;
++	if (kstrtobool(val, &go) || !go)
++		return 0;
++	en75_ppe_bind_by_scan(en75_the_ppe);
++	return 0;
++}
++static const struct kernel_param_ops en75_ppe_bindscan_ops = {
++	.set = en75_ppe_bindscan_set, .get = param_get_int,
++};
++static int ppe_bindscan_v;
++module_param_cb(ppe_bindscan, &en75_ppe_bindscan_ops, &ppe_bindscan_v, 0644);
++
++/* echo 0 > ppe_cache (cache OFF -> engine works on DRAM table, unbind entries
++ * become dump-visible + mainline-tuple-matchable); echo 1 > ppe_cache (ON). */
++static int en75_ppe_cache_set_param(const char *val, const struct kernel_param *kp)
++{
++	bool on;
++
++	if (!en75_the_ppe)
++		return -ENODEV;
++	if (kstrtobool(val, &on))
++		return -EINVAL;
++	en75_ppe_cache_set(en75_the_ppe, on);
++	return 0;
++}
++static const struct kernel_param_ops en75_ppe_cache_ops = {
++	.set = en75_ppe_cache_set_param, .get = param_get_int,
++};
++static int ppe_cache_v;
++module_param_cb(ppe_cache, &en75_ppe_cache_ops, &ppe_cache_v, 0644);
++
 +/* echo 1 > ppe_stag : FE side of STAG->VTAG -- GDMA1_VLAN_CHECK(0x510)=1 makes the
 + * GDM VLAN-aware so the PPE parses past the 0x8100-stamped special tag (untag stays
 + * 0, so the inline DSA tagger still works). Pair with gsw_stag (switch PVC_P). */
@@ -938,11 +2415,10 @@
 +};
 +static int ppe_stag_v;
 +module_param_cb(ppe_stag, &en75_ppe_stag_ops, &ppe_stag_v, 0644);
-+
+ 
  static void en75_ppe_init(struct en75_eth_pvt *eth)
  {
- 	void __iomem *base = (void __iomem *)eth->regs->ppe;
-@@ -392,6 +544,10 @@
+@@ -394,6 +710,10 @@
  	en75_ppe_foe_virt = tbl;
  	en75_ppe_foe_phys = phys;
  	en75_ppe_base = base;
@@ -955,15 +2431,16 @@
  	tb_cfg = BIT(7) | BIT(8) | BIT(9) | BIT(10) | BIT(11)	/* AGE bits */
 --- a/econet_qdma.c
 +++ b/econet_qdma.c
-@@ -12,6 +12,7 @@
+@@ -12,6 +12,8 @@
  #include "linux/bitmap.h"
  #include "linux/dev_printk.h"
  #include "linux/types.h"
++#include <linux/unaligned.h>
 +#include "econet_ppe.h"
  #include "qdma_desc.h"
  #include "qdma_regs.h"
  #include "econet_eth.h"
-@@ -188,13 +189,29 @@
+@@ -188,13 +190,46 @@
  	hash = get_erx_ppe_entry(&desc.msg.erx);
  	skb_set_hash(skb, jhash_1word(hash, 0),
  		     PKT_HASH_TYPE_L4);
@@ -986,17 +2463,56 @@
 +		    (crsn == MTK_PPE_CPU_REASON_HIT_UNBIND ||
 +		     crsn == MTK_PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED))
 +			en75_ppe_dump_slot(q->qdma->eth->ppe, hash);
-+		if (READ_ONCE(en75_ppe_rxdump))
-+			pr_info_ratelimited("XR500v PPE rx: crsn=%u ppe_entry=%u sport=%u ip4=%u ip6=%u l2vld=%u l4f=%u untag=%u sp_tag=%04x tci=%04x\n",
++		if (READ_ONCE(en75_ppe_rxdump)) {
++			u16 et12 = len >= 14 ? get_unaligned_be16(skb->data + 12) : 0;
++			u16 et16 = len >= 18 ? get_unaligned_be16(skb->data + 16) : 0;
++
++			pr_info_ratelimited("XR500v PPE rx: crsn=%u ppe_entry=%u sport=%u ip4=%u ip6=%u l2vld=%u l4f=%u untag=%u sp_tag=%04x tci=%04x et12=%04x et16=%04x len=%d raw32=%*phN\n",
 +				crsn, hash, get_erx_sport(&desc.msg.erx),
 +				is_erx_ip4(&desc.msg.erx), is_erx_ip6(&desc.msg.erx),
 +				is_erx_l2vld(&desc.msg.erx), is_erx_l4f(&desc.msg.erx),
-+				is_erx_untag(&desc.msg.erx), desc.msg.erx.sp_tag, desc.msg.erx.tci);
++				is_erx_untag(&desc.msg.erx), desc.msg.erx.sp_tag, desc.msg.erx.tci,
++				et12, et16, len, min_t(int, len, 32), skb->data);
++		}
++		/* HW-confirmed: the engine signals 'unbind entry built, bind it' as
++		 * crsn=HIT_UNBIND(0x0e)/RATE_REACHED(0x0f) with a VALID slot. NO_FLOW
++		 * (0x07) carries the 0x3fff invalid-slot marker -- do NOT bind there. */
 +		if (READ_ONCE(en75_ppe_offload_enabled) && q->qdma->eth->ppe &&
-+		    (crsn == MTK_PPE_CPU_REASON_NO_FLOW ||
++		    hash < EN75_PPE_FOE_NUM &&	/* OEM drops entry_num >= gPpeFoeNum(8192) */
++		    (crsn == MTK_PPE_CPU_REASON_HIT_UNBIND ||
 +		     crsn == MTK_PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED))
-+			en75_ppe_check_skb(q->qdma->eth->ppe, skb, hash);
++			en75_ppe_check_skb(q->qdma->eth->ppe, skb, hash, crsn);
++		/* build #61: PREBIND handshake -- after we set preb=1, the engine
++		 * confirms it staged the bind by raising crsn=HIT_PRE_BIND(0x1a) on
++		 * the next matching packet. ONLY then flip UNBIND->BIND (the HW owns
++		 * the dynamic-entry state; a SW-forced BIND is ignored). */
++		if (READ_ONCE(en75_ppe_offload_enabled) && q->qdma->eth->ppe &&
++		    hash < EN75_PPE_FOE_NUM &&
++		    crsn == MTK_PPE_CPU_REASON_HIT_PRE_BIND)
++			en75_ppe_prebind_promote(q->qdma->eth->ppe, hash);
 +	}
  
  	sport = get_erx_sport(&desc.msg.erx);
  	if (en75_rx_before_recv(q->qdma->eth, skb, sport))
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -14,6 +14,7 @@
+ #include <linux/of_net.h>
+ 
+ #include "econet_eth.h"
++#include "econet_ppe.h"
+ #include "gdm_regs.h"
+ #include <linux/moduleparam.h>
+ #include "qdma_desc.h"
+@@ -254,6 +255,11 @@
+ 	 * if we do, we'll attempt to linearize. */
+ 	if (skb_linearize(skb))
+ 		goto error;
++
++	/* build #42 PPE TX-hook: materialize the COMPLETE FoE bind from this
++	 * egress frame when the RX hook armed a slot (OEM PpeTxHandler model).
++	 * No-op (two READ_ONCE flag checks) on the normal forwarding path. */
++	en75_ppe_tx_maybe_bind(port->eth->ppe, skb);
+ 
+ 	ret = en75_qdma_xmit(port->qdma, skb, &msg, 0);
+ 
