@@ -14,6 +14,21 @@
 		reg = <0x00000000 0x10000000>;
 	};
 
+	/* build #63: reserved high region for the PPE FoE table, OEM-style
+	 * (OEM PpeFoeBase = ioremap(0x0dc00000)). no-map -> kernel never uses
+	 * it; the econet-eth driver accesses it uncached via KSEG1. Testing if
+	 * the FE DMA master only materializes FORWARD_BUILD entries here. */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		ppe_foe_rsv: ppe-foe@dc00000 {
+			reg = <0x0dc00000 0x00100000>;
+			no-map;
+		};
+	};
+
 	chosen {
 		stdout-path = "/serial@1fbf0000:115200";
 		/*

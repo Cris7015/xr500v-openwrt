@@ -1,0 +1,29 @@
+--- a/gsw/tag-mtk.c
++++ b/gsw/tag-mtk.c
+@@ -51,6 +51,26 @@
+ 	 */
+ 	eth_skb_pad(skb);
+ 
++	/* DSA-VLAN mode (gsw_vlanmode): instead of the MTK special tag, insert
++	 * a real 802.1Q header with VID = base + port. The switch (in VLAN
++	 * mode) routes by VID and strips the tag on user-port egress, and the
++	 * PPE parses past 0x8100 cleanly. Works for any inner ethertype
++	 * (IPv4, PPPoE session for the wan on lan3, etc.).
++	 */
++	if (READ_ONCE(mtk_tag_vlan_norm)) {
++		__be16 *vhdr;
++		u16 vid = READ_ONCE(mtk_tag_vlan_base) + dp->index;
++
++		if (skb_cow_head(skb, VLAN_HLEN))
++			return NULL;
++		skb_push(skb, VLAN_HLEN);
++		dsa_alloc_etype_header(skb, VLAN_HLEN);
++		vhdr = (__be16 *)dsa_etype_header_pos_tx(skb);
++		vhdr[0] = htons(ETH_P_8021Q);
++		vhdr[1] = htons(vid);
++		return skb;
++	}
++
+ 	/* Build the special tag after the MAC Source Address. If VLAN header
+ 	 * is present, it's required that VLAN header and special tag is
+ 	 * being combined. Only in this way we can allow the switch can parse

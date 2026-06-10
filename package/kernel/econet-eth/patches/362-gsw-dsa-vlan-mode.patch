@@ -1,0 +1,137 @@
+--- a/gsw/mt7530.c
++++ b/gsw/mt7530.c
+@@ -2669,6 +2669,126 @@
+ 	return n;
+ }
+ static DEVICE_ATTR_WO(gsw_vtag);
++
++/* echo "1 [base]" > gsw_vlanmode : full DSA-VLAN re-arch (OEM STAG->VTAG model).
++ * ALL four MCM user ports (p1..p4 = lan4..lan1) get PVID base+port and an
++ * 802.1Q VLAN whose members are {user port (egress UNTAG), MCM cascade p6
++ * (egress TAG)}; the on-die switch trunks the same VIDs between cascade p5
++ * and CPU p6 (both egress TAG). The MTK special tag is disabled on the CPU
++ * path, so the GDM/PPE sees real 802.1Q at offset 12 (deterministic PPE
++ * parse/hash) and the tagger demuxes/inserts by VID (mtk_tag_vlan_norm=1,
++ * mtk_tag_vlan_base=base). Prior PVC/PPBV1 values are saved and restored on
++ * "0". Default base 8 -> VIDs 9..12 (no collision with default PVID 1).
++ * Covers WAN too (lan3 = p2 carries pppoe). FDB is flushed on each flip. */
++static bool g_vlanmode_on;
++static u16 g_vlanmode_base = 8;
++static u32 g_vm_pvc[4], g_vm_ppbv[4], g_vm_pcr[4];
++static u32 g_vm_mcm_pvc6, g_vm_od_pvc5, g_vm_od_pvc6;
++
++static void en751221_vlanmode_on(u16 base)
++{
++	struct mt7530_priv *o = g_en751221_ondie, *m = g_en751221_mcm;
++	int p;
++
++	for (p = 1; p <= 4; p++) {
++		g_vm_pvc[p - 1] = mt7530_read(m, MT7530_PVC_P(p));
++		g_vm_ppbv[p - 1] = mt7530_read(m, MT7530_PPBV1_P(p));
++		g_vm_pcr[p - 1] = mt7530_read(m, MT7530_PCR_P(p));
++	}
++	g_vm_mcm_pvc6 = mt7530_read(m, MT7530_PVC_P(6));
++	g_vm_od_pvc5 = mt7530_read(o, MT7530_PVC_P(5));
++	g_vm_od_pvc6 = mt7530_read(o, MT7530_PVC_P(6));
++
++	for (p = 1; p <= 4; p++) {
++		u16 vid = base + p;
++
++		mt7530_write(m, MT7530_VAWD1, IVL_MAC | VTAG_EN |
++			     PORT_MEM(BIT(p) | BIT(6)) | FID(FID_BRIDGED) |
++			     VLAN_VALID);
++		mt7530_write(m, MT7530_VAWD2,
++			     ETAG_CTRL_P(p, MT7530_VLAN_EGRESS_UNTAG) |
++			     ETAG_CTRL_P(6, MT7530_VLAN_EGRESS_TAG));
++		mt7530_vlan_cmd(m, MT7530_VTCR_WR_VID, vid);
++		mt7530_rmw(m, MT7530_PPBV1_P(p), G0_PORT_VID_MASK,
++			   G0_PORT_VID(vid));
++		mt7530_write(m, MT7530_PVC_P(p), 0x00000000);
++		/* vlanflip7/cfgA: SECURITY mode is what makes the user port
++		 * forward through the VLAN table (egress untag included);
++		 * without it TX frames left the user port still tagged. */
++		mt7530_rmw(m, MT7530_PCR_P(p), PCR_PORT_VLAN_MASK,
++			   MT7530_PORT_SECURITY_MODE);
++
++		mt7530_write(o, MT7530_VAWD1, IVL_MAC | VTAG_EN |
++			     PORT_MEM(BIT(5) | BIT(6)) | FID(FID_BRIDGED) |
++			     VLAN_VALID);
++		mt7530_write(o, MT7530_VAWD2,
++			     ETAG_CTRL_P(5, MT7530_VLAN_EGRESS_TAG) |
++			     ETAG_CTRL_P(6, MT7530_VLAN_EGRESS_TAG));
++		mt7530_vlan_cmd(o, MT7530_VTCR_WR_VID, vid);
++	}
++	mt7530_write(m, MT7530_PVC_P(6), 0x00000101);
++	mt7530_write(o, MT7530_PVC_P(5), 0x00000101);
++	mt7530_write(o, MT7530_PVC_P(6), 0x00000100);
++	mt7530_fdb_cmd(m, MT7530_FDB_FLUSH, NULL);
++	mt7530_fdb_cmd(o, MT7530_FDB_FLUSH, NULL);
++}
++
++static void en751221_vlanmode_off(u16 base)
++{
++	struct mt7530_priv *o = g_en751221_ondie, *m = g_en751221_mcm;
++	int p;
++
++	for (p = 1; p <= 4; p++) {
++		u16 vid = base + p;
++
++		mt7530_write(m, MT7530_VAWD1, 0);
++		mt7530_write(m, MT7530_VAWD2, 0);
++		mt7530_vlan_cmd(m, MT7530_VTCR_WR_VID, vid);
++		mt7530_write(o, MT7530_VAWD1, 0);
++		mt7530_write(o, MT7530_VAWD2, 0);
++		mt7530_vlan_cmd(o, MT7530_VTCR_WR_VID, vid);
++
++		mt7530_write(m, MT7530_PVC_P(p), g_vm_pvc[p - 1]);
++		mt7530_write(m, MT7530_PPBV1_P(p), g_vm_ppbv[p - 1]);
++		mt7530_rmw(m, MT7530_PCR_P(p), PCR_PORT_VLAN_MASK,
++			   g_vm_pcr[p - 1] & PCR_PORT_VLAN_MASK);
++	}
++	mt7530_write(m, MT7530_PVC_P(6), g_vm_mcm_pvc6);
++	mt7530_write(o, MT7530_PVC_P(5), g_vm_od_pvc5);
++	mt7530_write(o, MT7530_PVC_P(6), g_vm_od_pvc6);
++	mt7530_fdb_cmd(m, MT7530_FDB_FLUSH, NULL);
++	mt7530_fdb_cmd(o, MT7530_FDB_FLUSH, NULL);
++}
++
++static ssize_t gsw_vlanmode_store(struct device *d, struct device_attribute *a,
++				  const char *buf, size_t n)
++{
++	unsigned int on, base = 8;
++
++	if (sscanf(buf, "%u %u", &on, &base) < 1)
++		return -EINVAL;
++	if (!g_en751221_ondie || !g_en751221_mcm)
++		return -ENODEV;
++	if (base < 1 || base > 4090)
++		return -EINVAL;
++	if (on && !g_vlanmode_on) {
++		g_vlanmode_base = base;
++		en751221_vlanmode_on(base);
++		g_vlanmode_on = true;
++	} else if (!on && g_vlanmode_on) {
++		en751221_vlanmode_off(g_vlanmode_base);
++		g_vlanmode_on = false;
++	}
++	dev_info(g_en751221_ondie->dev,
++		 "gsw_vlanmode %s base=%u: ondie PVC5=0x%08x PVC6=0x%08x mcm PVC1=0x%08x PVC6=0x%08x\n",
++		 g_vlanmode_on ? "ON" : "OFF", g_vlanmode_base,
++		 mt7530_read(g_en751221_ondie, MT7530_PVC_P(5)),
++		 mt7530_read(g_en751221_ondie, MT7530_PVC_P(6)),
++		 mt7530_read(g_en751221_mcm, MT7530_PVC_P(1)),
++		 mt7530_read(g_en751221_mcm, MT7530_PVC_P(6)));
++	return n;
++}
++static DEVICE_ATTR_WO(gsw_vlanmode);
+ /* --- end XR500v TRGMII cascade calibration --- */
+ 
+ static int
+@@ -2689,6 +2809,7 @@
+ 		device_create_file(priv->dev, &dev_attr_gsw_reg);
+ 		device_create_file(priv->dev, &dev_attr_gsw_stag);
+ 		device_create_file(priv->dev, &dev_attr_gsw_vtag);
++		device_create_file(priv->dev, &dev_attr_gsw_vlanmode);
+ 		dev_info(priv->dev, "en751221: trgmii_cal sysfs %sready\n",
+ 			 g_en751221_cal_sysfs ? "" : "NOT ");
+ 	}

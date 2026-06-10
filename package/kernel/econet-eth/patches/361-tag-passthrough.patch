@@ -1,0 +1,65 @@
+--- a/gsw/tag-mtk.c
++++ b/gsw/tag-mtk.c
+@@ -7,12 +7,26 @@
+  */
+ 
+ #include <linux/etherdevice.h>
+ #include <linux/if_vlan.h>
++#include <linux/unaligned.h>
+ 
+ #include "tag.h"
+ 
+ #define MTK_NAME		"mtk"
+ 
++/* build #64/#66 DSA-VLAN tests. Default 0 = normal MTK special-tag mode.
++ * passthrough keeps management alive when the frame tag is absent. vlan_norm
++ * is the OEM-style VID-per-port demux path used when the switch emits 802.1Q
++ * instead of the proprietary MTK special tag. */
++static int mtk_tag_passthrough;
++static int mtk_tag_fixport;
++static int mtk_tag_vlan_norm;
++static int mtk_tag_vlan_base;
++module_param(mtk_tag_passthrough, int, 0644);
++module_param(mtk_tag_fixport, int, 0644);
++module_param(mtk_tag_vlan_norm, int, 0644);
++module_param(mtk_tag_vlan_base, int, 0644);
++
+ #define MTK_HDR_LEN		4
+ #define MTK_HDR_XMIT_UNTAGGED		0
+ #define MTK_HDR_XMIT_TAGGED_TPID_8100	1
+@@ -108,10 +121,35 @@ static struct sk_buff *mtk_tag_rcv(struct sk_buff *skb, struct net_device *dev)
+ 	int port;
+ 	__be16 *phdr;
+ 
++	if (READ_ONCE(mtk_tag_passthrough)) {
++		skb->dev = mtk_conduit_find_user(dev, READ_ONCE(mtk_tag_fixport));
++		if (!skb->dev)
++			return NULL;
++		dsa_default_offload_fwd_mark(skb);
++		return skb;
++	}
++
+ 	if (unlikely(!pskb_may_pull(skb, MTK_HDR_LEN)))
+ 		return NULL;
+ 
+ 	phdr = dsa_etype_header_pos_rx(skb);
++	if (READ_ONCE(mtk_tag_vlan_norm) && ntohs(*phdr) == ETH_P_8021Q) {
++		u16 tci = get_unaligned_be16(skb->data);
++		u16 vid = tci & VLAN_VID_MASK;
++
++		if (vid < READ_ONCE(mtk_tag_vlan_base))
++			return NULL;
++		port = vid - READ_ONCE(mtk_tag_vlan_base);
++		skb_pull_rcsum(skb, VLAN_HLEN);
++		dsa_strip_etype_header(skb, VLAN_HLEN);
++
++		skb->dev = mtk_conduit_find_user(dev, port);
++		if (!skb->dev)
++			return NULL;
++
++		dsa_default_offload_fwd_mark(skb);
++		return skb;
++	}
+ 	hdr = ntohs(*phdr);
+ 
+ 	/* Remove MTK tag and recalculate checksum. */

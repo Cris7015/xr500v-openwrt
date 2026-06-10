@@ -1,6 +1,6 @@
 --- a/gsw/mt7530.c
 +++ b/gsw/mt7530.c
-@@ -2554,6 +2554,61 @@
+@@ -2554,6 +2554,121 @@
  	return n;
  }
  static DEVICE_ATTR_WO(en751221_trgmii_cal);
@@ -59,15 +59,76 @@
 +	return n;
 +}
 +static DEVICE_ATTR_WO(gsw_stag);
++
++/* echo 1 > gsw_vtag : build #66 dual-switch real-802.1Q ingress.
++ * This is the switch half of tag normalization: MCM lan4(p1)->cascade(p6)
++ * and on-die cascade(p5)->CPU(p6) carry VID 1 as real 802.1Q, with the MTK
++ * special tag disabled. Pair with mtk_tag_vlan_norm=1 so DSA demuxes by VID.
++ * Gated: default OFF == current working DSA special-tag path. */
++static ssize_t gsw_vtag_store(struct device *d, struct device_attribute *a,
++			      const char *buf, size_t n)
++{
++	struct mt7530_priv *o = g_en751221_ondie, *m = g_en751221_mcm;
++	bool on;
++
++	if (kstrtobool(buf, &on))
++		return -EINVAL;
++	if (!o || !m)
++		return -ENODEV;
++	if (on) {
++		/* MCM: lan4 p1 ingress -> VID1, cascade p6 egress tagged. */
++		mt7530_write(m, MT7530_VAWD1, IVL_MAC | VTAG_EN |
++			     PORT_MEM(BIT(1) | BIT(6)) | FID(FID_BRIDGED) |
++			     VLAN_VALID);
++		mt7530_write(m, MT7530_VAWD2,
++			     ETAG_CTRL_P(6, MT7530_VLAN_EGRESS_TAG));
++		mt7530_vlan_cmd(m, MT7530_VTCR_WR_VID, 1);
++		mt7530_rmw(m, MT7530_PPBV1_P(1), G0_PORT_VID_MASK, G0_PORT_VID(1));
++		mt7530_write(m, MT7530_PVC_P(1), 0x00000000);
++		mt7530_write(m, MT7530_PVC_P(6), 0x00000101);
++
++		/* On-die: cascade p5 and CPU p6 both egress tagged, no spec-tag. */
++		mt7530_write(o, MT7530_VAWD1, IVL_MAC | VTAG_EN |
++			     PORT_MEM(BIT(5) | BIT(6)) | FID(FID_BRIDGED) |
++			     VLAN_VALID);
++		mt7530_write(o, MT7530_VAWD2,
++			     ETAG_CTRL_P(5, MT7530_VLAN_EGRESS_TAG) |
++			     ETAG_CTRL_P(6, MT7530_VLAN_EGRESS_TAG));
++		mt7530_vlan_cmd(o, MT7530_VTCR_WR_VID, 1);
++		mt7530_write(o, MT7530_PVC_P(5), 0x00000101);
++		mt7530_write(o, MT7530_PVC_P(6), 0x00000100);
++	} else {
++		/* Revert to the proven nested-DSA special-tag topology. */
++		mt7530_write(m, MT7530_PVC_P(1), 0x810001c0);
++		mt7530_write(m, MT7530_PVC_P(6), 0x00000920);
++		mt7530_write(m, MT7530_PPBV1_P(1), 0x00000000);
++		mt7530_write(m, MT7530_VAWD1, 0);
++		mt7530_write(m, MT7530_VAWD2, 0);
++		mt7530_vlan_cmd(m, MT7530_VTCR_WR_VID, 1);
++
++		mt7530_write(o, MT7530_PVC_P(5), 0x81000120);
++		mt7530_write(o, MT7530_PVC_P(6), 0x00000120);
++		mt7530_write(o, MT7530_VAWD1, 0);
++		mt7530_write(o, MT7530_VAWD2, 0);
++		mt7530_vlan_cmd(o, MT7530_VTCR_WR_VID, 1);
++	}
++	dev_info(o->dev, "gsw_vtag %s: ondie PVC5=0x%08x PVC6=0x%08x mcm PVC1=0x%08x PVC6=0x%08x\n",
++		 on ? "ON" : "OFF",
++		 mt7530_read(o, MT7530_PVC_P(5)), mt7530_read(o, MT7530_PVC_P(6)),
++		 mt7530_read(m, MT7530_PVC_P(1)), mt7530_read(m, MT7530_PVC_P(6)));
++	return n;
++}
++static DEVICE_ATTR_WO(gsw_vtag);
  /* --- end XR500v TRGMII cascade calibration --- */
  
  static int
-@@ -2571,6 +2626,8 @@
+@@ -2571,6 +2676,9 @@
  	if (g_en751221_ondie && g_en751221_mcm && !g_en751221_cal_sysfs) {
  		if (device_create_file(priv->dev, &dev_attr_en751221_trgmii_cal) == 0)
  			g_en751221_cal_sysfs = 1;
 +		device_create_file(priv->dev, &dev_attr_gsw_reg);
 +		device_create_file(priv->dev, &dev_attr_gsw_stag);
++		device_create_file(priv->dev, &dev_attr_gsw_vtag);
  		dev_info(priv->dev, "en751221: trgmii_cal sysfs %sready\n",
  			 g_en751221_cal_sysfs ? "" : "NOT ");
  	}
