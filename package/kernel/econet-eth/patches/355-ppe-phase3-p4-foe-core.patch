@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/econet_ppe.h
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,376 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/* XR500v PPE phase 3 P4: FoE V1 (80B, mt7622/netsys-v1 class) structs +
 + * accessors, ported ~verbatim from mainline drivers/net/ethernet/mediatek/
@@ -237,6 +237,9 @@
 +int en75_ppe_bind_by_scan(struct en75_ppe *ppe);
 +/* committest override: commit at this exact slot (the engine's reported hash) */
 +extern u32 en75_force_hash;
++extern int en75_t_vlan1;	/* build #71: >=0 -> VTAG egress (plain vlan1, OEM model) */
++extern bool en75_t_static;	/* build #72: committest STATIC bit (0 = OEM-like) */
++extern bool en75_ppe_no_cache;	/* build #73: skip all cache ops in bind/flip (RA_HWNAT) */
 +
 +/* CDMA1_VLAN_CTRL: offset from fe_base (=0xBFB50400). OEM sets 0x81000001 =
 + * (TPID 0x8100 << 16) | urx(1) to POP the switch special tag on RX so the PPE
@@ -376,7 +379,7 @@
 +#endif /* __ECONET_PPE_H */
 --- /dev/null
 +++ b/econet_ppe.c
-@@ -0,0 +1,1683 @@
+@@ -0,0 +1,1716 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* XR500v PPE phase 3 P4: FoE V1 entry builders + commit, ported from mainline
 + * mtk_ppe.c. V1 / offload_version=2 only (port_mg=0); IPv4 HNAPT/ROUTE only for
@@ -593,6 +596,8 @@
 +		((u8 *)ppe->foe_virt + (u32)hash * EN75_FOE_ENTRY_SIZE);
 +	u32 wp = hwe->ipv4.orig.ports;		/* committed entry's L4 ports */
 +
++	if (READ_ONCE(en75_ppe_no_cache))	/* build #73: RA_HWNAT does no cache op */
++		return;
 +	switch (READ_ONCE(en75_ppe_cache_mode)) {
 +	case 1:
 +		en75_ppe_cache_clean_all(ppe);
@@ -866,6 +871,16 @@
 +bool en75_ppe_atomic;		/* build #41: one-shot atomic cache+DRAM dump from RX hook */
 +bool en75_ppe_foedump;		/* diagnostic: dump the engine-built FoE entry */
 +u32  en75_force_hash = 0xffffffff;  /* committest: if != ~0, commit at this slot (engine hash) */
++int  en75_t_vlan1 = -1;	/* build #71: >=0 -> author egress VTAG-style (plain VID via set_vlan,
++			 * etype=0, the OEM stag_to_vtag model seen in the real GPON bind
++			 * vlan1=8/etype=0) instead of the DSA dp-bitmap encoding (set_dsa). */
++bool en75_t_static = true;	/* build #72: committest STATIC bit. OEM real binds do NOT set
++				 * STATIC (ib1=0x21410316, bit31=0); set 0 to match the OEM. */
++bool en75_ppe_no_cache;	/* build #73: skip ALL cache ops in the bind/flip path. The
++			 * RA_HWNAT reference FoeBindToPpe writes the fields + state=BIND
++			 * to the coherent DRAM entry and RETURNS -- no cache flush, no
++			 * barrier, no engine poke. Our cache_clean_all may be forcing the
++			 * engine to re-FORWARD_BUILD (= "overwrites our bind"). Test that. */
 +
 +/* build #42 TX-hook (OEM FoeBindToPpe model): RX arms the slot, TX fills the
 + * COMPLETE entry from the egress packet and commits. See econet_ppe.h. */
@@ -1593,7 +1608,8 @@
 +			    MTK_FOE_IB1_BIND_KEEPALIVE;
 +		en75_foe_entry_set_oem_bind_meta(hwe);
 +		dma_wmb();
-+		en75_ppe_cache_clean_all(ppe);
++		if (!READ_ONCE(en75_ppe_no_cache))
++			en75_ppe_cache_clean_all(ppe);
 +		en75_ppe_diag_event(EN75_PPE_DIAG_PREBIND_PROMOTE);
 +		pr_info_ratelimited("XR500v PREBIND promote: slot=%u UNBIND->BIND (crsn=0x1a) ib1=%08x ib2=%08x\n",
 +				    hash, hwe->ib1, hwe->ipv4.ib2);
@@ -1664,7 +1680,8 @@
 +			 * owns the state field); preb is the handshake we'd been skipping. */
 +			hwe->ib1 |= MTK_FOE_IB1_UNBIND_PREBIND | MTK_FOE_IB1_BIND_CACHE;
 +			dma_wmb();
-+			en75_ppe_cache_clean_all(ppe);
++			if (!READ_ONCE(en75_ppe_no_cache))
++				en75_ppe_cache_clean_all(ppe);
 +			en75_ppe_diag_event(EN75_PPE_DIAG_PREBIND_ARM);
 +			pr_info_ratelimited("XR500v PREBIND arm: slot=%u preb=1 dp=%u ib1=%08x ib2=%08x ports=%08x\n",
 +					    hash, en75_flip_dp, hwe->ib1,
@@ -1679,7 +1696,7 @@
 +		 * per-line clear whose tag-search never matched our slot. In-driver here so
 +		 * the engine drops its cached UNBIND and re-reads our BIND -- an external
 +		 * clean-all loop starved the flip (FLIPs=0). */
-+		if (READ_ONCE(en75_ppe_cache_mode) == 1)
++		if (READ_ONCE(en75_ppe_cache_mode) == 1 && !READ_ONCE(en75_ppe_no_cache))
 +			en75_ppe_cache_clean_all(ppe);
 +		else
 +			en75_ppe_cah_clear_one(ppe, hash);
@@ -1826,7 +1843,10 @@
 +	e.ipv4.l2.dest_mac_lo = get_unaligned_be16(dmac + 4);
 +	e.ipv4.l2.src_mac_hi  = get_unaligned_be32(smac);
 +	e.ipv4.l2.src_mac_lo  = get_unaligned_be16(smac + 4);
-+	if (dp_bm & 0x3f)				/* DSA tag: set BEFORE pppoe */
++	if (en75_t_vlan1 >= 0) {			/* build #71: OEM VTAG model */
++		en75_foe_entry_set_vlan(&e, en75_t_vlan1);
++		e.ipv4.l2.etype = 0;			/* OEM bind: vlan1=VID, etype=0 */
++	} else if (dp_bm & 0x3f)			/* DSA tag: set BEFORE pppoe */
 +		en75_foe_entry_set_dsa(&e, __ffs(dp_bm & 0x3f), !!(dp_bm & 0x80));
 +	if (sid)
 +		en75_foe_entry_set_pppoe(&e, sid);	/* psn=1 + pppoe_id (+keeps DSA etype) */
@@ -2011,11 +2031,27 @@
 +			       pse_port, smac, dmac);
 +	en75_foe_entry_set_ipv4_tuple(e, false, sip, sport, dip, dport);
 +	en75_foe_entry_set_ipv4_tuple(e, true, sip, sport, dip, dport);	/* no NAT in test */
-+	if (dsa_port >= 0)
++	if (en75_t_vlan1 >= 0) {			/* build #71: OEM VTAG model */
++		en75_foe_entry_set_vlan(e, en75_t_vlan1);
++		e->ipv4.l2.etype = 0;
++	} else if (dsa_port >= 0)
 +		en75_foe_entry_set_dsa(e, dsa_port, passthrough);
 +	en75_foe_entry_set_queue(e, dsa_port >= 0 ? 3 + dsa_port : 0);
 +	en75_foe_entry_set_pse_port(e, pse_port);	/* 1=GDM1, 7=DISCARD (divert test) */
-+	e->ib1 |= MTK_FOE_IB1_STATIC;		/* test flow is never aged */
++	if (en75_t_static)
++		e->ib1 |= MTK_FOE_IB1_STATIC;	/* build #72: OEM real binds clear this */
++	/* build #72: PORT_MG/AG=0 -> ib2 like the OEM switch-egress bind 0x00FFF020
++	 * (vs our 0x00FFF0d0 with PORT_MG=0x3f). port_mg0 toggle drives it. */
++	if (READ_ONCE(en75_ppe_port_mg0))
++		e->ipv4.ib2 &= ~(MTK_FOE_IB2_PORT_MG | MTK_FOE_IB2_PORT_AG);
++	/* build #72: write the orig tuple in the order the engine's LOOKUP compares.
++	 * The recovered OEM bind stores NETWORK order (sip=A04F680A readable); our
++	 * engine FORWARD_BUILDs its UNBIND in swab32. tuple_swab=1 matches that. */
++	if (READ_ONCE(en75_ppe_tuple_swab)) {
++		e->ipv4.orig.src_ip  = swab32(e->ipv4.orig.src_ip);
++		e->ipv4.orig.dest_ip = swab32(e->ipv4.orig.dest_ip);
++		e->ipv4.orig.ports   = swab32(e->ipv4.orig.ports);
++	}
 +}
 +
 +/* direct commit at the SW hash (STATE=BIND): tests whether the engine HONORS a
@@ -2100,7 +2136,7 @@
  
  static int en75_ppe_engine_set(bool on)
  {
-@@ -374,6 +376,320 @@
+@@ -374,6 +376,323 @@
  static bool en75_ppe_engine;
  /* echo 1 > /sys/module/econet_eth/parameters/ppe_engine (default off) */
  module_param_cb(ppe_engine, &en75_ppe_engine_ops, &en75_ppe_engine, 0644);
@@ -2149,6 +2185,9 @@
 +module_param_named(ppe_foedump, en75_ppe_foedump, bool, 0644);
 +module_param_named(ppe_atomic, en75_ppe_atomic, bool, 0644);
 +module_param_named(ppe_t_hash, en75_force_hash, uint, 0644);
++module_param_named(ppe_t_vlan1, en75_t_vlan1, int, 0644);
++module_param_named(ppe_t_static, en75_t_static, bool, 0644);
++module_param_named(ppe_no_cache, en75_ppe_no_cache, bool, 0644);
 +/* build #42 TX-hook: ppe_tx_hook=1 -> RX arms, TX (en75_dev_xmit) fills the
 + * COMPLETE entry from the egress packet + commits. ppe_t_match_dip = the inner
 + * IPv4 dst (host int, e.g. 2399185552 for 143.0.170.144) that flags our flow. */
@@ -2421,7 +2460,7 @@
  
  static void en75_ppe_init(struct en75_eth_pvt *eth)
  {
-@@ -394,6 +710,10 @@
+@@ -394,6 +713,10 @@
  	en75_ppe_foe_virt = tbl;
  	en75_ppe_foe_phys = phys;
  	en75_ppe_base = base;
