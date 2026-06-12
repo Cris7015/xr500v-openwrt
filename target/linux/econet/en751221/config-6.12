@@ -210,3 +210,12 @@ CONFIG_ZSTD_COMMON=y
 CONFIG_ZSTD_COMPRESS=y
 CONFIG_ZSTD_DECOMPRESS=y
 
+# panic-capture (plan wf_b4447b85): netconsole PRIMARY (built-in, armed pre-userspace,
+# configured via DTS bootargs) + pstore/ramoops best-effort secondary.
+CONFIG_NETCONSOLE=y
+# CONFIG_NETCONSOLE_DYNAMIC is not set
+# CONFIG_NETCONSOLE_EXTENDED_LOG is not set
+CONFIG_PSTORE=y
+CONFIG_PSTORE_RAM=y
+CONFIG_PSTORE_CONSOLE=y
+CONFIG_PSTORE_DEFAULT_KMSG_BYTES=10240

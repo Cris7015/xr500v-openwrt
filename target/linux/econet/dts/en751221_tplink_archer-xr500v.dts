@@ -27,6 +27,24 @@
 			reg = <0x0dc00000 0x00180000>;
 			no-map;
 		};
+
+		/* panic-capture (plan wf_b4447b85): best-effort ramoops at the
+		 * TOP 1 MiB of the 256 MiB (avoids low PHY-training scratch).
+		 * RAM survival across the warm reset is likely-not-proven (closed
+		 * DDR init ROM); netconsole in bootargs is the PRIMARY capture.
+		 * ecc-size: reed-solomon corrects sparse DRAM decay over the
+		 * ~100 ms refresh-less reset gap. */
+		ramoops@ff00000 {
+			compatible = "ramoops";
+			reg = <0x0ff00000 0x00100000>;
+			record-size  = <0x00020000>;
+			console-size = <0x00040000>;
+			pmsg-size    = <0x00020000>;
+			ftrace-size  = <0x00000000>;
+			ecc-size     = <16>;
+			max-reason   = <5>;	/* KMSG_DUMP_OOPS and worse */
+			no-map;
+		};
 	};
 
 	chosen {
@@ -37,7 +55,15 @@
 		 * cmdline ubi.mtd=. The kernel-time auto-attach was found to
 		 * mismark OOB on this NAND via en75_bmt, breaking subsequent
 		 * userspace ubiformat. Userspace ubiattach is consistent.
+		 *
+		 * netconsole (panic-capture PRIMARY): cmdline is empty +
+		 * MIPS_CMDLINE_FROM_DTB=y, so this IS the kernel cmdline. dev
+		 * MUST be eth0 (only netdev at netconsole's late_initcall; the
+		 * DSA user ports appear much later and netpoll rejects them);
+		 * eth0 has no IP so src-ip is required. Receiver = .8, dst-mac
+		 * baked (NETCONSOLE_DYNAMIC off to save kernel bytes).
 		 */
+		bootargs = "console=ttyS0,115200 netconsole=6665@192.168.68.222/eth0,6666@192.168.68.8/bc:24:11:a4:b6:6c";
 	};
 
 	leds {
