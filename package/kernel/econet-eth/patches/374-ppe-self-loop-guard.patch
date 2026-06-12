@@ -1,0 +1,68 @@
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.c
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+@@ -667,7 +667,7 @@
+ /* find the RX-record (ring index) for an egress flow, matched by the NAT-invariant
+  * dst+dport; prefer the entry whose sport matches (NAT preserved it). Returns the
+  * ring index (caller reads .slot/.sip/.sport) or -1. */
+-static int en75_ppe_rxslot_lookup(u32 ndip, u16 nsport, u16 ndport)
++static int en75_ppe_rxslot_lookup(u32 ndip, u32 nsip, u16 nsport, u16 ndport)
+ {
+ 	int i, idx = -1;
+ 
+@@ -675,6 +675,15 @@
+ 		if (!en75_rx_ring[i].valid || en75_rx_ring[i].dip != ndip ||
+ 		    en75_rx_ring[i].dport != ndport)
+ 			continue;
++		/* patch 374: NEVER bind from a record of our own egress echo.
++		 * A re-ingressed post-NAT frame has sip == the NAT'd source and
++		 * is otherwise indistinguishable from the pre-NAT flow here
++		 * (dip, sport, dport are all NAT-invariant). Binding on it
++		 * creates a self-referential entry (orig == new, TTL-1, dp=1)
++		 * -> infinite forwarding loop (op100: same TCP segment x63
++		 * copies, TTL 63->0). */
++		if (en75_rx_ring[i].sip == nsip)
++			continue;
+ 		idx = i;
+ 		if (en75_rx_ring[i].sport == nsport)
+ 			break;				/* exact (sport preserved) */
+@@ -1669,7 +1678,7 @@
+ 
+ 		/* build #58: the engine's LOOKUP slot for this flow (RX-descriptor
+ 		 * FOE_ENTRY_NUM recorded per-flow at RX), and its pre-NAT 5-tuple. */
+-		rx = en75_ppe_rxslot_lookup(ndip, nsport, ndport);
++		rx = en75_ppe_rxslot_lookup(ndip, nsip, nsport, ndport);
+ 
+ 		if (READ_ONCE(en75_ppe_preserve_key)) {
+ 			for (i = 0; i < EN75_PPE_ENTRIES; i++) {
+@@ -1681,6 +1690,11 @@
+ 					continue;
+ 				if ((hwe->ipv4.orig.ports >> 16) != want_dphi)	/* dport != 8080 */
+ 					continue;
++				/* patch 374: skip the engine's UNBIND of our own
++				 * egress echo (post-NAT re-ingress; key stored
++				 * swab32(network), same as want_dip above). */
++				if (hwe->ipv4.orig.src_ip == swab32(nsip))
++					continue;
+ 				/* build #74: decode engine words via en75_hwv (raw key
+ 				 * compares above stay raw: want_* are already swab32). */
+ 				st = FIELD_GET(MTK_FOE_IB1_STATE, en75_hwv(hwe->ib1));
+@@ -1741,6 +1755,17 @@
+ 					    st_hist[0], st_hist[1], st_hist[2], st_hist[3]);
+ 			return;
+ 		}
++		/* patch 374: final self-reference guard (any key path, present or
++		 * future). orig.src == egress src means match-tuple == rewrite-tuple
++		 * (dip/ports already equal by construction): the entry would HW-
++		 * re-forward its own egress until TTL=0. Refuse; flow stays on SW. */
++		if (e.ipv4.orig.src_ip == nsip ||
++		    e.ipv4.orig.src_ip == swab32(nsip)) {
++			spin_unlock_bh(&ppe->lock);
++			pr_info_ratelimited("XR500v TX-bind(374): self-loop key (orig.sip==nsip %08x), skip\n",
++					    nsip);
++			return;
++		}
+ 		/* commit at the engine LOOKUP slot (RX descriptor) -- foedump proved this
+ 		 * is where the engine looks up, not the tuple-scan write slot. */
+ 		cand->hash = en75_rx_ring[rx].slot;
