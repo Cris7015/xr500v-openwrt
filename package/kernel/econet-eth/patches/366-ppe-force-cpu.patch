@@ -1,0 +1,66 @@
+Index: econet-eth-2026.02.13~c2f855cf/econet_eth.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_eth.c
++++ econet-eth-2026.02.13~c2f855cf/econet_eth.c
+@@ -444,6 +444,7 @@ module_param_named(ppe_tuple_swab, en75_
+ /* build #74 teoria A: write the WHOLE entry swab32'd (the engine's DRAM master
+  * byte order; equivalent to OEM GLO_CFG bit5 PPE_BSWAP). Re-captured in #76. */
+ module_param_named(ppe_swab_all, en75_ppe_swab_all, bool, 0644);
++module_param_named(ppe_force_cpu, en75_ppe_force_cpu, bool, 0644);
+ /* build #46: ppe_cache_mode live A/B of the cache publish op: 0=per-line clear,
+  * 1=global clean-all (OEM PpeCleanCache751221), 2=in-cache bind, 3=both. */
+ module_param_named(ppe_cache_mode, en75_ppe_cache_mode, byte, 0644);
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.c
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+@@ -288,6 +288,10 @@ void en75_ppe_cah_scan(struct en75_ppe *
+  * ppe_swab_all=1: write EVERY table word swab32 (engine then sees an exact
+  * OEM-layout entry) and read engine words back through swab32. Use with
+  * ppe_tuple_swab=0. en75_hwv() is its own inverse (swab32 involution). */
++bool en75_ppe_force_cpu;	/* build #78: OEM half-offload force-to-CPU (dest_port=5 +
++				 * magic VLAN etype=0x5678/vlan1=slot). Engine NAT+PPPoE
++				 * rewrites then delivers to CPU (crsn=0x16), sidestepping
++				 * the nested-switch fabric that blocks dp=1 egress. */
+ bool en75_ppe_swab_all;
+ static inline u32 en75_hwv(u32 raw)
+ {
+@@ -1662,6 +1666,26 @@ void en75_ppe_tx_bind(struct en75_ppe *p
+ 		/* commit at the engine LOOKUP slot (RX descriptor) -- foedump proved this
+ 		 * is where the engine looks up, not the tuple-scan write slot. */
+ 		cand->hash = en75_rx_ring[rx].slot;
++		/* build #78 (OEM PpeSetForcePortInfo half-offload): override egress to
++		 * force-to-CPU. dest_port=5 (QDMA->CPU) makes the engine do the full
++		 * NAT+PPPoE rewrite then bounce the frame to the CPU instead of the
++		 * switch fabric; a magic VLAN (vlan1=slot, etype=0x5678) rides the
++		 * egress frame so the RX side can recover which flow it was. The
++		 * engine signals crsn=HIT_BIND_FORCE_TO_CPU(0x16). DETECTION ONLY in
++		 * #78 (fpdump_bind captures the bounced frame); the dev_queue_xmit
++		 * delivery lands in #79 once this confirms the mechanism fires. */
++		if (READ_ONCE(en75_ppe_force_cpu)) {
++			u16 fslot = en75_rx_ring[rx].slot;
++
++			en75_foe_entry_set_pse_port(&e, 5);	/* 5 = QDMA -> CPU */
++			e.ipv4.l2.vlan1 = fslot;
++			e.ipv4.l2.etype = htons(0x5678);
++			e.ib1 &= ~MTK_FOE_IB1_BIND_VLAN_LAYER;
++			e.ib1 |= MTK_FOE_IB1_BIND_VLAN_TAG |
++				 FIELD_PREP(MTK_FOE_IB1_BIND_VLAN_LAYER, 1);
++			pr_info_ratelimited("XR500v FORCE-CPU: slot=%u dest_port=5 vlan1=%u etype=5678\n",
++					    fslot, fslot);
++		}
+ 		en75_foe_entry_commit(ppe, &e, en75_rx_ring[rx].slot);
+ 		pr_info_ratelimited("XR500v TX-bind(#58) commit LOOKUP slot=%u (scan_slot=%d key=%s) sip=%08x dip=%08x ports=%08x dp=%u ib2=%08x\n",
+ 			en75_rx_ring[rx].slot, slot, slot >= 0 ? "engine" : "RXrecon",
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.h
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+@@ -310,6 +310,7 @@ extern bool en75_ppe_flip;	/* build #43:
+ extern u8   en75_flip_dp;	/* ib2.dp egress port for the flip (1=GSW,2=GMAC)  */
+ extern u8   en75_ppe_tuple_swab;/* build #44: 1=store orig tuple swab32 (engine LOOKUP order) */
+ extern bool en75_ppe_swab_all;	/* build #74: commit every FoE word swab32 (engine byte-lane) */
++extern bool en75_ppe_force_cpu;	/* build #78: OEM force-to-CPU half-offload */
+ extern u8   en75_ppe_cache_mode;/* build #46: 0=per-line 1=global clean-all 2=in-cache 3=both */
+ extern bool en75_ppe_preserve_key;/* build #48: TX-bind keeps engine's UNBIND key, only adds rewrite */
+ extern bool en75_ppe_mirror_lookup;/* build #56: also write BIND at the RX-descriptor lookup slot */

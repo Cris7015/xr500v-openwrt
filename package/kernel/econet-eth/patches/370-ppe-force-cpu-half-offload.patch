@@ -1,0 +1,312 @@
+Index: econet-eth-2026.02.13~c2f855cf/econet_eth.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_eth.c
++++ econet-eth-2026.02.13~c2f855cf/econet_eth.c
+@@ -446,6 +446,14 @@
+  * byte order; equivalent to OEM GLO_CFG bit5 PPE_BSWAP). Re-captured in #76. */
+ module_param_named(ppe_swab_all, en75_ppe_swab_all, bool, 0644);
+ module_param_named(ppe_force_cpu, en75_ppe_force_cpu, bool, 0644);
++/* patch 370: A/B the fqos bit + PSE dest port of the force-to-CPU bind live. */
++module_param_named(ppe_fcpu_fqos, en75_ppe_fcpu_fqos, bool, 0644);
++module_param_named(ppe_fcpu_dp, en75_ppe_fcpu_dp, byte, 0644);
++/* patch 371 (build #79): half-offload delivery of the forced frames. */
++module_param_named(ppe_fcpu_xmit, en75_ppe_fcpu_xmit, bool, 0644);
++module_param_string(ppe_fcpu_odev, en75_ppe_fcpu_odev, IFNAMSIZ, 0644);
++/* patch 372: true reinjection counter (read-only). */
++module_param_named(ppe_fcpu_xmit_cnt, en75_ppe_fcpu_xmit_cnt, ulong, 0444);
+ /* build #46: ppe_cache_mode live A/B of the cache publish op: 0=per-line clear,
+  * 1=global clean-all (OEM PpeCleanCache751221), 2=in-cache bind, 3=both. */
+ module_param_named(ppe_cache_mode, en75_ppe_cache_mode, byte, 0644);
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.c
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+@@ -292,6 +292,24 @@
+ 				 * magic VLAN etype=0x5678/vlan1=slot). Engine NAT+PPPoE
+ 				 * rewrites then delivers to CPU (crsn=0x16), sidestepping
+ 				 * the nested-switch fabric that blocks dp=1 egress. */
++bool en75_ppe_fcpu_fqos = true;	/* patch 370: the OEM QDMA force-to-CPU rides the QoS
++				 * engine (ra_nat.c PpeSetForcePortInfo iblk2.fqos=1; the
++				 * live OEM dp=6 binds are ib2=0x00FFF0D0 = PSE_QOS set).
++				 * Our dp=5/fqos=0 frames had no path and vanished (op82:
++				 * no 0x5678 frame ever reached the CPU). */
++u8 en75_ppe_fcpu_dp = 5;	/* patch 370: force-to-CPU PSE dest port. OEM has TWO
++				 * variants: dp=5 (QDMATX_QDMARX) or dp=0 PDMA + fqos=1.
++				 * dp=5+fqos=0 and dp=5+fqos=1 both tested dead on the
++				 * EN751221 (no 0x5678 RX) -> A/B dp=0 next. */
++bool en75_ppe_fcpu_xmit;	/* patch 371 (build #79): deliver the forced frames --
++				 * strip the slot-VLAN, dev_queue_xmit out fcpu_odev.
++				 * VALIDATED PREREQ (op85): dp=0+fqos=0 lands rewritten
++				 * frames at the CPU with a VALID crsn=0x16 descriptor
++				 * (XR500v OEM classic path; no 0x5678 magic on this die,
++				 * that is the newer QDMATX_QDMARX-only variant). */
++char en75_ppe_fcpu_odev[IFNAMSIZ] = "lan3";	/* WAN user port (PPPoE rides lan3) */
++unsigned long en75_ppe_fcpu_xmit_cnt;	/* patch 372: true reinjection count (the old
++					 * oracle grep'd ratelimited printk lines) */
+ bool en75_ppe_swab_all;
+ static inline u32 en75_hwv(u32 raw)
+ {
+@@ -664,6 +682,7 @@
+ 	return idx;
+ }
+ static u16 en75_tx_bind_slot;	/* the engine-reported FoE slot to bind (from RX) */
++static u16 en75_tx_committed_slot = 0xffff;	/* patch 372: last slot we committed */
+ 
+ /* build #43: FLIP-IN-PLACE (OEM model) -- patch the engine-built entry, not from-scratch */
+ bool en75_ppe_flip;		/* master enable for the flip-in-place RX hook */
+@@ -1490,6 +1509,7 @@
+ 	u16 sid = 0, ppp, nsport = 0, ndport = 0, dp_bm = 0;
+ 	u8 ipproto, ihl;
+ 	int eo, b, ncand = 0;
++	bool plain_ip = false;	/* patch 373: plain-IPv4 egress (LAN-LAN rig) */
+ 
+ 	if (len < 48)
+ 		return;
+@@ -1497,20 +1517,34 @@
+ 	smac = d + 6;		/* egress src  MAC (router on lan3)  */
+ 
+ 	/* locate the PPPoE-session ethertype (0x8864): offset 16 if the MTK special
+-	 * tag is present (DSA user-port egress), 12 if not. */
++	 * tag is present (DSA user-port egress), 12 if not.
++	 * patch 373: also accept PLAIN IPv4 egress (0x0800) for the LAN-LAN rig --
++	 * routed/NAT'd flows between two local subnets have no PPPoE; the entry
++	 * builder is already conditional (set_pppoe only when sid != 0). */
+ 	if (get_unaligned_be16(d + 16) == ETH_P_PPP_SES) {
+ 		eo = 16;
+ 		dp_bm = d[13];		/* MTK tag[1] = (1<<dp_index) | passthrough(bit7) */
+ 	} else if (get_unaligned_be16(d + 12) == ETH_P_PPP_SES) {
+ 		eo = 12;
++	} else if (get_unaligned_be16(d + 16) == ETH_P_IP) {
++		eo = 16;
++		dp_bm = d[13];
++		plain_ip = true;
++	} else if (get_unaligned_be16(d + 12) == ETH_P_IP) {
++		eo = 12;
++		plain_ip = true;
+ 	} else {
+-		return;			/* not a pppoe-session frame -> ignore */
++		return;			/* neither pppoe-session nor plain IPv4 */
++	}
++	if (plain_ip) {
++		iph = d + eo + 2;			/* sid stays 0 -> no set_pppoe */
++	} else {
++		sid = get_unaligned_be16(d + eo + 4);	/* pppoe session-id */
++		ppp = get_unaligned_be16(d + eo + 8);	/* ppp protocol */
++		if (ppp != 0x0021)			/* IPv4 only */
++			return;
++		iph = d + eo + 10;
+ 	}
+-	sid = get_unaligned_be16(d + eo + 4);		/* pppoe session-id */
+-	ppp = get_unaligned_be16(d + eo + 8);		/* ppp protocol */
+-	if (ppp != 0x0021)				/* IPv4 only */
+-		return;
+-	iph = d + eo + 10;
+ 	if ((iph[0] >> 4) != 4)
+ 		return;
+ 	ihl = (iph[0] & 0x0f) * 4;
+@@ -1519,6 +1553,20 @@
+ 	ndip = get_unaligned_be32(iph + 16);
+ 	if (ndip != en75_tx_match_dip)			/* not our test flow */
+ 		return;
++	/* patch 372: steady-state short-circuit. While the slot we last
++	 * committed is still BIND (the engine is serving the flow), skip the
++	 * EGRESS logs + lock + 16K tuple-scan below -- that path ran up to
++	 * 20x/s and burned the core during throughput tests. When the engine
++	 * ages/unbinds the entry this check falls through and re-commits. */
++	if (!READ_ONCE(en75_tx_bind_arm) && en75_tx_committed_slot != 0xffff) {
++		struct mtk_foe_entry *hwe = (struct mtk_foe_entry *)
++			((u8 *)ppe->foe_virt +
++			 (u32)en75_tx_committed_slot * EN75_FOE_ENTRY_SIZE);
++
++		if (FIELD_GET(MTK_FOE_IB1_STATE, en75_hwv(hwe->ib1)) ==
++		    MTK_FOE_STATE_BIND)
++			return;
++	}
+ 	l4 = iph + ihl;
+ 	if (ipproto == IPPROTO_UDP || ipproto == IPPROTO_TCP) {
+ 		nsport = get_unaligned_be16(l4);	/* NAT'd src port (SNAT) */
+@@ -1526,11 +1574,14 @@
+ 	}
+ 
+ 	/* GROUND-TRUTH log: the egress fields we cannot read from userspace.
+-	 * ratelimited so the per-packet flood doesn't bury the COMMIT log. */
+-	pr_info_ratelimited("XR500v TX-bind EGRESS slot=%u dmac=%pM smac=%pM eo=%d dp_bm=%02x sid=0x%04x\n",
+-		en75_tx_bind_slot, dmac, smac, eo, dp_bm, sid);
+-	pr_info_ratelimited("XR500v TX-bind EGRESS new=%08x:%u -> %08x:%u proto=%u ihl=%u\n",
+-		nsip, nsport, ndip, ndport, ipproto, ihl);
++	 * ratelimited so the per-packet flood doesn't bury the COMMIT log.
++	 * patch 372: behind ppe_rxdump (perf runs want silence). */
++	if (READ_ONCE(en75_ppe_rxdump)) {
++		pr_info_ratelimited("XR500v TX-bind EGRESS slot=%u dmac=%pM smac=%pM eo=%d dp_bm=%02x sid=0x%04x\n",
++			en75_tx_bind_slot, dmac, smac, eo, dp_bm, sid);
++		pr_info_ratelimited("XR500v TX-bind EGRESS new=%08x:%u -> %08x:%u proto=%u ihl=%u\n",
++			nsip, nsport, ndip, ndport, ipproto, ihl);
++	}
+ 	if (READ_ONCE(en75_tx_dpbm_override) >= 0) {
+ 		dp_bm = READ_ONCE(en75_tx_dpbm_override) & 0xff;
+ 		pr_info_ratelimited("XR500v TX-bind DSA override dp_bm=%02x\n", dp_bm);
+@@ -1703,17 +1754,27 @@
+ 		 * delivery lands in #79 once this confirms the mechanism fires. */
+ 		if (READ_ONCE(en75_ppe_force_cpu)) {
+ 			u16 fslot = en75_rx_ring[rx].slot;
++			u8 fdp = READ_ONCE(en75_ppe_fcpu_dp);
+ 
+-			en75_foe_entry_set_pse_port(&e, 5);	/* 5 = QDMA -> CPU */
++			en75_foe_entry_set_pse_port(&e, fdp);	/* 5=QDMA 0=PDMA -> CPU */
++			/* patch 370: the QDMA delivery to CPU goes THROUGH the
++			 * QoS engine (OEM iblk2.fqos=1). That detour is also why
++			 * the OEM RX sees crsn/entry invalid and matches the
++			 * 0x5678 tag instead ("QDMA QoS remove CPU reason"). */
++			if (READ_ONCE(en75_ppe_fcpu_fqos))
++				e.ipv4.ib2 |= MTK_FOE_IB2_PSE_QOS;
+ 			e.ipv4.l2.vlan1 = fslot;
+ 			e.ipv4.l2.etype = htons(0x5678);
+ 			e.ib1 &= ~MTK_FOE_IB1_BIND_VLAN_LAYER;
+ 			e.ib1 |= MTK_FOE_IB1_BIND_VLAN_TAG |
+ 				 FIELD_PREP(MTK_FOE_IB1_BIND_VLAN_LAYER, 1);
+-			pr_info_ratelimited("XR500v FORCE-CPU: slot=%u dest_port=5 vlan1=%u etype=5678\n",
+-					    fslot, fslot);
++			pr_info_ratelimited("XR500v FORCE-CPU: slot=%u dest_port=%u fqos=%u vlan1=%u etype=5678\n",
++					    fslot, fdp,
++					    !!(e.ipv4.ib2 & MTK_FOE_IB2_PSE_QOS),
++					    fslot);
+ 		}
+ 		en75_foe_entry_commit(ppe, &e, en75_rx_ring[rx].slot);
++		en75_tx_committed_slot = en75_rx_ring[rx].slot;	/* patch 372 */
+ 		pr_info_ratelimited("XR500v TX-bind(#58) commit LOOKUP slot=%u (scan_slot=%d key=%s) sip=%08x dip=%08x ports=%08x dp=%u ib2=%08x\n",
+ 			en75_rx_ring[rx].slot, slot, slot >= 0 ? "engine" : "RXrecon",
+ 			e.ipv4.orig.src_ip, e.ipv4.orig.dest_ip, e.ipv4.orig.ports,
+@@ -1746,6 +1807,7 @@
+ 	WRITE_ONCE(en75_ppe_offload_enabled, false);
+ 	WRITE_ONCE(en75_tx_bind_arm, false);
+ 	en75_tx_bind_slot = 0xffff;
++	en75_tx_committed_slot = 0xffff;	/* patch 372 */
+ 	memset(en75_rx_ring, 0, sizeof(en75_rx_ring));
+ 	en75_rx_ring_idx = 0;
+ 
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.h
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+@@ -313,6 +313,11 @@
+ extern u8   en75_ppe_tuple_swab;/* build #44: 1=store orig tuple swab32 (engine LOOKUP order) */
+ extern bool en75_ppe_swab_all;	/* build #74: commit every FoE word swab32 (engine byte-lane) */
+ extern bool en75_ppe_force_cpu;	/* build #78: OEM force-to-CPU half-offload */
++extern bool en75_ppe_fcpu_fqos;	/* patch 370: set PSE_QOS on the force-to-CPU bind */
++extern u8   en75_ppe_fcpu_dp;	/* patch 370: force-to-CPU PSE port (5=QDMA, 0=PDMA) */
++extern bool en75_ppe_fcpu_xmit;	/* patch 371: re-xmit forced frames out fcpu_odev */
++extern char en75_ppe_fcpu_odev[];/* patch 371: egress user port name (default lan3) */
++extern unsigned long en75_ppe_fcpu_xmit_cnt;/* patch 372: true reinjection counter */
+ extern u8   en75_ppe_cache_mode;/* build #46: 0=per-line 1=global clean-all 2=in-cache 3=both */
+ extern bool en75_ppe_preserve_key;/* build #48: TX-bind keeps engine's UNBIND key, only adds rewrite */
+ extern bool en75_ppe_mirror_lookup;/* build #56: also write BIND at the RX-descriptor lookup slot */
+Index: econet-eth-2026.02.13~c2f855cf/econet_qdma.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_qdma.c
++++ econet-eth-2026.02.13~c2f855cf/econet_qdma.c
+@@ -152,7 +152,8 @@
+ }
+ 
+ static void en75_qdma_rx_process_one(struct en75_q_rx *q, u32 cpu_i,
+-				     enum dma_data_direction dir)
++				     enum dma_data_direction dir,
++				     struct net_device *fcpu_out)
+ {
+ 	struct en75_q_rx_ent *e = &q->entry[cpu_i];
+ 	struct sk_buff *skb;
+@@ -199,6 +200,16 @@
+ 	    READ_ONCE(en75_ppe_foedump) || READ_ONCE(en75_ppe_fpdump) ||
+ 	    READ_ONCE(en75_ppe_fpdump_bind)) {
+ 		u8 crsn = get_erx_crsn(&desc.msg.erx);
++		/* patch 370 (OEM ra_nat.c QDMA path): forced-to-CPU frames carry
++		 * the magic VLAN proto 0x5678 at bytes 12..13 (TCI = FoE slot);
++		 * the descriptor crsn/entry are INVALID for them ("QDMA QoS
++		 * remove CPU reason"). Detect by content, never by crsn=0x16. */
++		u16 fet12 = len >= 14 ? get_unaligned_be16(skb->data + 12) : 0;
++
++		if (fet12 == 0x5678)
++			pr_info_ratelimited("XR500v RX-5678: sport=%u crsn=%u ppe_entry=%u len=%u raw32=%*phN\n",
++				get_erx_sport(&desc.msg.erx), crsn, hash, len,
++				min_t(int, len, 32), skb->data);
+ 
+ 		if (READ_ONCE(en75_ppe_foedump) && q->qdma->eth->ppe &&
+ 		    (crsn == MTK_PPE_CPU_REASON_HIT_UNBIND ||
+@@ -227,9 +238,11 @@
+ 		 * half-offload question: does the engine deliver the frame to the
+ 		 * CPU already REWRITTEN (dmac=BRAS + 0x8864 + NAT'd IPs visible in
+ 		 * the hex head) or raw? Auto-clears after one frame. */
+-		if (READ_ONCE(en75_ppe_fpdump_bind) && crsn >= 0x10 &&
+-		    (!READ_ONCE(en75_ppe_force_cpu) ||
+-		     crsn == MTK_PPE_CPU_REASON_HIT_BIND_FORCE_TO_CPU)) {
++		if (READ_ONCE(en75_ppe_fpdump_bind) &&
++		    (READ_ONCE(en75_ppe_force_cpu) ?
++		     (fet12 == 0x5678 ||
++		      crsn == MTK_PPE_CPU_REASON_HIT_BIND_FORCE_TO_CPU) :
++		     crsn >= 0x10)) {
+ 			WRITE_ONCE(en75_ppe_fpdump_bind, false);
+ 			pr_info("XR500v FPDUMP-BIND: sport=%u crsn=0x%02x ppe_entry=%u len=%u\n",
+ 				get_erx_sport(&desc.msg.erx), crsn, hash, len);
+@@ -269,6 +282,31 @@
+ 			en75_ppe_prebind_promote(q->qdma->eth->ppe, hash);
+ 	}
+ 
++	/* patch 371 (build #79): half-offload delivery, the OEM
++	 * PpeHitBindForceToCpuHandler equivalent. The engine HW-rewrote this
++	 * frame (NAT+PPPoE, dmac=next-hop, TTL-1) and forced it to the CPU
++	 * (dp=0) with crsn=0x16 + an inserted VLAN whose TCI = FoE slot
++	 * (TPID comes from VPM 0xF18 = 0x8100, NOT the entry etype). Strip
++	 * the tag and transmit it raw out the egress user port. */
++	/* patch 372: fcpu_out resolved ONCE per NAPI poll by the caller (was
++	 * dev_get_by_name per packet); count instead of printk (log stays
++	 * behind ppe_rxdump). */
++	if (fcpu_out &&
++	    get_erx_crsn(&desc.msg.erx) ==
++	    MTK_PPE_CPU_REASON_HIT_BIND_FORCE_TO_CPU && skb->len >= 18) {
++		if (get_unaligned_be16(skb->data + 12) == ETH_P_8021Q) {
++			memmove(skb->data + 4, skb->data, 12);
++			skb_pull(skb, 4);
++		}
++		skb->dev = fcpu_out;
++		en75_ppe_fcpu_xmit_cnt++;
++		if (READ_ONCE(en75_ppe_rxdump))
++			pr_info_ratelimited("XR500v FCPU-XMIT: len=%u -> %s\n",
++					    skb->len, fcpu_out->name);
++		dev_queue_xmit(skb);
++		return;
++	}
++
+ 	sport = get_erx_sport(&desc.msg.erx);
+ 	if (en75_rx_before_recv(q->qdma->eth, skb, sport))
+ 		dev_kfree_skb(skb);
+@@ -286,22 +324,30 @@
+ {
+ 	enum dma_data_direction dir = page_pool_get_dma_dir(q->page_pool);
+ 	u32 hardware_i = en75_rreg(&q->qchain_regs->rx_hwi);
++	struct net_device *fcpu_out = NULL;
+ 	int ndesc = q->ndesc;
+ 	u32 cpu_i;
+ 	int done;
+ 
++	/* patch 372: resolve the half-offload egress dev once per poll. */
++	if (READ_ONCE(en75_ppe_fcpu_xmit))
++		fcpu_out = dev_get_by_name(&init_net, en75_ppe_fcpu_odev);
++
+ 	/* The stored value of cpu_i is the last entry actually handled.
+ 	 * Whereas hardware_i is the next entry that has not yet been received.
+ 	 */
+ 	cpu_i = (q->cpu_i + 1) % ndesc;
+ 
+ 	for (done = 0; done < budget && cpu_i != hardware_i; done++) {
+-		en75_qdma_rx_process_one(q, cpu_i, dir);
++		en75_qdma_rx_process_one(q, cpu_i, dir, fcpu_out);
+ 		cpu_i = (cpu_i + 1) % ndesc;
+ 	}
+ 
+ 	en75_fill_rx_queue(q, cpu_i);
+ 
++	if (fcpu_out)
++		dev_put(fcpu_out);
++
+ 	return done;
+ }
+ 

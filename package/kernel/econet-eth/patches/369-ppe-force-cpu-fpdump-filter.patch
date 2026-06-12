@@ -1,0 +1,26 @@
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.h
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+@@ -148,6 +148,7 @@ enum {
+ 	MTK_PPE_CPU_REASON_UN_HIT			= 0x0d,
+ 	MTK_PPE_CPU_REASON_HIT_UNBIND			= 0x0e,
+ 	MTK_PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED	= 0x0f,
++	MTK_PPE_CPU_REASON_HIT_BIND_FORCE_TO_CPU	= 0x16,
+ 	/* build #61: HNAT_V2 prebind handshake notify (OEM frame_engine.h:419,
+ 	 * HIT_PRE_BIND). The engine emits this for an entry whose udib1.preb=1 on the
+ 	 * next matching packet; ONLY then does the OEM flip state=UNBIND->BIND. */
+Index: econet-eth-2026.02.13~c2f855cf/econet_qdma.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_qdma.c
++++ econet-eth-2026.02.13~c2f855cf/econet_qdma.c
+@@ -227,7 +227,9 @@ static void en75_qdma_rx_process_one(str
+ 		 * CPU already REWRITTEN (dmac=BRAS + 0x8864 + NAT'd IPs visible in
+ 		 * the hex head) or raw? Auto-clears after one frame. */
+-		if (READ_ONCE(en75_ppe_fpdump_bind) && crsn >= 0x10) {
++		if (READ_ONCE(en75_ppe_fpdump_bind) && crsn >= 0x10 &&
++		    (!READ_ONCE(en75_ppe_force_cpu) ||
++		     crsn == MTK_PPE_CPU_REASON_HIT_BIND_FORCE_TO_CPU)) {
+ 			WRITE_ONCE(en75_ppe_fpdump_bind, false);
+ 			pr_info("XR500v FPDUMP-BIND: sport=%u crsn=0x%02x ppe_entry=%u len=%u\n",
+ 				get_erx_sport(&desc.msg.erx), crsn, hash, len);

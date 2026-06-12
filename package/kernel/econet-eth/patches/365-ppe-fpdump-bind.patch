@@ -1,0 +1,75 @@
+Index: econet-eth-2026.02.13~c2f855cf/econet_eth.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_eth.c
++++ econet-eth-2026.02.13~c2f855cf/econet_eth.c
+@@ -420,6 +420,7 @@ static unsigned int ppe_t_pseport = 1;	/
+ module_param(ppe_t_pseport, uint, 0644);
+ module_param_named(ppe_rxdump, en75_ppe_rxdump, bool, 0644);
+ module_param_named(ppe_fpdump, en75_ppe_fpdump, bool, 0644);
++module_param_named(ppe_fpdump_bind, en75_ppe_fpdump_bind, bool, 0644);
+ module_param_named(ppe_foedump, en75_ppe_foedump, bool, 0644);
+ module_param_named(ppe_atomic, en75_ppe_atomic, bool, 0644);
+ module_param_named(ppe_t_hash, en75_force_hash, uint, 0644);
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.c
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+@@ -539,6 +539,9 @@ u32 en75_ppe_test_commit(struct en75_ppe
+ bool en75_ppe_offload_enabled;	/* RX hook is inert until a test/offload arms it */
+ bool en75_ppe_rxdump;		/* diagnostic: dump crsn/ppe_entry on RX */
+ bool en75_ppe_fpdump;		/* build #75: one-shot dump of first sport>=8 bounced frame */
++bool en75_ppe_fpdump_bind;	/* build #77: one-shot dump of first crsn>=0x10 (HIT_BIND fam)
++				 * frame -- tells whether dp=0 delivers the REWRITTEN frame
++				 * to the CPU (half-offload viable) or the raw one. */
+ bool en75_ppe_atomic;		/* build #41: one-shot atomic cache+DRAM dump from RX hook */
+ bool en75_ppe_foedump;		/* diagnostic: dump the engine-built FoE entry */
+ u32  en75_force_hash = 0xffffffff;  /* committest: if != ~0, commit at this slot (engine hash) */
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.h
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+@@ -214,6 +214,7 @@ extern bool en75_ppe_offload_enabled;
+ /* diagnostic: when true, the RX path logs crsn/ppe_entry/sport (rate-limited) */
+ extern bool en75_ppe_rxdump;
+ extern bool en75_ppe_fpdump;	/* build #75: capture first sport>=8 bounce */
++extern bool en75_ppe_fpdump_bind;	/* build #77: capture first crsn>=0x10 frame */
+ /* build #41: one-shot atomic dump (DRAM[slot] + 16 CAH lines data-words) from the RX
+  * hook, to catch our flow IN the cache at the crsn=15 instant (no userspace race) */
+ extern bool en75_ppe_atomic;
+Index: econet-eth-2026.02.13~c2f855cf/econet_qdma.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_qdma.c
++++ econet-eth-2026.02.13~c2f855cf/econet_qdma.c
+@@ -196,7 +196,8 @@ static void en75_qdma_rx_process_one(str
+ 	 * HIT_UNBIND_RATE_REACHED(0x0f) -- accept both). 'hash' is the RAW engine
+ 	 * FoE slot. en75_ppe_check_skb() takes ppe->lock; never eats the skb. */
+ 	if (READ_ONCE(en75_ppe_rxdump) || READ_ONCE(en75_ppe_offload_enabled) ||
+-	    READ_ONCE(en75_ppe_foedump) || READ_ONCE(en75_ppe_fpdump)) {
++	    READ_ONCE(en75_ppe_foedump) || READ_ONCE(en75_ppe_fpdump) ||
++	    READ_ONCE(en75_ppe_fpdump_bind)) {
+ 		u8 crsn = get_erx_crsn(&desc.msg.erx);
+ 
+ 		if (READ_ONCE(en75_ppe_foedump) && q->qdma->eth->ppe &&
+@@ -221,6 +222,22 @@ static void en75_qdma_rx_process_one(str
+ 				DUMP_PREFIX_OFFSET, 16, 1, skb->data,
+ 				min_t(unsigned int, len, 80u), true);
+ 		}
++		/* build #77 (Fase A1): one-shot capture of the FIRST HIT_BIND-family
++		 * frame (crsn>=0x10). With a dp=0 bound entry this answers THE
++		 * half-offload question: does the engine deliver the frame to the
++		 * CPU already REWRITTEN (dmac=BRAS + 0x8864 + NAT'd IPs visible in
++		 * the hex head) or raw? Auto-clears after one frame. */
++		if (READ_ONCE(en75_ppe_fpdump_bind) && crsn >= 0x10) {
++			WRITE_ONCE(en75_ppe_fpdump_bind, false);
++			pr_info("XR500v FPDUMP-BIND: sport=%u crsn=0x%02x ppe_entry=%u len=%u\n",
++				get_erx_sport(&desc.msg.erx), crsn, hash, len);
++			pr_info("XR500v FPDUMP-BIND descmsg: %08x %08x %08x %08x\n",
++				desc.msg.raw[0], desc.msg.raw[1],
++				desc.msg.raw[2], desc.msg.raw[3]);
++			print_hex_dump(KERN_INFO, "XR500v FPDUMP-BIND frame: ",
++				DUMP_PREFIX_OFFSET, 16, 1, skb->data,
++				min_t(unsigned int, len, 80u), true);
++		}
+ 		if (READ_ONCE(en75_ppe_rxdump)) {
+ 			u16 et12 = len >= 14 ? get_unaligned_be16(skb->data + 12) : 0;
+ 			u16 et16 = len >= 18 ? get_unaligned_be16(skb->data + 16) : 0;

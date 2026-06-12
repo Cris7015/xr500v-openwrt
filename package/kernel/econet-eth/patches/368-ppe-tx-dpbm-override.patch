@@ -1,0 +1,47 @@
+Index: econet-eth-2026.02.13~c2f855cf/econet_eth.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_eth.c
++++ econet-eth-2026.02.13~c2f855cf/econet_eth.c
+@@ -425,6 +425,7 @@ module_param_named(ppe_foedump, en75_ppe
+ module_param_named(ppe_atomic, en75_ppe_atomic, bool, 0644);
+ module_param_named(ppe_t_hash, en75_force_hash, uint, 0644);
+ module_param_named(ppe_t_vlan1, en75_t_vlan1, int, 0644);
++module_param_named(ppe_t_dpbm, en75_tx_dpbm_override, int, 0644);
+ module_param_named(ppe_t_static, en75_t_static, bool, 0644);
+ module_param_named(ppe_no_cache, en75_ppe_no_cache, bool, 0644);
+ /* build #42 TX-hook: ppe_tx_hook=1 -> RX arms, TX (en75_dev_xmit) fills the
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.c
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+@@ -574,6 +574,7 @@ u32  en75_force_hash = 0xffffffff;  /* c
+ int  en75_t_vlan1 = -1;	/* build #71: >=0 -> author egress VTAG-style (plain VID via set_vlan,
+ 			 * etype=0, the OEM stag_to_vtag model seen in the real GPON bind
+ 			 * vlan1=8/etype=0) instead of the DSA dp-bitmap encoding (set_dsa). */
++int  en75_tx_dpbm_override = -1;	/* debug: >=0 overrides TX-bind parsed DSA dp_bm */
+ bool en75_t_static = true;	/* build #72: committest STATIC bit. OEM real binds do NOT set
+ 				 * STATIC (ib1=0x21410316, bit31=0); set 0 to match the OEM. */
+ bool en75_ppe_no_cache;		/* build #73: skip all cache ops in bind/flip (RA_HWNAT) */
+@@ -1532,6 +1533,10 @@ void en75_ppe_tx_bind(struct en75_ppe *p
+ 		en75_tx_bind_slot, dmac, smac, eo, dp_bm, sid);
+ 	pr_info_ratelimited("XR500v TX-bind EGRESS new=%08x:%u -> %08x:%u proto=%u ihl=%u\n",
+ 		nsip, nsport, ndip, ndport, ipproto, ihl);
++	if (READ_ONCE(en75_tx_dpbm_override) >= 0) {
++		dp_bm = READ_ONCE(en75_tx_dpbm_override) & 0xff;
++		pr_info_ratelimited("XR500v TX-bind DSA override dp_bm=%02x\n", dp_bm);
++	}
+ 
+ 	spin_lock_bh(&ppe->lock);
+ 	for (b = 0; b < EN75_PPE_NUM_FLOWS; b++)
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.h
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+@@ -239,6 +239,7 @@ void en75_ppe_scan_table(struct en75_ppe
+ /* committest override: commit at this exact slot (the engine's reported hash) */
+ extern u32 en75_force_hash;
+ extern int en75_t_vlan1;	/* build #71: >=0 -> VTAG egress (plain vlan1, OEM model) */
++extern int en75_tx_dpbm_override;	/* debug: >=0 overrides TX-bind parsed DSA dp_bm */
+ extern bool en75_t_static;	/* build #72: committest STATIC bit (0 = OEM-like) */
+ extern bool en75_ppe_no_cache;	/* build #73: skip all cache ops in bind/flip (RA_HWNAT) */
+ 

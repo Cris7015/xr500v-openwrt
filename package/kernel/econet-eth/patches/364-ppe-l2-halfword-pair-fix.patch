@@ -1,0 +1,207 @@
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.c
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+@@ -274,6 +274,26 @@ void en75_ppe_cah_scan(struct en75_ppe *
+ 
+ /* --- entry builders (V1) --- */
+ 
++/* build #74 (theory A): the engine's FoE DRAM byte-lane is swapped vs the CPU
++ * on our setup. Evidence: our engine MATERIALIZES keys swab32 (scan §4.3,
++ * sip=f844a8c0=swab32(c0a844f8)) while the OEM's engine materializes NETWORK
++ * order (GPON bound entry 5644 sip=A04F680A readable; the OEM HNAPT bind path
++ * -- PpeFillInL3Info 0x79e8 -- writes ONLY new_sip/new_dip/DSCP and NEVER the
++ * orig key, so that key is engine-written). Same silicon, same operation,
++ * different byte order => a DRAM-port swap config differs (lives outside the
++ * FE block, which compared byte-identical). It also explains every wall:
++ * a BE-written BIND reads back to the engine as swab32 garbage (state bits
++ * 28-29 land in its bits 4-5 = timestamp), so it never honors and rebuilds
++ * its UNBIND on top ("engine owns the state field" was the swap all along).
++ * ppe_swab_all=1: write EVERY table word swab32 (engine then sees an exact
++ * OEM-layout entry) and read engine words back through swab32. Use with
++ * ppe_tuple_swab=0. en75_hwv() is its own inverse (swab32 involution). */
++bool en75_ppe_swab_all;
++static inline u32 en75_hwv(u32 raw)
++{
++	return READ_ONCE(en75_ppe_swab_all) ? swab32(raw) : raw;
++}
++
+ int en75_foe_entry_prepare(struct mtk_foe_entry *entry, int type, int l4proto,
+ 			   u8 pse_port, const u8 *src_mac, const u8 *dest_mac)
+ {
+@@ -418,9 +438,41 @@ void en75_foe_entry_commit(struct en75_p
+ 
+ 	/* data first, then ib1 LAST so HW never sees STATE=BIND with a half-
+ 	 * written tuple (the table is dma_alloc_coherent -> dma_wmb suffices). */
+-	memcpy(&hwe->data, &entry->data, EN75_FOE_ENTRY_SIZE - sizeof(hwe->ib1));
+-	wmb();
+-	hwe->ib1 = entry->ib1;
++	if (READ_ONCE(en75_ppe_swab_all)) {
++		/* build #74: store every word swab32 so the byte-lane-swapped
++		 * engine reads back the exact OEM bound-entry layout. */
++		const u32 *sw = (const u32 *)&entry->data;
++		u32 *dw = (u32 *)&hwe->data;
++		int i;
++
++		for (i = 0; i < 19; i++) {
++			u32 v = sw[i];
++
++			/* build #76 (RPi5 frame capture + OEM live binds r2): the
++			 * engine's mixed-u16 words are LITTLE-endian pair order --
++			 * [sport|dport] / [dmac_lo|vlan2] / [smac_lo|pppoe_id] --
++			 * while the BE-compiled struct lays them [dport|sport] /
++			 * [vlan2|dmac_lo] / [pppoe|smac_lo]. swab32 fixes byte
++			 * order inside the word but NOT the u16 pair placement,
++			 * so the emitted frame had dmac_lo<-vlan, smac_lo<-pppoe,
++			 * sid<-smac_lo and L4 ports swapped (BRAS drops them all).
++			 * Swap the halves of data words 6 (new.ports), 12
++			 * ([vlan2|dmac_lo]) and 14 ([pppoe|smac_lo]); the orig key
++			 * words stay raw (preserve-key copies the engine's own).
++			 * NOTE [vlan1|etype] (data word 10) is NOT swapped: OEM
++			 * live w11=0x00040000 = vlan1 in the HIGH half, and the
++			 * captured VTAG steering (VID=vlan1) worked as stored. */
++			if (i == 6 || i == 12 || i == 14)
++				v = (v << 16) | (v >> 16);
++			dw[i] = swab32(v);
++		}
++		wmb();
++		hwe->ib1 = swab32(entry->ib1);
++	} else {
++		memcpy(&hwe->data, &entry->data, EN75_FOE_ENTRY_SIZE - sizeof(hwe->ib1));
++		wmb();
++		hwe->ib1 = entry->ib1;
++	}
+ 	dma_wmb();
+ 
+ 	/* EN751221 CAH flush (NOT the MT7620 bit9 pulse, which does nothing here)
+@@ -1262,8 +1314,11 @@ void __en75_ppe_check_skb(struct en75_pp
+ 	spin_lock_bh(&ppe->lock);
+ 	hwe = (struct mtk_foe_entry *)((u8 *)ppe->foe_virt +
+ 				       (u32)hash * EN75_FOE_ENTRY_SIZE);
+-	state = FIELD_GET(MTK_FOE_IB1_STATE, hwe->ib1);
+-	cur_dp = FIELD_GET(MTK_FOE_IB2_DEST_PORT, hwe->ipv4.ib2);
++	/* build #74: engine words through en75_hwv (swab32 when ppe_swab_all) --
++	 * else, after a successful swab-bind, the raw FIELD_GET would misread
++	 * state and the guards below would re-commit forever. */
++	state = FIELD_GET(MTK_FOE_IB1_STATE, en75_hwv(hwe->ib1));
++	cur_dp = FIELD_GET(MTK_FOE_IB2_DEST_PORT, en75_hwv(hwe->ipv4.ib2));
+ 
+ 	/* build #41: one-shot atomic dump (cache+DRAM at this exact crsn frame). */
+ 	if (READ_ONCE(en75_ppe_atomic)) {
+@@ -1283,21 +1338,29 @@ void __en75_ppe_check_skb(struct en75_pp
+ 	 * via RXHWF_OK_CNT(fe+0x594) climbing vs RXCPU_OK_CNT(fe+0x590). */
+ 	if (READ_ONCE(en75_ppe_flip) && hwe->ib1 &&
+ 	    state != MTK_FOE_STATE_BIND) {
++		/* build #74: RMW through the engine's byte order. Until now a flip
++		 * set CPU-view bits 28-29, which a swapped engine reads as ITS bits
++		 * 4-5 (timestamp) -- a no-op on the state. en75_hwv both ways. */
++		u32 ib1v = en75_hwv(hwe->ib1);
++		u32 ib2v = en75_hwv(hwe->ipv4.ib2);
++
+ 		/* set egress dest_port + PORT_MG/AG=0x3f and PSE_QOS=0 -- the OEM
+ 		 * switch-egress ib2 is 0x00FFF020 (dp=1, fqos/PSE_QOS=0); only the
+ 		 * GPON/QDMA dp=6 upstream path uses PSE_QOS=1 (ib2=0x00FFF0D0). */
+-		hwe->ipv4.ib2 &= ~(MTK_FOE_IB2_DEST_PORT | MTK_FOE_IB2_PSE_QOS |
+-				   MTK_FOE_IB2_PORT_MG | MTK_FOE_IB2_PORT_AG);
+-		hwe->ipv4.ib2 |= FIELD_PREP(MTK_FOE_IB2_DEST_PORT, en75_flip_dp) |
+-				 FIELD_PREP(MTK_FOE_IB2_PORT_MG, 0x3f) |
+-				 FIELD_PREP(MTK_FOE_IB2_PORT_AG, 0x3f);
++		ib2v &= ~(MTK_FOE_IB2_DEST_PORT | MTK_FOE_IB2_PSE_QOS |
++			  MTK_FOE_IB2_PORT_MG | MTK_FOE_IB2_PORT_AG);
++		ib2v |= FIELD_PREP(MTK_FOE_IB2_DEST_PORT, en75_flip_dp) |
++			FIELD_PREP(MTK_FOE_IB2_PORT_MG, 0x3f) |
++			FIELD_PREP(MTK_FOE_IB2_PORT_AG, 0x3f);
++		hwe->ipv4.ib2 = en75_hwv(ib2v);
+ 		if (READ_ONCE(en75_ppe_prebind)) {
+ 			/* build #61: OEM PREBIND model -- set preb(bit24)+cache, KEEP
+ 			 * state=UNBIND. The engine raises crsn=HIT_PRE_BIND(0x1a) on the
+ 			 * next matching packet; en75_ppe_prebind_promote() then flips to
+ 			 * BIND. The OEM never SW-forces BIND on a dynamic entry (the HW
+ 			 * owns the state field); preb is the handshake we'd been skipping. */
+-			hwe->ib1 |= MTK_FOE_IB1_UNBIND_PREBIND | MTK_FOE_IB1_BIND_CACHE;
++			ib1v |= MTK_FOE_IB1_UNBIND_PREBIND | MTK_FOE_IB1_BIND_CACHE;
++			hwe->ib1 = en75_hwv(ib1v);
+ 			dma_wmb();
+ 			if (!READ_ONCE(en75_ppe_no_cache))
+ 				en75_ppe_cache_clean_all(ppe);
+@@ -1307,9 +1370,10 @@ void __en75_ppe_check_skb(struct en75_pp
+ 					    hwe->ipv4.ib2, hwe->ipv4.orig.ports);
+ 			goto out;
+ 		}
+-		hwe->ib1 &= ~MTK_FOE_IB1_STATE;
+-		hwe->ib1 |= FIELD_PREP(MTK_FOE_IB1_STATE, MTK_FOE_STATE_BIND) |
+-			    MTK_FOE_IB1_BIND_CACHE | MTK_FOE_IB1_BIND_TTL;
++		ib1v &= ~MTK_FOE_IB1_STATE;
++		ib1v |= FIELD_PREP(MTK_FOE_IB1_STATE, MTK_FOE_STATE_BIND) |
++			MTK_FOE_IB1_BIND_CACHE | MTK_FOE_IB1_BIND_TTL;
++		hwe->ib1 = en75_hwv(ib1v);
+ 		dma_wmb();
+ 		/* build #49: publish with the OEM GLOBAL clean-all (cache_mode), not the
+ 		 * per-line clear whose tag-search never matched our slot. In-driver here so
+@@ -1464,6 +1528,12 @@ void en75_ppe_tx_bind(struct en75_ppe *p
+ 	e.ipv4.l2.src_mac_lo  = get_unaligned_be16(smac + 4);
+ 	if (en75_t_vlan1 >= 0) {			/* build #71: OEM VTAG model */
+ 		en75_foe_entry_set_vlan(&e, en75_t_vlan1);
++		/* build #76: force a clean single-tag state. The base flow may
++		 * carry a stale vlan1 from a previous arm, which makes set_vlan
++		 * write vlan2 instead (vlan_layer case 1) -- the #75 capture
++		 * showed the VID leaking into the dmac_lo lane via w13. */
++		e.ipv4.l2.vlan1 = en75_t_vlan1;
++		e.ipv4.l2.vlan2 = 0;
+ 		e.ipv4.l2.etype = 0;			/* OEM bind: vlan1=VID, etype=0 */
+ 	} else if (dp_bm & 0x3f)			/* DSA tag: set BEFORE pppoe */
+ 		en75_foe_entry_set_dsa(&e, __ffs(dp_bm & 0x3f), !!(dp_bm & 0x80));
+@@ -1526,8 +1596,10 @@ void en75_ppe_tx_bind(struct en75_ppe *p
+ 					continue;
+ 				if ((hwe->ipv4.orig.ports >> 16) != want_dphi)	/* dport != 8080 */
+ 					continue;
+-				st = FIELD_GET(MTK_FOE_IB1_STATE, hwe->ib1);
+-				dp = FIELD_GET(MTK_FOE_IB2_DEST_PORT, hwe->ipv4.ib2);
++				/* build #74: decode engine words via en75_hwv (raw key
++				 * compares above stay raw: want_* are already swab32). */
++				st = FIELD_GET(MTK_FOE_IB1_STATE, en75_hwv(hwe->ib1));
++				dp = FIELD_GET(MTK_FOE_IB2_DEST_PORT, en75_hwv(hwe->ipv4.ib2));
+ 				if (st == MTK_FOE_STATE_INVALID)
+ 					continue;				/* free slot */
+ 				dipmatch++;
+@@ -1550,6 +1622,14 @@ void en75_ppe_tx_bind(struct en75_ppe *p
+ 				e.ipv4.orig = hwe->ipv4.orig;
+ 				have_key = true;
+ 			}
++			/* build #74: the copied key is the engine's RAW words; commit
++			 * will swab32 every word, so pre-swab to true values and the
++			 * key round-trips back byte-identical to the engine's own. */
++			if (have_key && READ_ONCE(en75_ppe_swab_all)) {
++				e.ipv4.orig.src_ip  = swab32(e.ipv4.orig.src_ip);
++				e.ipv4.orig.dest_ip = swab32(e.ipv4.orig.dest_ip);
++				e.ipv4.orig.ports   = swab32(e.ipv4.orig.ports);
++			}
+ 		}
+ 		/* build #58: if the engine has not materialized a DRAM entry to copy the
+ 		 * exact key from (it's sporadic), RECONSTRUCT orig from the RX-recorded
+Index: econet-eth-2026.02.13~c2f855cf/econet_eth.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_eth.c
++++ econet-eth-2026.02.13~c2f855cf/econet_eth.c
+@@ -440,6 +440,9 @@ module_param_named(ppe_flip_dp, en75_fli
+  * forward-build encoding) instead of network order, to A/B the LOOKUP match order
+  * live without reflashing. The TX-bind already commits at the scan-found engine slot. */
+ module_param_named(ppe_tuple_swab, en75_ppe_tuple_swab, byte, 0644);
++/* build #74 teoria A: write the WHOLE entry swab32'd (the engine's DRAM master
++ * byte order; equivalent to OEM GLO_CFG bit5 PPE_BSWAP). Re-captured in #76. */
++module_param_named(ppe_swab_all, en75_ppe_swab_all, bool, 0644);
+ /* build #46: ppe_cache_mode live A/B of the cache publish op: 0=per-line clear,
+  * 1=global clean-all (OEM PpeCleanCache751221), 2=in-cache bind, 3=both. */
+ module_param_named(ppe_cache_mode, en75_ppe_cache_mode, byte, 0644);
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.h
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+@@ -308,6 +308,7 @@ extern u32  en75_tx_match_dip;	/* inner
+ extern bool en75_ppe_flip;	/* build #43: flip-in-place the engine-built entry */
+ extern u8   en75_flip_dp;	/* ib2.dp egress port for the flip (1=GSW,2=GMAC)  */
+ extern u8   en75_ppe_tuple_swab;/* build #44: 1=store orig tuple swab32 (engine LOOKUP order) */
++extern bool en75_ppe_swab_all;	/* build #74: commit every FoE word swab32 (engine byte-lane) */
+ extern u8   en75_ppe_cache_mode;/* build #46: 0=per-line 1=global clean-all 2=in-cache 3=both */
+ extern bool en75_ppe_preserve_key;/* build #48: TX-bind keeps engine's UNBIND key, only adds rewrite */
+ extern bool en75_ppe_mirror_lookup;/* build #56: also write BIND at the RX-descriptor lookup slot */
