@@ -1,0 +1,470 @@
+--- a/econet_ppe.c	2026-06-13 04:22:06.508143021 -0300
++++ b/econet_ppe.c	2026-06-13 04:21:44.160146822 -0300
+@@ -604,6 +604,7 @@
+ bool en75_tx_bind_arm;		/* set by RX hook, cleared by TX hook after commit */
+ u32  en75_tx_match_dip;		/* network-order inner IPv4 dst that flags the test egress frame */
+ bool en75_ppe_match_all;	/* patch 376 spike: bind EVERY forwarded NAT'd flow, ignore match_dip */
++bool en75_ppe_ft_active;	/* patch 379: flowtable on -> RX hook records ALL flows (tuple->engine slot) so the replace can commit at the engine LOOKUP slot, not the hash */
+ u8   en75_ppe_tuple_swab;	/* build #44: 1 = store orig tuple swab32 (engine LOOKUP encoding) */
+ bool en75_ppe_preserve_key = true;	/* build #48: keep the engine's UNBIND key, only add rewrite */
+ bool en75_ppe_mirror_lookup;		/* build #56: also write BIND at the RX-descriptor lookup slot */
+@@ -631,7 +632,11 @@
+ 	int eo = 0, po;
+ 	u8 ihl, proto, i;
+ 
+-	if (!READ_ONCE(en75_ppe_tx_hook) || hash >= EN75_PPE_ENTRIES || len < 40)
++	/* patch 379: also run when the flowtable is active (ft_active) -- there the
++	 * commit is done by the TC_SETUP_FT replace, not the TX hook, but we still
++	 * need to record (tuple -> engine slot) here for it to look up. */
++	if ((!READ_ONCE(en75_ppe_tx_hook) && !READ_ONCE(en75_ppe_ft_active)) ||
++	    hash >= EN75_PPE_ENTRIES || len < 40)
+ 		return;
+ 	/* locate IPv4 past optional MTK special tag, VLAN, or PPPoE session header. */
+ 	if (get_unaligned_be16(d + 12) == ETH_P_IP)
+@@ -664,7 +669,7 @@
+ 	/* Upstream has DIP=target; return path has SIP=target before DNAT.
+ 	 * patch 376 spike: with match_all, record EVERY forwarded TCP/UDP flow
+ 	 * (the engine already reports a slot for all of them). */
+-	if (!READ_ONCE(en75_ppe_match_all) &&
++	if (!READ_ONCE(en75_ppe_match_all) && !READ_ONCE(en75_ppe_ft_active) &&
+ 	    get_unaligned_be32(iph + 16) != en75_tx_match_dip &&
+ 	    get_unaligned_be32(iph + 12) != en75_tx_match_dip)
+ 		return;
+@@ -729,6 +734,121 @@
+ 	}
+ 	return idx;
+ }
++/* patch 379: exact-tuple lookup for the TC_SETUP_FT replace. The RX hook records
++ * (pre-NAT tuple -> engine LOOKUP slot); the flowtable gives us that same pre-NAT
++ * 5-tuple (the orig match), so the replace commits at THAT slot -- build #57: the
++ * engine looks up there, NOT at en75_ppe_hash_entry(). Args in host order.
++ * Returns the engine slot, or -1 if the flow hasn't been seen on RX yet. */
++int en75_ppe_ft_lookup_slot(u32 sip, u32 dip, u16 sport, u16 dport)
++{
++	int i;
++
++	for (i = 0; i < 32; i++)
++		if (en75_rx_ring[i].valid &&
++		    en75_rx_ring[i].sip == sip && en75_rx_ring[i].dip == dip &&
++		    en75_rx_ring[i].sport == sport && en75_rx_ring[i].dport == dport)
++			return en75_rx_ring[i].slot;
++	return -1;
++}
++/* patch 380 (Hito 2c): multi-flow RX bind for the flowtable. The TC_SETUP_FT replace
++ * REGISTERS each flow's entry (real-IP tuple + NAT rewrite) in foe_flow[]; when the
++ * engine FORWARD_BUILDs that flow's slot and reports it on RX, commit the matching
++ * registered entry at the engine's slot (build #43/RANK-1: from-scratch slots are
++ * ignored; only a commit at the engine's reported slot binds). Picks the registered
++ * entry whose orig pre-NAT 5-tuple matches THIS RX frame. Caller holds ppe->lock. */
++void en75_ppe_ft_rx_bind(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash)
++{
++	const u8 *d = skb->data, *iph, *l4;
++	unsigned int len = skb->len;
++	struct en75_flow_entry *e;
++	struct hlist_node *n;
++	u32 sip, dip;
++	u16 sport, dport;
++	int eo = 0, po, b;
++	u8 ihl;
++
++	if (get_unaligned_be16(d + 12) == ETH_P_IP)
++		eo = 14;
++	else if (get_unaligned_be16(d + 16) == ETH_P_IP)
++		eo = 18;
++	else if (get_unaligned_be16(d + 12) == ETH_P_8021Q &&
++		 get_unaligned_be16(d + 16) == ETH_P_IP)
++		eo = 18;
++	else if (get_unaligned_be16(d + 16) == ETH_P_PPP_SES) {
++		po = 16;
++		if (len < po + 30 || get_unaligned_be16(d + po + 8) != 0x0021)
++			return;
++		eo = po + 10;
++	} else if (get_unaligned_be16(d + 12) == ETH_P_PPP_SES) {
++		po = 12;
++		if (len < po + 30 || get_unaligned_be16(d + po + 8) != 0x0021)
++			return;
++		eo = po + 10;
++	} else
++		return;
++	if (len < eo + 20)
++		return;
++	iph = d + eo;
++	if ((iph[0] >> 4) != 4 || (iph[9] != IPPROTO_TCP && iph[9] != IPPROTO_UDP))
++		return;
++	ihl = (iph[0] & 0x0f) * 4;
++	if (len < eo + ihl + 4)
++		return;
++	l4 = iph + ihl;
++	sip = get_unaligned_be32(iph + 12);
++	dip = get_unaligned_be32(iph + 16);
++	sport = get_unaligned_be16(l4);
++	dport = get_unaligned_be16(l4 + 2);
++
++	for (b = 0; b < EN75_PPE_NUM_FLOWS; b++)
++		hlist_for_each_entry_safe(e, n, &ppe->foe_flow[b], list) {
++			/* patch 380d: match by the host-order tuple stored at register time. */
++			if (e->ft_sip == sip && e->ft_dip == dip &&
++			    e->ft_sport == sport && e->ft_dport == dport) {
++				struct mtk_foe_entry *hwe = (struct mtk_foe_entry *)
++					((u8 *)ppe->foe_virt +
++					 (u32)hash * EN75_FOE_ENTRY_SIZE);
++				struct mtk_foe_entry fin = e->data;	/* the rewrite */
++
++				/* patch 380e PRESERVE_KEY (build #74, like en75_ppe_tx_bind): commit
++				 * the engine's EXACT orig key, NOT ours -- the engine LOOKUP only HITs
++				 * its own FORWARD_BUILD byte layout (op139..2d: our-order orig never
++				 * HIT -> re-build forever). Copy its RAW words + pre-swab32 so commit's
++				 * swab_all round-trips them byte-identical to the engine's own. */
++				fin.ipv4.orig = hwe->ipv4.orig;
++				if (READ_ONCE(en75_ppe_swab_all)) {
++					fin.ipv4.orig.src_ip  = swab32(fin.ipv4.orig.src_ip);
++					fin.ipv4.orig.dest_ip = swab32(fin.ipv4.orig.dest_ip);
++					fin.ipv4.orig.ports   = swab32(fin.ipv4.orig.ports);
++				}
++				e->hash = hash;
++				en75_foe_entry_commit(ppe, &fin, hash);
++				pr_info_ratelimited("XR500v FT(380) RX-bind slot=%u %08x:%u->%08x:%u (preserve-key)\n",
++						    hash, sip, sport, dip, dport);
++				return;
++			}
++		}
++}
++/* patch 380: FLOW_CLS_DESTROY -- unregister + free the entry with this cookie. */
++void en75_ppe_ft_unregister_cookie(struct en75_ppe *ppe, unsigned long cookie)
++{
++	struct en75_flow_entry *e, *found = NULL;
++	struct hlist_node *n;
++	int b;
++
++	spin_lock_bh(&ppe->lock);
++	for (b = 0; b < EN75_PPE_NUM_FLOWS && !found; b++)
++		hlist_for_each_entry_safe(e, n, &ppe->foe_flow[b], list)
++			if (e->cookie == cookie) {
++				found = e;
++				break;
++			}
++	spin_unlock_bh(&ppe->lock);
++	if (found) {
++		en75_foe_entry_unregister(ppe, found);
++		kfree(found);
++	}
++}
+ static u16 en75_tx_bind_slot;	/* the engine-reported FoE slot to bind (from RX) */
+ enum en75_tx_bind_dir {
+ 	EN75_TX_BIND_UP = 0,
+@@ -1431,6 +1551,13 @@
+ 		en75_ppe_atomic_dump(ppe, hash);
+ 	}
+ 
++	/* patch 380 (Hito 2c): flowtable mode -- the engine reported this flow's slot;
++	 * commit the registered (TC_SETUP_FT) entry that matches this frame here. */
++	if (READ_ONCE(en75_ppe_ft_active)) {
++		en75_ppe_ft_rx_bind(ppe, skb, hash);
++		goto out;
++	}
++
+ 	/* build #43 FLIP-IN-PLACE (OEM PpeTxHandler model, workflow w7h8wpopm high-conf,
+ 	 * 3 agents converged): the ENGINE itself FORWARD_BUILDs the FoE skeleton at THIS
+ 	 * slot (requires FLOW_CFG=0x0600f700 so the engine writes DRAM) and reports the
+--- a/econet_port.c	2026-06-13 04:22:06.508143021 -0300
++++ b/econet_port.c	2026-06-13 04:21:44.160146822 -0300
+@@ -467,70 +467,205 @@
+ }
+ 
+ /* ============================================================================
+- * patch 377 (Opcion A, Hito 1): flow-table offload skeleton.
++ * patch 377/378 (Opcion A): flow-table offload.
+  * DSA reenvia TC_SETUP_FT de los user-ports (lanX/wan) a ESTE conduit
+- * (dsa_user_setup_ft_block -> conduit->ndo_setup_tc). Por ahora 'replace' SOLO
+- * LOGUEA cada flujo que conntrack ofrece y devuelve -EOPNOTSUPP, asi el flujo
+- * sigue por el software flowtable (datapath intacto). Confirma que el flowtable
+- * esta activo y nos da el material real (tupla / sid PPPoE / odev / NAT mangle)
+- * para el Hito 2 (traducir a FoE entry). Portado de mainline mtk_ppe_offload.c. */
+-static void en75_ft_dump(struct flow_cls_offload *f)
++ * (dsa_user_setup_ft_block -> conduit->ndo_setup_tc). 'replace' (patch 378)
++ * traduce la flow_rule que ofrece conntrack a una FoE entry y la committea
++ * (dp=1, GSW switch egress; el MT7530 externo rutea por la dst MAC via ARL --
++ * el modelo del spike match_all). Portado de mainline mtk_ppe_offload.c. */
++
++/* patch 378/380 (Hito 2/2c): the replace builds the FoE entry from the flow_rule and
++ * REGISTERS it in the PPE foe_flow[] table (keyed by tuple for the RX bind, carrying
++ * the tc cookie for FLOW_CLS_DESTROY); en75_ppe_ft_rx_bind() commits it at the engine
++ * slot. */
++
++/* mangle helpers portados de mtk_ppe_offload.c. El de ETH lo adaptamos a
++ * big-endian: act->mangle.val guarda los bytes en orden de memoria, y los
++ * half-word mangles codifican la mitad via el mask. mainline (LE) hace
++ * src/dest += 2 cuando mask==0x0000ffff; en MIPS BE las mitades del u32 estan
++ * al reves (verificado en HW: dmac/smac salian con la mitad en 00:00). */
++static void en75_ft_mangle_eth(const struct flow_action_entry *act, void *eth)
+ {
+-	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
+-	struct flow_action_entry *act;
+-	int i;
++	const u8 *val = (const u8 *)&act->mangle.val;
++	u8 *dest = (u8 *)eth + act->mangle.offset;
+ 
+-	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS)) {
+-		struct flow_match_ipv4_addrs a;
+-		struct flow_match_ports p = { };
+-		u8 proto = 0;
+-
+-		flow_rule_match_ipv4_addrs(rule, &a);
+-		if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
+-			struct flow_match_basic b;
++	if (act->mangle.offset > 8)
++		return;
++	if (act->mangle.mask == 0)			/* full word */
++		memcpy(dest, val, 4);
++	else if (act->mangle.mask == 0xffff0000)	/* high half -> val[2:4] */
++		memcpy(dest, val + 2, 2);
++	else if (act->mangle.mask == 0x0000ffff)	/* low half -> dest[2:4] */
++		memcpy(dest + 2, val, 2);
++	else
++		pr_warn_ratelimited("XR500v FT: unexpected eth mangle mask=%08x\n",
++				    act->mangle.mask);
++}
+ 
+-			flow_rule_match_basic(rule, &b);
+-			proto = b.key->ip_proto;
+-		}
+-		if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS))
+-			flow_rule_match_ports(rule, &p);
+-		pr_info("XR500v FT(377) REPLACE ck=%lx proto=%u %pI4:%u -> %pI4:%u\n",
+-			f->cookie, proto, &a.key->src,
+-			p.key ? be16_to_cpu(p.key->src) : 0, &a.key->dst,
+-			p.key ? be16_to_cpu(p.key->dst) : 0);
+-	} else {
+-		pr_info("XR500v FT(377) REPLACE ck=%lx (non-ipv4)\n", f->cookie);
++static void en75_ft_mangle_ports(const struct flow_action_entry *act,
++				 __be16 *sport, __be16 *dport)
++{
++	u32 val = ntohl(act->mangle.val);
++
++	switch (act->mangle.offset) {
++	case 0:
++		if (act->mangle.mask == ~htonl(0xffff))
++			*dport = cpu_to_be16(val);
++		else
++			*sport = cpu_to_be16(val >> 16);
++		break;
++	case 2:
++		*dport = cpu_to_be16(val);
++		break;
++	}
++}
++
++static void en75_ft_mangle_ipv4(const struct flow_action_entry *act,
++				__be32 *sip, __be32 *dip)
++{
++	switch (act->mangle.offset) {
++	case 12:		/* offsetof(struct iphdr, saddr) */
++		memcpy(sip, &act->mangle.val, 4);
++		break;
++	case 16:		/* offsetof(struct iphdr, daddr) */
++		memcpy(dip, &act->mangle.val, 4);
++		break;
+ 	}
++}
++
++static int en75_flow_offload_replace(struct flow_cls_offload *f)
++{
++	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
++	struct flow_match_basic mb;
++	struct flow_match_ipv4_addrs ma;
++	struct flow_match_ports mp;
++	struct flow_action_entry *act;
++	struct mtk_foe_entry e;
++	struct ethhdr eth = {};
++	__be32 o_sip, o_dip, n_sip, n_dip;
++	__be16 o_sport, o_dport, n_sport, n_dport;
++	u8 l4proto;
++	int sid = 0, i;
++	struct en75_flow_entry *fe;
++
++	if (!en75_the_ppe)
++		return -ENODEV;
++	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC) ||
++	    !flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS) ||
++	    !flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS))
++		return -EOPNOTSUPP;		/* only IPv4 HNAPT for now */
++
++	flow_rule_match_basic(rule, &mb);
++	l4proto = mb.key->ip_proto;
++	if (l4proto != IPPROTO_TCP && l4proto != IPPROTO_UDP)
++		return -EOPNOTSUPP;
++
++	flow_rule_match_ipv4_addrs(rule, &ma);
++	flow_rule_match_ports(rule, &mp);
++	o_sip = ma.key->src; o_dip = ma.key->dst;
++	o_sport = mp.key->src; o_dport = mp.key->dst;
++	/* new (post-NAT) starts == orig; the MANGLE actions rewrite it */
++	n_sip = o_sip; n_dip = o_dip; n_sport = o_sport; n_dport = o_dport;
+ 
+ 	flow_action_for_each(i, act, &rule->action) {
+ 		switch (act->id) {
+-		case FLOW_ACTION_REDIRECT:
+-			pr_info("XR500v FT(377)   REDIRECT -> %s\n",
+-				act->dev ? act->dev->name : "?");
++		case FLOW_ACTION_MANGLE:
++			switch (act->mangle.htype) {
++			case FLOW_ACT_MANGLE_HDR_TYPE_ETH:
++				en75_ft_mangle_eth(act, &eth);
++				break;
++			case FLOW_ACT_MANGLE_HDR_TYPE_IP4:
++				en75_ft_mangle_ipv4(act, &n_sip, &n_dip);
++				break;
++			case FLOW_ACT_MANGLE_HDR_TYPE_TCP:
++			case FLOW_ACT_MANGLE_HDR_TYPE_UDP:
++				en75_ft_mangle_ports(act, &n_sport, &n_dport);
++				break;
++			default:
++				break;
++			}
+ 			break;
+ 		case FLOW_ACTION_PPPOE_PUSH:
+-			pr_info("XR500v FT(377)   PPPOE_PUSH sid=%u\n", act->pppoe.sid);
+-			break;
+-		case FLOW_ACTION_VLAN_PUSH:
+-			pr_info("XR500v FT(377)   VLAN_PUSH vid=%u\n", act->vlan.vid);
+-			break;
+-		case FLOW_ACTION_MANGLE:
+-			pr_info("XR500v FT(377)   MANGLE htype=%u off=%u mask=%08x val=%08x\n",
+-				act->mangle.htype, act->mangle.offset,
+-				act->mangle.mask, act->mangle.val);
++			sid = act->pppoe.sid;
+ 			break;
+ 		default:
+-			pr_info("XR500v FT(377)   act id=%u\n", act->id);
+ 			break;
+ 		}
+ 	}
++
++	if (!is_valid_ether_addr(eth.h_dest) || !is_valid_ether_addr(eth.h_source))
++		return -EOPNOTSUPP;		/* need the next-hop MACs from MANGLE */
++
++	/* Build the FoE entry. orig = pre-NAT 5-tuple (the match), new = post-NAT
++	 * (the rewrite). dp=1 (GSW switch egress): the external MT7530 routes by the
++	 * next-hop dst MAC via its ARL -- the model validated by the match_all spike
++	 * (cont29). PPPoE sid from FLOW_ACTION_PPPOE_PUSH. */
++	en75_foe_entry_prepare(&e, MTK_PPE_PKT_TYPE_IPV4_HNAPT, l4proto, 1,
++			       eth.h_source, eth.h_dest);
++	en75_foe_entry_set_ipv4_tuple(&e, false, o_sip, o_sport, o_dip, o_dport);
++	en75_foe_entry_set_ipv4_tuple(&e, true, n_sip, n_sport, n_dip, n_dport);
++	if (sid)
++		en75_foe_entry_set_pppoe(&e, sid);
++	/* build #72: the engine FORWARD_BUILDs its UNBIND key in swab32 order; match it
++	 * so the engine's LOOKUP of the real frame HITs our entry (we commit the real
++	 * tuple with no preserve_key, so we pre-swab like en75_build_test_flow does --
++	 * without this the entry never HITs and re-commits forever -> traffic degrades). */
++	if (READ_ONCE(en75_ppe_tuple_swab)) {
++		e.ipv4.orig.src_ip  = swab32(e.ipv4.orig.src_ip);
++		e.ipv4.orig.dest_ip = swab32(e.ipv4.orig.dest_ip);
++		e.ipv4.orig.ports   = swab32(e.ipv4.orig.ports);
++	}
++	/* patch 380 (Hito 2c): REGISTER the entry (real-IP tuple + NAT rewrite), do NOT
++	 * commit from-scratch. The engine FORWARD_BUILDs this flow's slot and reports it
++	 * on RX, where en75_ppe_ft_rx_bind() commits THIS registered entry at the engine's
++	 * slot (build #43 flip-in-place: a from-scratch commit at a foreign slot is
++	 * ignored -- op139/2b proved it). offload_enabled gates the RX path (check_skb). */
++	fe = kzalloc(sizeof(*fe), GFP_ATOMIC);
++	if (!fe)
++		return -ENOMEM;
++	fe->data = e;		/* orig may be swab32 (tuple_swab) for the engine HIT */
++	fe->cookie = f->cookie;
++	fe->ft_sip = ntohl(o_sip);	/* host-order match tuple for en75_ppe_ft_rx_bind */
++	fe->ft_dip = ntohl(o_dip);
++	fe->ft_sport = ntohs(o_sport);
++	fe->ft_dport = ntohs(o_dport);
++	en75_foe_entry_register(en75_the_ppe, fe);
++	WRITE_ONCE(en75_ppe_offload_enabled, true);
++
++	pr_info_ratelimited("XR500v FT(380) REGISTER ck=%lx sid=%d %pI4:%u->%pI4:%u => %pI4:%u->%pI4:%u dmac=%pM smac=%pM\n",
++		f->cookie, sid, &o_sip, ntohs(o_sport), &o_dip, ntohs(o_dport),
++		&n_sip, ntohs(n_sport), &n_dip, ntohs(n_dport),
++		eth.h_dest, eth.h_source);
++	return 0;
++}
++
++static int en75_flow_offload_destroy(struct flow_cls_offload *f)
++{
++	if (en75_the_ppe)
++		en75_ppe_ft_unregister_cookie(en75_the_ppe, f->cookie);
++	return 0;
++}
++
++static int en75_flow_offload_stats(struct flow_cls_offload *f)
++{
++	/* keep-alive: report recent use so conntrack doesn't expire the offloaded
++	 * flow while it stays bound. (Hito 3 will read real per-entry counters.) */
++	flow_stats_update(&f->stats, 0, 0, 0, jiffies, FLOW_ACTION_HW_STATS_DELAYED);
++	return 0;
+ }
+ 
+ static int en75_ft_cmd(struct flow_cls_offload *cls)
+ {
+-	if (cls->command == FLOW_CLS_REPLACE)
+-		en75_ft_dump(cls);
+-	return -EOPNOTSUPP;	/* Hito 1: aun no committeamos -> SW fastpath */
++	switch (cls->command) {
++	case FLOW_CLS_REPLACE:
++		return en75_flow_offload_replace(cls);
++	case FLOW_CLS_DESTROY:
++		return en75_flow_offload_destroy(cls);
++	case FLOW_CLS_STATS:
++		return en75_flow_offload_stats(cls);
++	default:
++		return -EOPNOTSUPP;
++	}
+ }
+ 
+ static int en75_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
+@@ -559,6 +694,7 @@
+ 	f->driver_block_list = &en75_ft_block_cb_list;
+ 	switch (f->command) {
+ 	case FLOW_BLOCK_BIND:
++		WRITE_ONCE(en75_ppe_ft_active, true);	/* patch 379: RX records all flows */
+ 		block_cb = flow_block_cb_lookup(f->block, cb, dev);
+ 		if (block_cb) {
+ 			flow_block_cb_incref(block_cb);
+@@ -572,6 +708,7 @@
+ 		list_add_tail(&block_cb->driver_list, &en75_ft_block_cb_list);
+ 		return 0;
+ 	case FLOW_BLOCK_UNBIND:
++		WRITE_ONCE(en75_ppe_ft_active, false);	/* patch 379 */
+ 		block_cb = flow_block_cb_lookup(f->block, cb, dev);
+ 		if (!block_cb)
+ 			return -ENOENT;
+--- a/econet_ppe.h	2026-06-13 04:22:06.508143021 -0300
++++ b/econet_ppe.h	2026-06-13 04:21:44.160146822 -0300
+@@ -168,6 +168,7 @@
+ 				  __be32 src_addr, __be16 src_port,
+ 				  __be32 dest_addr, __be16 dest_port);
+ void en75_foe_entry_set_pse_port(struct mtk_foe_entry *entry, u8 port);
++void en75_foe_entry_set_pppoe(struct mtk_foe_entry *entry, int sid);	/* patch 378 */
+ u32 en75_ppe_hash_entry(struct mtk_foe_entry *e);
+ void en75_foe_entry_commit(struct en75_ppe *ppe, struct mtk_foe_entry *entry, u16 hash);
+ u32 en75_ppe_test_commit(struct en75_ppe *ppe);
+@@ -196,6 +197,11 @@
+ 	u16			hash;		/* 0xffff until check_skb binds it    */
+ 	unsigned long		cookie;		/* tc flow cookie (patch 359)         */
+ 	bool			static_entry;	/* test entry: never RX-cleared       */
++	/* patch 380d: pre-NAT match tuple in HOST order for en75_ppe_ft_rx_bind to pick
++	 * this flow by the RX frame -- kept separate from data.ipv4.orig, which carries
++	 * the swab32 order the engine's LOOKUP needs to HIT (build #72 tuple_swab). */
++	u32			ft_sip, ft_dip;
++	u16			ft_sport, ft_dport;
+ };
+ 
+ struct en75_ppe {
+@@ -309,6 +315,10 @@
+ extern bool en75_tx_bind_arm;	/* RX hook armed a pending TX commit        */
+ extern u32  en75_tx_match_dip;	/* inner IPv4 dst (network order) of test flow */
+ extern bool en75_ppe_match_all;	/* patch 376 spike: bind every forwarded NAT'd flow */
++extern bool en75_ppe_ft_active;	/* patch 379: flowtable active -> RX records all flows */
++int en75_ppe_ft_lookup_slot(u32 sip, u32 dip, u16 sport, u16 dport);	/* patch 379 */
++void en75_ppe_ft_rx_bind(struct en75_ppe *ppe, struct sk_buff *skb, u16 hash);	/* patch 380 */
++void en75_ppe_ft_unregister_cookie(struct en75_ppe *ppe, unsigned long cookie);	/* patch 380 */
+ extern bool en75_ppe_flip;	/* build #43: flip-in-place the engine-built entry */
+ extern u8   en75_flip_dp;	/* ib2.dp egress port for the flip (1=GSW,2=GMAC)  */
+ extern u8   en75_ppe_tuple_swab;/* build #44: 1=store orig tuple swab32 (engine LOOKUP order) */
