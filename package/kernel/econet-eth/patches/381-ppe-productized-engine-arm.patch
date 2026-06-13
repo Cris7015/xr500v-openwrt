@@ -1,0 +1,100 @@
+econet-eth: productize the PPE HW-NAT engine-arm (flowtable BIND)
+
+The HW NAT offload (Option A, flowtable/conntrack) needs the FE steered into
+the PPE before any flow can be offloaded: GDM1_FWD steer-to-PPE, FLOW_CFG, the
+special-tag VLAN_CHECK/CTRL, the GLO_CFG engine enable + lookup cache, plus the
+commit-time flags en75_foe_entry_commit relies on (swab_all, tuple_swab,
+prebind=0, preserve_key). Until now that steering was applied by hand from
+userspace (the op139 script) after every boot.
+
+Move it into the driver as en75_ppe_engine_arm(), invoked lazily on the first
+flowtable FLOW_BLOCK_BIND (firewall flow_offloading_hw=1). Idempotent via the
+en75_ppe_armed guard; never disarmed live (disabling the engine on a live
+datapath wedges it -- a reboot is the clean teardown).
+
+Validated on an Archer XR500v (EN751221): after a clean boot, with no userspace
+poking, GDM1_FWD=0x03f04004 and the commit flags come up correct, and the WAN
+PPPoE path stays healthy.
+---
+--- a/econet_eth.c
++++ b/econet_eth.c
+@@ -716,6 +716,56 @@ static const struct kernel_param_ops en75_ppe_stag_ops = {
+ static int ppe_stag_v;
+ module_param_cb(ppe_stag, &en75_ppe_stag_ops, &ppe_stag_v, 0644);
+ 
++/* === XR500v PPE: productized engine-arm (patch 381, replaces the op139 script) ===
++ * One-shot HW steering so flowtable HW-NAT offload works with zero userspace
++ * poking. Replicates the validated op139 sequence (cont31e, 51.5 MB/s):
++ *   - FE steering pokes: GDM1_FWD steer-to-PPE, FLOW_CFG, stag VLAN_CHECK/CTRL
++ *   - GLO_CFG engine enable + lookup cache enable
++ *   - the commit-time flags en75_foe_entry_commit depends on (swab_all, etc.)
++ * Armed once, lazily, on the first flowtable FLOW_BLOCK_BIND. Idempotent: the
++ * en75_ppe_armed guard makes repeat BINDs no-ops. Never disarmed live --
++ * `echo 0 > ppe_engine` wedges the datapath; a reboot is the clean teardown.
++ * NOTE: pairs with the switch-side special tag (gsw_stag, econet-gsw); whether
++ * that is still required is being verified separately. */
++static bool en75_ppe_armed;
++int en75_ppe_engine_arm(struct en75_ppe *ppe)
++{
++	if (!ppe || !en75_ppe_base)
++		return -ENODEV;
++	if (READ_ONCE(en75_ppe_armed))		/* already armed -> no-op */
++		return 0;
++
++	/* commit-time flags: the flowtable commit path (en75_foe_entry_commit)
++	 * reads these; their module-param defaults differ from the validated
++	 * values, so pin them here. cache_mode(=1) and flip_dp(=1) already default
++	 * correct. */
++	WRITE_ONCE(en75_ppe_prebind, false);	/* direct STATE=BIND, no PREBIND handshake */
++	WRITE_ONCE(en75_ppe_swab_all, true);	/* commit every FoE word in engine byte-lane */
++	WRITE_ONCE(en75_ppe_tuple_swab, true);	/* store orig tuple in engine LOOKUP order */
++	WRITE_ONCE(en75_ppe_preserve_key, true);/* keep the engine's UNBIND key on commit */
++
++	/* FE steering pokes (fe_base-relative). Order matches op139: the engine is
++	 * enabled before FLOW_CFG/GDM1_FWD steer traffic into it. */
++	en75_ppe_fe_rw(ppe, 0xE1C, true, 0x0000ffbc);
++	en75_ppe_fe_rw(ppe, 0xE34, true, 0x01010001);
++
++	en75_ppe_engine_set(true);		/* GLO_CFG.EN + mainline mtk_ppe_start value */
++	en75_ppe_cache_set(ppe, true);		/* PPE lookup cache ON */
++
++	en75_ppe_fe_rw(ppe, 0xE04, true, 0x0600f700);		/* FLOW_CFG */
++	en75_ppe_fe_rw(ppe, 0xF18, true, 0x00008100);		/* special-tag TPID */
++	en75_ppe_fe_rw(ppe, EN75_CDMA1_VLAN_CTRL, true, 0x81000001);	/* stag VLAN_CTRL (0x400) */
++	en75_ppe_fe_rw(ppe, 0x510, true, 0x00000001);		/* GDMA1 VLAN_CHECK (stag-aware) */
++	en75_ppe_fe_rw(ppe, 0x500, true, 0x03f04004);		/* GDM1_FWD: steer to PPE */
++	en75_ppe_fe_rw(ppe, 0xE48, true, 0x00000500);
++
++	WRITE_ONCE(en75_ppe_engine, true);	/* reflect armed state in the sysfs param */
++	WRITE_ONCE(en75_ppe_armed, true);
++	pr_info("XR500v PPE: engine armed (flowtable BIND) GDM1_FWD=0x%08x FLOW_CFG=0x%08x\n",
++		readl(ppe->fe_base + 0x500), readl(ppe->fe_base + 0xE04));
++	return 0;
++}
++
+ static void en75_ppe_init(struct en75_eth_pvt *eth)
+ {
+ 	void __iomem *base = (void __iomem *)eth->regs->ppe;
+--- a/econet_ppe.h
++++ b/econet_ppe.h
+@@ -257,6 +257,10 @@ void en75_ppe_set_vlan_ctrl(struct en75_ppe *ppe, u32 val);
+ /* generic FE register peek/poke (fe_base + off) for OEM-vs-OpenWrt diffing */
+ void en75_ppe_fe_rw(struct en75_ppe *ppe, u32 off, bool write, u32 val);
+ 
++/* patch 381: productized one-shot HW engine-arm (steering + cache + flags),
++ * called lazily on the first flowtable FLOW_BLOCK_BIND. Replaces op139. */
++int en75_ppe_engine_arm(struct en75_ppe *ppe);
++
+ /* patch 356 */
+ struct en75_ppe *en75_ppe_attach(struct device *dev, void __iomem *base,
+ 				 void __iomem *fe_base, void *foe_virt,
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -695,6 +695,7 @@ static int en75_setup_tc_block(struct net_device *dev,
+ 	switch (f->command) {
+ 	case FLOW_BLOCK_BIND:
+ 		WRITE_ONCE(en75_ppe_ft_active, true);	/* patch 379: RX records all flows */
++		en75_ppe_engine_arm(en75_the_ppe);	/* patch 381: productized engine-arm (was op139) */
+ 		block_cb = flow_block_cb_lookup(f->block, cb, dev);
+ 		if (block_cb) {
+ 			flow_block_cb_incref(block_cb);
