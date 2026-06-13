@@ -1,0 +1,32 @@
+econet-eth: quiet the per-frame "unexpected fport" RX log (dev_info -> dev_dbg)
+
+With the PPE special tag active (required for HW-NAT offload), the RX descriptor
+reports the real source PHY (sport 8..15, the user-port GE PHYs on MDIO) instead
+of GDM1. en75_get_sport_dev() logged that per frame at dev_info; under offloaded
+forwarding it fires for nearly every packet, floods printk and starves the
+single MIPS core -- which collapses forwarding throughput and inflates latency
+(a ping to the router's own LAN IP jumps from <1ms to 200ms+).
+
+The field is informational only (routing is done by the inline DSA tag, and
+using it for a lookup is known to break delivery), so demote it to dev_dbg.
+No functional change to the datapath.
+---
+--- a/econet_eth.c
++++ b/econet_eth.c
+@@ -149,8 +149,15 @@ static struct net_device *en75_get_sport_dev(struct en75_eth_pvt *eth,
+ 	if (sport == ETX_FPORT_GDM2) {
+ 		return eth->ports[1];
+ 	} else {
++		/* sport 8..15 (typically 9-12, the user-port GE PHYs on MDIO) appear
++		 * here once the PPE special tag is active: the RX descriptor reports
++		 * the real source PHY instead of GDM1. It is informational only --
++		 * routing is done by the inline DSA tag, and forcing a lookup on this
++		 * field breaks delivery -- so keep it at dev_dbg. As dev_info it fires
++		 * per-frame under PPE offload and floods printk, starving the single
++		 * CPU (collapses forwarding throughput and inflates latency). */
+ 		if (sport != ETX_FPORT_GDM1)
+-			dev_info(eth->pub.dev, "rx: on unexpected fport %d\n", sport);
++			dev_dbg(eth->pub.dev, "rx: on unexpected fport %d\n", sport);
+ 		return eth->ports[0];
+ 	}
+ }
