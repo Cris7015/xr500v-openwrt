@@ -1,0 +1,168 @@
+--- a/econet_port.c	2026-06-13 02:31:48.153162138 -0300
++++ b/econet_port.c	2026-06-13 02:05:13.509408801 -0300
+@@ -18,6 +18,8 @@
+ #include "gdm_regs.h"
+ #include <linux/moduleparam.h>
+ #include "qdma_desc.h"
++#include <net/flow_offload.h>
++#include <net/pkt_cls.h>
+ 
+ struct en75_hw_stats {
+ 	/* protect concurrent hw_stats accesses */
+@@ -464,6 +466,137 @@
+ 	} while (u64_stats_fetch_retry(&port->stats.syncp, start));
+ }
+ 
++/* ============================================================================
++ * patch 377 (Opcion A, Hito 1): flow-table offload skeleton.
++ * DSA reenvia TC_SETUP_FT de los user-ports (lanX/wan) a ESTE conduit
++ * (dsa_user_setup_ft_block -> conduit->ndo_setup_tc). Por ahora 'replace' SOLO
++ * LOGUEA cada flujo que conntrack ofrece y devuelve -EOPNOTSUPP, asi el flujo
++ * sigue por el software flowtable (datapath intacto). Confirma que el flowtable
++ * esta activo y nos da el material real (tupla / sid PPPoE / odev / NAT mangle)
++ * para el Hito 2 (traducir a FoE entry). Portado de mainline mtk_ppe_offload.c. */
++static void en75_ft_dump(struct flow_cls_offload *f)
++{
++	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
++	struct flow_action_entry *act;
++	int i;
++
++	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS)) {
++		struct flow_match_ipv4_addrs a;
++		struct flow_match_ports p = { };
++		u8 proto = 0;
++
++		flow_rule_match_ipv4_addrs(rule, &a);
++		if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
++			struct flow_match_basic b;
++
++			flow_rule_match_basic(rule, &b);
++			proto = b.key->ip_proto;
++		}
++		if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS))
++			flow_rule_match_ports(rule, &p);
++		pr_info("XR500v FT(377) REPLACE ck=%lx proto=%u %pI4:%u -> %pI4:%u\n",
++			f->cookie, proto, &a.key->src,
++			p.key ? be16_to_cpu(p.key->src) : 0, &a.key->dst,
++			p.key ? be16_to_cpu(p.key->dst) : 0);
++	} else {
++		pr_info("XR500v FT(377) REPLACE ck=%lx (non-ipv4)\n", f->cookie);
++	}
++
++	flow_action_for_each(i, act, &rule->action) {
++		switch (act->id) {
++		case FLOW_ACTION_REDIRECT:
++			pr_info("XR500v FT(377)   REDIRECT -> %s\n",
++				act->dev ? act->dev->name : "?");
++			break;
++		case FLOW_ACTION_PPPOE_PUSH:
++			pr_info("XR500v FT(377)   PPPOE_PUSH sid=%u\n", act->pppoe.sid);
++			break;
++		case FLOW_ACTION_VLAN_PUSH:
++			pr_info("XR500v FT(377)   VLAN_PUSH vid=%u\n", act->vlan.vid);
++			break;
++		case FLOW_ACTION_MANGLE:
++			pr_info("XR500v FT(377)   MANGLE htype=%u off=%u mask=%08x val=%08x\n",
++				act->mangle.htype, act->mangle.offset,
++				act->mangle.mask, act->mangle.val);
++			break;
++		default:
++			pr_info("XR500v FT(377)   act id=%u\n", act->id);
++			break;
++		}
++	}
++}
++
++static int en75_ft_cmd(struct flow_cls_offload *cls)
++{
++	if (cls->command == FLOW_CLS_REPLACE)
++		en75_ft_dump(cls);
++	return -EOPNOTSUPP;	/* Hito 1: aun no committeamos -> SW fastpath */
++}
++
++static int en75_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
++				  void *cb_priv)
++{
++	struct net_device *dev = cb_priv;
++
++	if (!tc_can_offload(dev))
++		return -EOPNOTSUPP;
++	if (type != TC_SETUP_CLSFLOWER)
++		return -EOPNOTSUPP;
++	return en75_ft_cmd(type_data);
++}
++
++static LIST_HEAD(en75_ft_block_cb_list);
++
++static int en75_setup_tc_block(struct net_device *dev,
++			       struct flow_block_offload *f)
++{
++	struct flow_block_cb *block_cb;
++	flow_setup_cb_t *cb = en75_setup_tc_block_cb;
++
++	if (f->binder_type != FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
++		return -EOPNOTSUPP;
++
++	f->driver_block_list = &en75_ft_block_cb_list;
++	switch (f->command) {
++	case FLOW_BLOCK_BIND:
++		block_cb = flow_block_cb_lookup(f->block, cb, dev);
++		if (block_cb) {
++			flow_block_cb_incref(block_cb);
++			return 0;
++		}
++		block_cb = flow_block_cb_alloc(cb, dev, dev, NULL);
++		if (IS_ERR(block_cb))
++			return PTR_ERR(block_cb);
++		flow_block_cb_incref(block_cb);
++		flow_block_cb_add(block_cb, f);
++		list_add_tail(&block_cb->driver_list, &en75_ft_block_cb_list);
++		return 0;
++	case FLOW_BLOCK_UNBIND:
++		block_cb = flow_block_cb_lookup(f->block, cb, dev);
++		if (!block_cb)
++			return -ENOENT;
++		if (!flow_block_cb_decref(block_cb)) {
++			flow_block_cb_remove(block_cb, f);
++			list_del(&block_cb->driver_list);
++		}
++		return 0;
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++static int en75_setup_tc(struct net_device *dev, enum tc_setup_type type,
++			 void *type_data)
++{
++	switch (type) {
++	case TC_SETUP_BLOCK:
++	case TC_SETUP_FT:
++		return en75_setup_tc_block(dev, type_data);
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
+ static const struct net_device_ops en75_netdev_ops = {
+ 	.ndo_init		= en75_dev_init,
+ 	.ndo_open		= en75_dev_open,
+@@ -472,6 +605,7 @@
+ 	.ndo_start_xmit		= en75_dev_xmit,
+ 	.ndo_get_stats64        = en75_dev_get_stats64,
+ 	.ndo_set_mac_address	= en75_dev_set_macaddr,
++	.ndo_setup_tc		= en75_setup_tc,	/* patch 377: flow-table offload */
+ };
+ 
+ static const struct ethtool_ops en75_ethtool_ops = {
+@@ -518,7 +652,9 @@
+ 	 *   - TODO: When we get the PPE working, we will enable this for
+ 	 *           TC_SETUP_BLOCK / TC_SETUP_FT for NAT flow-table offloading.
+ 	 */
+-	ndev->hw_features = 0;
++	/* patch 377: advertise TC offload so the DSA flowtable path (which forwards
++	 * user-port TC_SETUP_FT to this conduit) and tc_can_offload() accept us. */
++	ndev->hw_features = NETIF_F_HW_TC;
+ 
+ 	ndev->features |= ndev->hw_features;
+ 	ndev->vlan_features = ndev->hw_features;
