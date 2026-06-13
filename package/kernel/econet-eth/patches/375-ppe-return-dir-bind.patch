@@ -1,0 +1,272 @@
+--- a/econet_ppe.c
++++ b/econet_ppe.c
+@@ -627,12 +627,12 @@
+ {
+ 	const u8 *d = skb->data, *iph, *l4;
+ 	unsigned int len = skb->len;
+-	int eo = 0;
++	int eo = 0, po;
+ 	u8 ihl, proto, i;
+ 
+ 	if (!READ_ONCE(en75_ppe_tx_hook) || hash >= EN75_PPE_ENTRIES || len < 40)
+ 		return;
+-	/* locate the IPv4 ethertype past the optional 4-byte MTK special tag / VLAN */
++	/* locate IPv4 past optional MTK special tag, VLAN, or PPPoE session header. */
+ 	if (get_unaligned_be16(d + 12) == ETH_P_IP)
+ 		eo = 14;
+ 	else if (get_unaligned_be16(d + 16) == ETH_P_IP)
+@@ -640,7 +640,19 @@
+ 	else if (get_unaligned_be16(d + 12) == ETH_P_8021Q &&
+ 		 get_unaligned_be16(d + 16) == ETH_P_IP)
+ 		eo = 18;
+-	else
++	else if (get_unaligned_be16(d + 16) == ETH_P_PPP_SES) {
++		po = 16;
++		if (len < po + 30 || get_unaligned_be16(d + po + 8) != 0x0021)
++			return;
++		eo = po + 10;
++	} else if (get_unaligned_be16(d + 12) == ETH_P_PPP_SES) {
++		po = 12;
++		if (len < po + 30 || get_unaligned_be16(d + po + 8) != 0x0021)
++			return;
++		eo = po + 10;
++	} else
++		return;
++	if (len < eo + 20)
+ 		return;
+ 	iph = d + eo;
+ 	if ((iph[0] >> 4) != 4)
+@@ -648,9 +660,13 @@
+ 	proto = iph[9];
+ 	if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+ 		return;
+-	if (get_unaligned_be32(iph + 16) != en75_tx_match_dip)	/* only our test flow */
++	/* Upstream has DIP=target; return path has SIP=target before DNAT. */
++	if (get_unaligned_be32(iph + 16) != en75_tx_match_dip &&
++	    get_unaligned_be32(iph + 12) != en75_tx_match_dip)
+ 		return;
+ 	ihl = (iph[0] & 0x0f) * 4;
++	if (len < eo + ihl + 4)
++		return;
+ 	l4 = iph + ihl;
+ 	i = en75_rx_ring_idx++ & 31;
+ 	en75_rx_ring[i].sip   = get_unaligned_be32(iph + 12);
+@@ -690,8 +706,35 @@
+ 	}
+ 	return idx;
+ }
++/* Return-direction lookup for WAN->LAN ACK/data. The original key is pre-DNAT
++ * (server -> WAN IP), while the TX egress frame is post-DNAT (server -> LAN
++ * client), so match by source + ports and reject our own post-DNAT egress echo. */
++static int en75_ppe_rxslot_lookup_return(u32 nsip, u32 ndip, u16 nsport, u16 ndport)
++{
++	int i, idx = -1;
++
++	for (i = 0; i < 32; i++) {
++		if (!en75_rx_ring[i].valid || en75_rx_ring[i].sip != nsip ||
++		    en75_rx_ring[i].sport != nsport)
++			continue;
++		if (en75_rx_ring[i].dip == ndip)
++			continue;			/* post-DNAT egress echo */
++		idx = i;
++		if (en75_rx_ring[i].dport == ndport)
++			break;				/* exact if NAT preserved port */
++	}
++	return idx;
++}
+ static u16 en75_tx_bind_slot;	/* the engine-reported FoE slot to bind (from RX) */
+-static u16 en75_tx_committed_slot = 0xffff;	/* patch 372: last slot we committed */
++enum en75_tx_bind_dir {
++	EN75_TX_BIND_UP = 0,
++	EN75_TX_BIND_RET = 1,
++	EN75_TX_BIND_DIRS = 2,
++};
++static u16 en75_tx_committed_slot[EN75_TX_BIND_DIRS] = {
++	[EN75_TX_BIND_UP] = 0xffff,
++	[EN75_TX_BIND_RET] = 0xffff,
++};
+ 
+ /* build #43: FLIP-IN-PLACE (OEM model) -- patch the engine-built entry, not from-scratch */
+ bool en75_ppe_flip;		/* master enable for the flip-in-place RX hook */
+@@ -1519,6 +1562,8 @@
+ 	u8 ipproto, ihl;
+ 	int eo, b, ncand = 0;
+ 	bool plain_ip = false;	/* patch 373: plain-IPv4 egress (LAN-LAN rig) */
++	bool return_dir = false;
++	enum en75_tx_bind_dir dir = EN75_TX_BIND_UP;
+ 
+ 	if (len < 48)
+ 		return;
+@@ -1560,17 +1605,23 @@
+ 	ipproto = iph[9];
+ 	nsip = get_unaligned_be32(iph + 12);		/* NAT'd src (pppoe-wan IP) */
+ 	ndip = get_unaligned_be32(iph + 16);
+-	if (ndip != en75_tx_match_dip)			/* not our test flow */
++	if (ndip == en75_tx_match_dip) {
++		dir = EN75_TX_BIND_UP;
++	} else if (plain_ip && nsip == en75_tx_match_dip) {
++		return_dir = true;
++		dir = EN75_TX_BIND_RET;
++	} else {
+ 		return;
++	}
+ 	/* patch 372: steady-state short-circuit. While the slot we last
+ 	 * committed is still BIND (the engine is serving the flow), skip the
+ 	 * EGRESS logs + lock + 16K tuple-scan below -- that path ran up to
+ 	 * 20x/s and burned the core during throughput tests. When the engine
+ 	 * ages/unbinds the entry this check falls through and re-commits. */
+-	if (!READ_ONCE(en75_tx_bind_arm) && en75_tx_committed_slot != 0xffff) {
++	if (!READ_ONCE(en75_tx_bind_arm) && en75_tx_committed_slot[dir] != 0xffff) {
+ 		struct mtk_foe_entry *hwe = (struct mtk_foe_entry *)
+ 			((u8 *)ppe->foe_virt +
+-			 (u32)en75_tx_committed_slot * EN75_FOE_ENTRY_SIZE);
++			 (u32)en75_tx_committed_slot[dir] * EN75_FOE_ENTRY_SIZE);
+ 
+ 		if (FIELD_GET(MTK_FOE_IB1_STATE, en75_hwv(hwe->ib1)) ==
+ 		    MTK_FOE_STATE_BIND)
+@@ -1586,10 +1637,12 @@
+ 	 * ratelimited so the per-packet flood doesn't bury the COMMIT log.
+ 	 * patch 372: behind ppe_rxdump (perf runs want silence). */
+ 	if (READ_ONCE(en75_ppe_rxdump)) {
+-		pr_info_ratelimited("XR500v TX-bind EGRESS slot=%u dmac=%pM smac=%pM eo=%d dp_bm=%02x sid=0x%04x\n",
+-			en75_tx_bind_slot, dmac, smac, eo, dp_bm, sid);
+-		pr_info_ratelimited("XR500v TX-bind EGRESS new=%08x:%u -> %08x:%u proto=%u ihl=%u\n",
+-			nsip, nsport, ndip, ndport, ipproto, ihl);
++		pr_info_ratelimited("XR500v TX-bind EGRESS dir=%s slot=%u dmac=%pM smac=%pM eo=%d dp_bm=%02x sid=0x%04x\n",
++			return_dir ? "ret" : "up", en75_tx_bind_slot,
++			dmac, smac, eo, dp_bm, sid);
++		pr_info_ratelimited("XR500v TX-bind EGRESS dir=%s new=%08x:%u -> %08x:%u proto=%u ihl=%u\n",
++			return_dir ? "ret" : "up", nsip, nsport, ndip,
++			ndport, ipproto, ihl);
+ 	}
+ 	if (READ_ONCE(en75_tx_dpbm_override) >= 0) {
+ 		dp_bm = READ_ONCE(en75_tx_dpbm_override) & 0xff;
+@@ -1670,15 +1723,18 @@
+ 	 * engine's key + commit rewrite (OEM PpeSetEntryBind). */
+ 	{
+ 		u32 want_dip   = swab32(ndip);
++		u32 want_sip   = swab32(nsip);
+ 		u32 want_ports = swab32(((u32)nsport << 16) | ndport); /* if NAT kept sport */
+ 		u16 want_dphi  = swab16(ndport);		/* high16 of orig.ports */
+ 		int i, slot = -1, slot_loose = -1, rx;
+-		int dipmatch = 0, st_hist[4] = {0, 0, 0, 0};
++		int keymatch = 0, st_hist[4] = {0, 0, 0, 0};
+ 		bool have_key = false;
+ 
+ 		/* build #58: the engine's LOOKUP slot for this flow (RX-descriptor
+ 		 * FOE_ENTRY_NUM recorded per-flow at RX), and its pre-NAT 5-tuple. */
+-		rx = en75_ppe_rxslot_lookup(ndip, nsip, nsport, ndport);
++		rx = return_dir ?
++			en75_ppe_rxslot_lookup_return(nsip, ndip, nsport, ndport) :
++			en75_ppe_rxslot_lookup(ndip, nsip, nsport, ndport);
+ 
+ 		if (READ_ONCE(en75_ppe_preserve_key)) {
+ 			for (i = 0; i < EN75_PPE_ENTRIES; i++) {
+@@ -1686,14 +1742,22 @@
+ 					((u8 *)ppe->foe_virt + (u32)i * EN75_FOE_ENTRY_SIZE);
+ 				u32 st, dp;
+ 
+-				if (!hwe->ib1 || hwe->ipv4.orig.dest_ip != want_dip)
++				if (!hwe->ib1)
+ 					continue;
++				if (return_dir) {
++					if (hwe->ipv4.orig.src_ip != want_sip)
++						continue;
++					if (hwe->ipv4.orig.dest_ip == swab32(ndip))
++						continue;	/* post-DNAT egress echo */
++				} else if (hwe->ipv4.orig.dest_ip != want_dip) {
++					continue;
++				}
+ 				if ((hwe->ipv4.orig.ports >> 16) != want_dphi)	/* dport != 8080 */
+ 					continue;
+ 				/* patch 374: skip the engine's UNBIND of our own
+ 				 * egress echo (post-NAT re-ingress; key stored
+ 				 * swab32(network), same as want_dip above). */
+-				if (hwe->ipv4.orig.src_ip == swab32(nsip))
++				if (!return_dir && hwe->ipv4.orig.src_ip == swab32(nsip))
+ 					continue;
+ 				/* build #74: decode engine words via en75_hwv (raw key
+ 				 * compares above stay raw: want_* are already swab32). */
+@@ -1701,7 +1765,7 @@
+ 				dp = FIELD_GET(MTK_FOE_IB2_DEST_PORT, en75_hwv(hwe->ipv4.ib2));
+ 				if (st == MTK_FOE_STATE_INVALID)
+ 					continue;				/* free slot */
+-				dipmatch++;
++				keymatch++;
+ 				st_hist[st & 3]++;
+ 				if (st == MTK_FOE_STATE_BIND && dp == en75_flip_dp)
+ 					continue;			/* already our completed bind */
+@@ -1750,8 +1814,9 @@
+ 		}
+ 		if (!have_key || rx < 0) {
+ 			spin_unlock_bh(&ppe->lock);
+-			pr_info_ratelimited("XR500v TX-bind(#58): rx=%d scan_key=%d dip=%08x dport=%u (dipmatch=%d st[I/U/B/F]=%d/%d/%d/%d) -- retry\n",
+-					    rx, have_key, ndip, ndport, dipmatch,
++			pr_info_ratelimited("XR500v TX-bind(#58): dir=%s rx=%d scan_key=%d sip=%08x dip=%08x dport=%u (keymatch=%d st[I/U/B/F]=%d/%d/%d/%d) -- retry\n",
++					    return_dir ? "ret" : "up", rx,
++					    have_key, nsip, ndip, ndport, keymatch,
+ 					    st_hist[0], st_hist[1], st_hist[2], st_hist[3]);
+ 			return;
+ 		}
+@@ -1759,11 +1824,17 @@
+ 		 * future). orig.src == egress src means match-tuple == rewrite-tuple
+ 		 * (dip/ports already equal by construction): the entry would HW-
+ 		 * re-forward its own egress until TTL=0. Refuse; flow stays on SW. */
+-		if (e.ipv4.orig.src_ip == nsip ||
+-		    e.ipv4.orig.src_ip == swab32(nsip)) {
++		if ((!return_dir &&
++		     (e.ipv4.orig.src_ip == nsip ||
++		      e.ipv4.orig.src_ip == swab32(nsip))) ||
++		    (return_dir &&
++		     (e.ipv4.orig.src_ip == nsip ||
++		      e.ipv4.orig.src_ip == swab32(nsip)) &&
++		     (e.ipv4.orig.dest_ip == ndip ||
++		      e.ipv4.orig.dest_ip == swab32(ndip)))) {
+ 			spin_unlock_bh(&ppe->lock);
+-			pr_info_ratelimited("XR500v TX-bind(374): self-loop key (orig.sip==nsip %08x), skip\n",
+-					    nsip);
++			pr_info_ratelimited("XR500v TX-bind(374): dir=%s self-loop key nsip=%08x ndip=%08x, skip\n",
++					    return_dir ? "ret" : "up", nsip, ndip);
+ 			return;
+ 		}
+ 		/* commit at the engine LOOKUP slot (RX descriptor) -- foedump proved this
+@@ -1799,11 +1870,12 @@
+ 					    fslot);
+ 		}
+ 		en75_foe_entry_commit(ppe, &e, en75_rx_ring[rx].slot);
+-		en75_tx_committed_slot = en75_rx_ring[rx].slot;	/* patch 372 */
+-		pr_info_ratelimited("XR500v TX-bind(#58) commit LOOKUP slot=%u (scan_slot=%d key=%s) sip=%08x dip=%08x ports=%08x dp=%u ib2=%08x\n",
+-			en75_rx_ring[rx].slot, slot, slot >= 0 ? "engine" : "RXrecon",
+-			e.ipv4.orig.src_ip, e.ipv4.orig.dest_ip, e.ipv4.orig.ports,
+-			en75_flip_dp, e.ipv4.ib2);
++		en75_tx_committed_slot[dir] = en75_rx_ring[rx].slot;	/* patch 372 */
++		pr_info_ratelimited("XR500v TX-bind(#58) commit LOOKUP dir=%s slot=%u (scan_slot=%d key=%s) sip=%08x dip=%08x ports=%08x dp=%u ib2=%08x\n",
++			return_dir ? "ret" : "up", en75_rx_ring[rx].slot, slot,
++			slot >= 0 ? "engine" : "RXrecon", e.ipv4.orig.src_ip,
++			e.ipv4.orig.dest_ip, e.ipv4.orig.ports, en75_flip_dp,
++			e.ipv4.ib2);
+ 		/* also mirror at the engine write-slot if it materialized + differs */
+ 		if (slot >= 0 && (u16)slot != en75_rx_ring[rx].slot)
+ 			en75_foe_entry_commit(ppe, &e, (u16)slot);
+@@ -1818,8 +1890,9 @@
+ 	WRITE_ONCE(en75_tx_bind_arm, false);		/* one commit per RX arm */
+ 	spin_unlock_bh(&ppe->lock);
+ 
+-	pr_info_ratelimited("XR500v TX-bind COMMIT(#45 descr) slot=%u swab=%u ib1=%08x ib2=%08x etype=%04x sid=0x%04x dp_bm=%02x\n",
+-		en75_tx_bind_slot, READ_ONCE(en75_ppe_tuple_swab), e.ib1, e.ipv4.ib2,
++	pr_info_ratelimited("XR500v TX-bind COMMIT(#45 descr) dir=%s slot=%u swab=%u ib1=%08x ib2=%08x etype=%04x sid=0x%04x dp_bm=%02x\n",
++		return_dir ? "ret" : "up", en75_tx_committed_slot[dir],
++		READ_ONCE(en75_ppe_tuple_swab), e.ib1, e.ipv4.ib2,
+ 		e.ipv4.l2.etype, sid, dp_bm);
+ }
+ 
+@@ -1832,7 +1905,8 @@
+ 	WRITE_ONCE(en75_ppe_offload_enabled, false);
+ 	WRITE_ONCE(en75_tx_bind_arm, false);
+ 	en75_tx_bind_slot = 0xffff;
+-	en75_tx_committed_slot = 0xffff;	/* patch 372 */
++	en75_tx_committed_slot[EN75_TX_BIND_UP] = 0xffff;	/* patch 372 */
++	en75_tx_committed_slot[EN75_TX_BIND_RET] = 0xffff;
+ 	memset(en75_rx_ring, 0, sizeof(en75_rx_ring));
+ 	en75_rx_ring_idx = 0;
+ 
