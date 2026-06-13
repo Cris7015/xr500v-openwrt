@@ -1,0 +1,70 @@
+--- a/econet_eth.c	2026-06-13 01:37:15.841668206 -0300
++++ b/econet_eth.c	2026-06-13 01:22:11.969808222 -0300
+@@ -433,6 +433,12 @@
+  * IPv4 dst (host int, e.g. 2399185552 for 143.0.170.144) that flags our flow. */
+ module_param_named(ppe_tx_hook, en75_ppe_tx_hook, bool, 0644);
+ module_param_named(ppe_t_match_dip, en75_tx_match_dip, uint, 0644);
++/* patch 376 spike: ppe_match_all=1 -> generalize the offload to EVERY forwarded
++ * TCP/UDP NAT'd flow (ignore ppe_t_match_dip). Direction is implied by the egress
++ * encap: PPPoE = LAN->WAN (up), plain IPv4 = WAN->LAN return (ret). The engine
++ * already auto-learns a slot for all flows; the RX/TX correlation + 374/375
++ * guards stay active. Default 0 keeps the single-flow test behavior. */
++module_param_named(ppe_match_all, en75_ppe_match_all, bool, 0644);
+ /* build #43 FLIP-IN-PLACE: ppe_flip=1 -> RX hook patches the engine-built entry
+  * (dest_port=ppe_flip_dp + state=BIND, keep engine tuple) instead of from-scratch.
+  * Needs FLOW_CFG=0x0600f700 (engine writes DRAM). ppe_flip_dp: 1=GSW/LAN, 2=GMAC/WAN. */
+--- a/econet_ppe.c	2026-06-13 01:37:15.845668205 -0300
++++ b/econet_ppe.c	2026-06-13 01:22:31.237805585 -0300
+@@ -603,6 +603,7 @@
+ bool en75_ppe_tx_hook;		/* master enable */
+ bool en75_tx_bind_arm;		/* set by RX hook, cleared by TX hook after commit */
+ u32  en75_tx_match_dip;		/* network-order inner IPv4 dst that flags the test egress frame */
++bool en75_ppe_match_all;	/* patch 376 spike: bind EVERY forwarded NAT'd flow, ignore match_dip */
+ u8   en75_ppe_tuple_swab;	/* build #44: 1 = store orig tuple swab32 (engine LOOKUP encoding) */
+ bool en75_ppe_preserve_key = true;	/* build #48: keep the engine's UNBIND key, only add rewrite */
+ bool en75_ppe_mirror_lookup;		/* build #56: also write BIND at the RX-descriptor lookup slot */
+@@ -660,8 +661,11 @@
+ 	proto = iph[9];
+ 	if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+ 		return;
+-	/* Upstream has DIP=target; return path has SIP=target before DNAT. */
+-	if (get_unaligned_be32(iph + 16) != en75_tx_match_dip &&
++	/* Upstream has DIP=target; return path has SIP=target before DNAT.
++	 * patch 376 spike: with match_all, record EVERY forwarded TCP/UDP flow
++	 * (the engine already reports a slot for all of them). */
++	if (!READ_ONCE(en75_ppe_match_all) &&
++	    get_unaligned_be32(iph + 16) != en75_tx_match_dip &&
+ 	    get_unaligned_be32(iph + 12) != en75_tx_match_dip)
+ 		return;
+ 	ihl = (iph[0] & 0x0f) * 4;
+@@ -1605,7 +1609,19 @@
+ 	ipproto = iph[9];
+ 	nsip = get_unaligned_be32(iph + 12);		/* NAT'd src (pppoe-wan IP) */
+ 	ndip = get_unaligned_be32(iph + 16);
+-	if (ndip == en75_tx_match_dip) {
++	if (READ_ONCE(en75_ppe_match_all)) {
++		/* patch 376 spike: no fixed target -- direction is implied by the
++		 * egress encap. PPPoE encap = LAN->WAN (up); plain IPv4 = WAN->LAN
++		 * return (ret). The RX-record correlation below (rx < 0 -> bail)
++		 * naturally rejects router-local egress (no prior LAN ingress),
++		 * and the 374/375 self-loop guards stay active. */
++		if (!plain_ip) {
++			dir = EN75_TX_BIND_UP;
++		} else {
++			return_dir = true;
++			dir = EN75_TX_BIND_RET;
++		}
++	} else if (ndip == en75_tx_match_dip) {
+ 		dir = EN75_TX_BIND_UP;
+ 	} else if (plain_ip && nsip == en75_tx_match_dip) {
+ 		return_dir = true;
+--- a/econet_ppe.h	2026-06-13 01:37:15.845668205 -0300
++++ b/econet_ppe.h	2026-06-13 01:21:59.349810089 -0300
+@@ -308,6 +308,7 @@
+ extern bool en75_ppe_tx_hook;	/* master enable for the TX bind hook       */
+ extern bool en75_tx_bind_arm;	/* RX hook armed a pending TX commit        */
+ extern u32  en75_tx_match_dip;	/* inner IPv4 dst (network order) of test flow */
++extern bool en75_ppe_match_all;	/* patch 376 spike: bind every forwarded NAT'd flow */
+ extern bool en75_ppe_flip;	/* build #43: flip-in-place the engine-built entry */
+ extern u8   en75_flip_dp;	/* ib2.dp egress port for the flip (1=GSW,2=GMAC)  */
+ extern u8   en75_ppe_tuple_swab;/* build #44: 1=store orig tuple swab32 (engine LOOKUP order) */
