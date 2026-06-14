@@ -25,15 +25,15 @@ Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.c
  				 * magic VLAN etype=0x5678/vlan1=slot). Engine NAT+PPPoE
  				 * rewrites then delivers to CPU (crsn=0x16), sidestepping
  				 * the nested-switch fabric that blocks dp=1 egress. */
-+bool en75_ppe_fcpu_fqos = true;	/* patch 370: the OEM QDMA force-to-CPU rides the QoS
-+				 * engine (ra_nat.c PpeSetForcePortInfo iblk2.fqos=1; the
-+				 * live OEM dp=6 binds are ib2=0x00FFF0D0 = PSE_QOS set).
-+				 * Our dp=5/fqos=0 frames had no path and vanished (op82:
-+				 * no 0x5678 frame ever reached the CPU). */
-+u8 en75_ppe_fcpu_dp = 5;	/* patch 370: force-to-CPU PSE dest port. OEM has TWO
-+				 * variants: dp=5 (QDMATX_QDMARX) or dp=0 PDMA + fqos=1.
-+				 * dp=5+fqos=0 and dp=5+fqos=1 both tested dead on the
-+				 * EN751221 (no 0x5678 RX) -> A/B dp=0 next. */
++bool en75_ppe_fcpu_fqos;	/* patch 370: force-to-CPU fqos bit. The EN751221
++				 * validated path is the classic PDMA/CPU variant:
++				 * dp=0 + fqos=0 (op85/op86 and WHNAT F3 2026-06-14).
++				 * Keep this tunable for A/B, but do not default to the
++				 * QDMA/QoS variant used by other MTK HNAT V2 chips. */
++u8 en75_ppe_fcpu_dp;		/* patch 370: force-to-CPU PSE dest port. dp=0 is
++				 * the working EN751221 CPU path. dp=5 (QDMATX_QDMARX)
++				 * was tested dead here with fqos=0 and fqos=1: no valid
++				 * force-to-CPU delivery / crsn=0x16. */
 +bool en75_ppe_fcpu_xmit;	/* patch 371 (build #79): deliver the forced frames --
 +				 * strip the slot-VLAN, dev_queue_xmit out fcpu_odev.
 +				 * VALIDATED PREREQ (op85): dp=0+fqos=0 lands rewritten

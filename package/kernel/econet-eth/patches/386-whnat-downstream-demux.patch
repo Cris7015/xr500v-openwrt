@@ -1,0 +1,166 @@
+econet-eth: WHNAT downstream half-offload (F2+F3) -- WiFi egress mux
+
+WiFi HW-NAT half-offload, phases 2 and 3 (econet-eth side). Completes the
+downstream path (internet -> WiFi client) on top of the F1 vif registry (384).
+
+F2 (en75_flow_offload_replace): when the flowtable offers a flow whose egress
+smac is a registered mt76 AP vif (en75_whnat_idx_by_mac), build the FoE entry
+for HALF-OFFLOAD instead of the dp=1 switch path -- dest_port = force-to-CPU
+(en75_ppe_fcpu_dp) + a magic VLAN (vlan1 = vif index, etype 0x5678). The engine
+does the NAT/PPPoE rewrite then bounces the frame to the CPU (crsn=0x16) with
+that tag riding along.
+
+F3 (en75_qdma_rx_process_one): extend the force-to-CPU delivery -- read the
+inserted tag's TCI; if it indexes a registered WiFi vif (en75_whnat_vif_by_idx)
+strip the tag and dev_queue_xmit to that BSS netdev (the OEM
+PpeHitBindForceToWiFiHandler). The existing ethernet fixed-egress (fcpu_out)
+path is preserved as the fallback. The CPU only does the final dev_xmit; the PPE
+did the NAT, so the WiFi forward stops being bottlenecked by the 1-CPU MIPS.
+
+The exact egress tag (entry etype 0x5678 vs VPM 0xF18 0x8100, and whether the
+engine honors vlan1=idx as the TCI) is HW-empirical; F3 accepts both TPIDs and
+keys off the TCI, to be confirmed on the bench.
+
+--- a/econet_ppe.h
++++ b/econet_ppe.h
+@@ -202,6 +202,7 @@
+ 	 * the swab32 order the engine's LOOKUP needs to HIT (build #72 tuple_swab). */
+ 	u32			ft_sip, ft_dip;
+ 	u16			ft_sport, ft_dport;
++	int			wifi_vif_idx;	/* F2: >=0 -> WiFi egress half-offload, demux idx */
+ };
+ 
+ struct en75_ppe {
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -545,7 +545,7 @@
+ 	__be32 o_sip, o_dip, n_sip, n_dip;
+ 	__be16 o_sport, o_dport, n_sport, n_dport;
+ 	u8 l4proto;
+-	int sid = 0, i;
++	int sid = 0, i, wifi_idx;
+ 	struct en75_flow_entry *fe;
+ 
+ 	if (!en75_the_ppe)
+@@ -597,15 +597,34 @@
+ 		return -EOPNOTSUPP;		/* need the next-hop MACs from MANGLE */
+ 
+ 	/* Build the FoE entry. orig = pre-NAT 5-tuple (the match), new = post-NAT
+-	 * (the rewrite). dp=1 (GSW switch egress): the external MT7530 routes by the
+-	 * next-hop dst MAC via its ARL -- the model validated by the match_all spike
+-	 * (cont29). PPPoE sid from FLOW_ACTION_PPPOE_PUSH. */
+-	en75_foe_entry_prepare(&e, MTK_PPE_PKT_TYPE_IPV4_HNAPT, l4proto, 1,
++	 * (the rewrite). Ethernet egress: dp=1 (GSW switch routes by the next-hop
++	 * dst MAC via its ARL -- match_all spike, cont29). WiFi egress (F2: smac ==
++	 * a registered mt76 AP vif): HALF-OFFLOAD -- force-to-CPU (dp=fcpu) so the
++	 * engine does the NAT then bounces the frame to the CPU, where the F3 demux
++	 * dev_queue_xmit's it to the mt76 vif (the OEM WHNAT model, cont32r/s).
++	 * PPPoE sid from FLOW_ACTION_PPPOE_PUSH (WiFi downstream has none). */
++	wifi_idx = en75_whnat_idx_by_mac(eth.h_source);
++	en75_foe_entry_prepare(&e, MTK_PPE_PKT_TYPE_IPV4_HNAPT, l4proto,
++			       wifi_idx >= 0 ? READ_ONCE(en75_ppe_fcpu_dp) : 1,
+ 			       eth.h_source, eth.h_dest);
+ 	en75_foe_entry_set_ipv4_tuple(&e, false, o_sip, o_sport, o_dip, o_dport);
+ 	en75_foe_entry_set_ipv4_tuple(&e, true, n_sip, n_sport, n_dip, n_dport);
+ 	if (sid)
+ 		en75_foe_entry_set_pppoe(&e, sid);
++	if (wifi_idx >= 0) {
++		/* magic VLAN the engine rides on the force-to-CPU frame: TCI = vif
++		 * index (0..15), etype 0x5678 (OEM QDMA-to-CPU tag). The F3 demux in
++		 * econet_qdma.c reads the TCI to pick the destination BSS netdev.
++		 * (The OEM force-to-CPU put vlan1=slot here; we put the vif idx so the
++		 * RX side recovers the BSS directly -- econet_ppe.c:2146 model.) */
++		e.ipv4.l2.vlan1 = wifi_idx;
++		e.ipv4.l2.etype = htons(0x5678);
++		e.ib1 &= ~MTK_FOE_IB1_BIND_VLAN_LAYER;
++		e.ib1 |= MTK_FOE_IB1_BIND_VLAN_TAG |
++			 FIELD_PREP(MTK_FOE_IB1_BIND_VLAN_LAYER, 1);
++		if (READ_ONCE(en75_ppe_fcpu_fqos))
++			e.ipv4.ib2 |= MTK_FOE_IB2_PSE_QOS;
++	}
+ 	/* build #72: the engine FORWARD_BUILDs its UNBIND key in swab32 order; match it
+ 	 * so the engine's LOOKUP of the real frame HITs our entry (we commit the real
+ 	 * tuple with no preserve_key, so we pre-swab like en75_build_test_flow does --
+@@ -625,6 +644,7 @@
+ 		return -ENOMEM;
+ 	fe->data = e;		/* orig may be swab32 (tuple_swab) for the engine HIT */
+ 	fe->cookie = f->cookie;
++	fe->wifi_vif_idx = wifi_idx;	/* F2: >=0 if egress is an mt76 AP vif */
+ 	fe->ft_sip = ntohl(o_sip);	/* host-order match tuple for en75_ppe_ft_rx_bind */
+ 	fe->ft_dip = ntohl(o_dip);
+ 	fe->ft_sport = ntohs(o_sport);
+@@ -632,8 +652,8 @@
+ 	en75_foe_entry_register(en75_the_ppe, fe);
+ 	WRITE_ONCE(en75_ppe_offload_enabled, true);
+ 
+-	pr_info_ratelimited("XR500v FT(380) REGISTER ck=%lx sid=%d %pI4:%u->%pI4:%u => %pI4:%u->%pI4:%u dmac=%pM smac=%pM\n",
+-		f->cookie, sid, &o_sip, ntohs(o_sport), &o_dip, ntohs(o_dport),
++	pr_info_ratelimited("XR500v FT(380) REGISTER ck=%lx sid=%d wifi=%d %pI4:%u->%pI4:%u => %pI4:%u->%pI4:%u dmac=%pM smac=%pM\n",
++		f->cookie, sid, wifi_idx, &o_sip, ntohs(o_sport), &o_dip, ntohs(o_dport),
+ 		&n_sip, ntohs(n_sport), &n_dip, ntohs(n_dport),
+ 		eth.h_dest, eth.h_source);
+ 	return 0;
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -282,29 +282,40 @@
+ 			en75_ppe_prebind_promote(q->qdma->eth->ppe, hash);
+ 	}
+ 
+-	/* patch 371 (build #79): half-offload delivery, the OEM
+-	 * PpeHitBindForceToCpuHandler equivalent. The engine HW-rewrote this
+-	 * frame (NAT+PPPoE, dmac=next-hop, TTL-1) and forced it to the CPU
+-	 * (dp=0) with crsn=0x16 + an inserted VLAN whose TCI = FoE slot
+-	 * (TPID comes from VPM 0xF18 = 0x8100, NOT the entry etype). Strip
+-	 * the tag and transmit it raw out the egress user port. */
+-	/* patch 372: fcpu_out resolved ONCE per NAPI poll by the caller (was
+-	 * dev_get_by_name per packet); count instead of printk (log stays
+-	 * behind ppe_rxdump). */
+-	if (fcpu_out &&
+-	    get_erx_crsn(&desc.msg.erx) ==
++	/* patch 371/372 (eth) + 385 (WHNAT WiFi, F3): half-offload delivery, the
++	 * OEM PpeHitBindForceToCpuHandler / PpeHitBindForceToWiFiHandler. The engine
++	 * HW-rewrote this frame (NAT+PPPoE, dmac=next-hop, TTL-1) and forced it to
++	 * the CPU with crsn=0x16 + an inserted VLAN tag whose TCI is the destination
++	 * selector. For a WiFi flow (F2 set vlan1=vif idx, etype 0x5678) the TCI is
++	 * the mt76 AP vif index -> dev_queue_xmit to that BSS. For the ethernet
++	 * half-offload the TCI is the FoE slot -> egress out the fixed fcpu_out.
++	 * (TPID may be the entry etype 0x5678 or the VPM 0xF18 0x8100 -- accept both;
++	 * fcpu_out is resolved once per NAPI poll by the caller, patch 372.) */
++	if (get_erx_crsn(&desc.msg.erx) ==
+ 	    MTK_PPE_CPU_REASON_HIT_BIND_FORCE_TO_CPU && skb->len >= 18) {
+-		if (get_unaligned_be16(skb->data + 12) == ETH_P_8021Q) {
+-			memmove(skb->data + 4, skb->data, 12);
+-			skb_pull(skb, 4);
++		u16 tpid = get_unaligned_be16(skb->data + 12);
++		bool tagged = (tpid == ETH_P_8021Q || tpid == 0x5678);
++		struct net_device *wdev = NULL;
++
++		if (tagged)	/* WiFi vif by TCI? (returns a held ref or NULL) */
++			wdev = en75_whnat_vif_by_idx(
++				get_unaligned_be16(skb->data + 14) & 0xfff);
++
++		if (wdev || fcpu_out) {
++			if (tagged) {		/* strip the 4-byte tag -> raw 802.3 */
++				memmove(skb->data + 4, skb->data, 12);
++				skb_pull(skb, 4);
++			}
++			skb->dev = wdev ? wdev : fcpu_out;
++			en75_ppe_fcpu_xmit_cnt++;
++			if (READ_ONCE(en75_ppe_rxdump))
++				pr_info_ratelimited("XR500v FCPU-XMIT: len=%u -> %s (wifi=%d)\n",
++						    skb->len, skb->dev->name, !!wdev);
++			dev_queue_xmit(skb);
++			if (wdev)
++				dev_put(wdev);
++			return;
+ 		}
+-		skb->dev = fcpu_out;
+-		en75_ppe_fcpu_xmit_cnt++;
+-		if (READ_ONCE(en75_ppe_rxdump))
+-			pr_info_ratelimited("XR500v FCPU-XMIT: len=%u -> %s\n",
+-					    skb->len, fcpu_out->name);
+-		dev_queue_xmit(skb);
+-		return;
+ 	}
+ 
+ 	sport = get_erx_sport(&desc.msg.erx);

@@ -1,0 +1,218 @@
+econet-eth: WHNAT vif registry (F1) -- map mt76 AP netdevs to PPE vif index
+
+WiFi HW-NAT half-offload, phase 1. The OEM WHNAT scheme tags each AP
+pseudo-interface with a VirIfIdx so the PPE's force-to-CPU downstream frames
+can be muxed back to the right BSS on egress. This adds the econet-eth side
+of that map: a small array (en75_wifi_vif[16] = OEM HWNAT_WLAN_IF_MAXNUM)
+keyed by the mt76 mvif->idx, plus register/lookup helpers modelled on the OEM
+ppe_dev_register_hook()/DstPort[] table.
+
+  en75_whnat_register_vif(dev, idx) / _unregister_vif(idx) -- EXPORT_SYMBOL,
+      called by mt76 from mt7603_add/remove_interface (next patch, weak refs).
+  en75_whnat_vif_by_idx(idx) -- idx -> netdev with an extra hold (the F3 demux
+      dev_put()s after dev_queue_xmit; closes the unregister-vs-xmit race).
+  en75_whnat_idx_by_dev(dev) / _idx_by_mac(mac) -- reverse lookups for F2
+      (en75_flow_offload_replace spots a WiFi egress flow by its smac, which
+      equals the AP vif's dev_addr -- verified on HW, cont32t).
+  en75_whnat_flush_vifs() -- drop all holds on module exit (no netdev leak if
+      mt76 is still loaded), wired into en75_remove().
+
+The array holds a netdev reference while a vif is registered so the stored
+pointer stays valid for the NAPI reader. No datapath change yet: nothing calls
+the lookups until F2/F3, so this patch is inert on its own.
+
+--- a/econet_ppe.h
++++ b/econet_ppe.h
+@@ -308,6 +308,24 @@
+ 				int dsa_port, bool passthrough, u8 pse_port);
+ 
+ /* ===================================================================== */
++/* WHNAT vif registry (F1): map mt76 AP netdevs <-> WHNAT vif index.       */
++/* The downstream half-offload mux (F2/F3) tags the FoE entry by vif index */
++/* and, on the force-to-CPU RX, resolves index->netdev to dev_queue_xmit   */
++/* the NAT'd frame to the right BSS. mt76 calls register/unregister via    */
++/* weak refs; the lookups stay inside econet-eth (same module).            */
++/* ===================================================================== */
++#define EN75_WHNAT_MAX_VIFS	16	/* = OEM HWNAT_WLAN_IF_MAXNUM */
++
++/* EXPORT_SYMBOL'd -- mt76 (separate module) calls these from add/remove_interface */
++void en75_whnat_register_vif(struct net_device *dev, int idx);
++void en75_whnat_unregister_vif(int idx);
++/* econet-eth-internal: flush on module exit + the F2/F3 lookups */
++void en75_whnat_flush_vifs(void);
++struct net_device *en75_whnat_vif_by_idx(int idx);	/* returns a HELD ref or NULL */
++int en75_whnat_idx_by_dev(const struct net_device *dev);
++int en75_whnat_idx_by_mac(const u8 *mac);
++
++/* ===================================================================== */
+ /* TX-hook (build #42): OEM FoeBindToPpe model -- fill the COMPLETE entry  */
+ /* from the EGRESS packet (real BRAS MAC, pppoe session-id, NAT'd tuple,   */
+ /* DSA dp from the MTK tag) in the TX path, then commit BIND. The RX hook  */
+--- a/econet_ppe.c
++++ b/econet_ppe.c
+@@ -10,6 +10,8 @@
+ #include <linux/dma-mapping.h>
+ #include <linux/delay.h>
+ #include <linux/etherdevice.h>
++#include <linux/export.h>	/* EXPORT_SYMBOL for the WHNAT vif registry (F1) */
++#include <linux/netdevice.h>	/* dev_hold/dev_put/dev_queue_xmit (WHNAT) */
+ #include <linux/io.h>
+ #include <linux/ip.h>
+ #include <linux/slab.h>
+@@ -1266,6 +1268,145 @@
+ 	}
+ }
+ 
++/* ===================================================================== */
++/* WHNAT vif registry (F1): mt76 AP netdev <-> WHNAT vif index.           */
++/* Models the OEM ppe_dev_register_hook()/DstPort[] table. Writers = mt76 */
++/* add/remove_interface (process ctx, holds mt76.mutex). Readers = the    */
++/* NAPI force-to-CPU downstream demux (F3) + en75_flow_offload_replace    */
++/* (F2). The array holds a netdev reference while a vif is registered so   */
++/* the stored pointer stays valid; en75_whnat_vif_by_idx() hands the      */
++/* reader an extra hold to dev_put() after dev_queue_xmit(), which closes  */
++/* the unregister-vs-xmit race. idx = mt76 mvif->idx (== OEM VirIfIdx).    */
++/* ===================================================================== */
++static struct net_device *en75_wifi_vif[EN75_WHNAT_MAX_VIFS];
++static DEFINE_SPINLOCK(en75_wifi_vif_lock);
++
++void en75_whnat_register_vif(struct net_device *dev, int idx)
++{
++	struct net_device *old = NULL;
++	unsigned long flags;
++
++	if (!dev || idx < 0 || idx >= EN75_WHNAT_MAX_VIFS)
++		return;
++
++	spin_lock_irqsave(&en75_wifi_vif_lock, flags);
++	if (en75_wifi_vif[idx] != dev) {
++		old = en75_wifi_vif[idx];	/* may be NULL */
++		dev_hold(dev);
++		en75_wifi_vif[idx] = dev;
++	}
++	spin_unlock_irqrestore(&en75_wifi_vif_lock, flags);
++
++	if (old)
++		dev_put(old);
++	pr_info("econet-eth: WHNAT vif[%d] = %s (%pM)\n",
++		idx, dev->name, dev->dev_addr);
++}
++/* _GPL: mt76 resolves these via symbol_get(), which only binds GPL-only symbols */
++EXPORT_SYMBOL_GPL(en75_whnat_register_vif);
++
++void en75_whnat_unregister_vif(int idx)
++{
++	struct net_device *old;
++	unsigned long flags;
++
++	if (idx < 0 || idx >= EN75_WHNAT_MAX_VIFS)
++		return;
++
++	spin_lock_irqsave(&en75_wifi_vif_lock, flags);
++	old = en75_wifi_vif[idx];
++	en75_wifi_vif[idx] = NULL;
++	spin_unlock_irqrestore(&en75_wifi_vif_lock, flags);
++
++	if (old) {
++		pr_info("econet-eth: WHNAT vif[%d] released (%s)\n", idx, old->name);
++		dev_put(old);
++	}
++}
++EXPORT_SYMBOL_GPL(en75_whnat_unregister_vif);
++
++/* drop every registered hold -- called from econet-eth module exit so we don't
++ * leak the netdev refs if mt76 is still loaded when this driver unloads. */
++void en75_whnat_flush_vifs(void)
++{
++	struct net_device *old[EN75_WHNAT_MAX_VIFS];
++	unsigned long flags;
++	int i;
++
++	spin_lock_irqsave(&en75_wifi_vif_lock, flags);
++	for (i = 0; i < EN75_WHNAT_MAX_VIFS; i++) {
++		old[i] = en75_wifi_vif[i];
++		en75_wifi_vif[i] = NULL;
++	}
++	spin_unlock_irqrestore(&en75_wifi_vif_lock, flags);
++
++	for (i = 0; i < EN75_WHNAT_MAX_VIFS; i++)
++		if (old[i])
++			dev_put(old[i]);
++}
++
++/* idx -> netdev with an EXTRA hold; the caller dev_put()s after dev_queue_xmit */
++struct net_device *en75_whnat_vif_by_idx(int idx)
++{
++	struct net_device *dev;
++	unsigned long flags;
++
++	if (idx < 0 || idx >= EN75_WHNAT_MAX_VIFS)
++		return NULL;
++
++	spin_lock_irqsave(&en75_wifi_vif_lock, flags);
++	dev = en75_wifi_vif[idx];
++	if (dev)
++		dev_hold(dev);
++	spin_unlock_irqrestore(&en75_wifi_vif_lock, flags);
++
++	return dev;
++}
++
++int en75_whnat_idx_by_dev(const struct net_device *dev)
++{
++	unsigned long flags;
++	int i, idx = -1;
++
++	if (!dev)
++		return -1;
++
++	spin_lock_irqsave(&en75_wifi_vif_lock, flags);
++	for (i = 0; i < EN75_WHNAT_MAX_VIFS; i++)
++		if (en75_wifi_vif[i] == dev) {
++			idx = i;
++			break;
++		}
++	spin_unlock_irqrestore(&en75_wifi_vif_lock, flags);
++
++	return idx;
++}
++
++/* match by source MAC: the flowtable hands the downstream egress smac, which
++ * equals the AP vif's dev_addr (verified on HW, cont32t). Used by F2 to spot a
++ * WiFi egress flow without needing the netdev pointer. */
++int en75_whnat_idx_by_mac(const u8 *mac)
++{
++	unsigned long flags;
++	int i, idx = -1;
++
++	if (!mac)
++		return -1;
++
++	spin_lock_irqsave(&en75_wifi_vif_lock, flags);
++	for (i = 0; i < EN75_WHNAT_MAX_VIFS; i++) {
++		struct net_device *d = en75_wifi_vif[i];
++
++		if (d && ether_addr_equal(d->dev_addr, mac)) {
++			idx = i;
++			break;
++		}
++	}
++	spin_unlock_irqrestore(&en75_wifi_vif_lock, flags);
++
++	return idx;
++}
++
+ /* patch 356: allocate the per-eth PPE state (struct + foe_flow + rate-limit). */
+ struct en75_ppe *en75_ppe_attach(struct device *dev, void __iomem *base,
+ 				 void __iomem *fe_base, void *foe_virt,
+--- a/econet_eth.c
++++ b/econet_eth.c
+@@ -288,6 +288,8 @@
+ 	if (!eth)
+ 		return;
+ 
++	en75_whnat_flush_vifs();	/* drop WHNAT vif netdev holds (F1) */
++
+ 	en75_debugfs_exit(eth->debug);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(eth->qdma); i++)
