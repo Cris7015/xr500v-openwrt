@@ -1,0 +1,32 @@
+ppe: keep flowtable offload active while any block is bound
+
+en75_ppe_ft_active is a single global bool, cleared on every FLOW_BLOCK_UNBIND.
+With the WiFi APs in the hardware flowtable, the 2.4 GHz radio flapping during
+boot fires an UNBIND that clears the flag -- the RX path then drops to the
+"NObind" slow path and HW-NAT stops binding for every flow (LAN/rig included),
+even though those blocks are still bound. Derive ft_active from the driver
+block list (!list_empty) on UNBIND instead, so one device's UNBIND can't
+disable offload while other ports remain bound.
+
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -709,7 +709,6 @@
+ 		list_add_tail(&block_cb->driver_list, &en75_ft_block_cb_list);
+ 		return 0;
+ 	case FLOW_BLOCK_UNBIND:
+-		WRITE_ONCE(en75_ppe_ft_active, false);	/* patch 379 */
+ 		block_cb = flow_block_cb_lookup(f->block, cb, dev);
+ 		if (!block_cb)
+ 			return -ENOENT;
+@@ -717,6 +716,11 @@
+ 			flow_block_cb_remove(block_cb, f);
+ 			list_del(&block_cb->driver_list);
+ 		}
++		/* fix (2026-06-14): keep ft_active true while ANY flowtable block
++		 * is still bound. A single device's UNBIND (e.g. a WiFi AP flapping
++		 * at boot) must NOT clear this global flag while the LAN ports are
++		 * still offloading -- else RX drops to the NObind path + HW-NAT dies. */
++		WRITE_ONCE(en75_ppe_ft_active, !list_empty(&en75_ft_block_cb_list));
+ 		return 0;
+ 	default:
+ 		return -EOPNOTSUPP;
