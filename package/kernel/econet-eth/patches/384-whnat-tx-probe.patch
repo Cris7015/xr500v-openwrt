@@ -7,23 +7,29 @@ inject a frame into the PCIe-attached MT7603 so it transmits over the air?
 This adds a minimal, self-contained probe to settle that before building any
 infrastructure.
 
-en75_whnat_tx_probe() builds a synthetic broadcast frame with a "WHNATPROBE"
-marker, optionally inserts the WiFi mux VLAN tag, and posts it to qdma[0] (the
-GDM1/conduit ring the OEM wifi_fast uses) with the WiFi msg. Knobs are exposed
-as runtime-writable module params, so the whole test matrix sweeps without a
-reload:
+en75_whnat_tx_probe() builds a synthetic broadcast or directed frame with a
+"WHNATPROBE" marker, optionally inserts the WiFi mux VLAN tag, and posts it to
+qdma[0] (the GDM1/conduit ring the OEM wifi_fast uses) with the WiFi msg. Knobs
+are exposed as runtime-writable module params, so the whole test matrix sweeps
+without a reload:
 
-  whnat_tx_vid / tag / imm / msg0 / msg1, then: echo 1 > .../whnat_tx_fire
+  whnat_tx_vid / tag / msg0 / msg1 / da_hi / da_lo, then:
+  echo 1 > .../whnat_tx_fire
 
-whnat_tx_imm ORs TX_IMMEDIATE_DONE into the qdma cfg live: the OEM sets it and
-we don't (en75_init_final), and the WiFi egress yields no GDM "Done" -- so it
-is the prime suspect for "descriptor posts but never completes". Observe with a
-monitor sniffer on the AP channel (the AP must be wifi-up). Nothing here touches
-the PPE/NAT datapath; it is a diagnostic, dropped once the path is productized.
+whnat_tx_imm was kept as a knob during early bring-up, but must not be used as a
+normal probe path: live F0 testing on the XR500v showed that setting
+TX_IMMEDIATE_DONE globally and firing the WiFi descriptor can wedge/reboot the
+device. Observe with a monitor sniffer on the AP channel (the AP must be
+wifi-up). Nothing here touches the PPE/NAT datapath; it is a diagnostic, dropped
+once the path is productized.
+
+The probe skb is attached to qdma->napi_dev, and TX completion skips BQL
+accounting for that dummy netdev. Descriptors that complete through the normal
+TX done queue can then be freed without tripping BQL's completion sanity check.
 ---
 --- a/econet_eth.h
 +++ b/econet_eth.h
-@@ -206,6 +206,12 @@
+@@ -206,6 +206,13 @@
  		   union desc_msg *msg, int qid);
 
 
@@ -31,34 +37,53 @@ the PPE/NAT datapath; it is a diagnostic, dropped once the path is productized.
 + * the WiFi chip through the QDMA WiFi fport, to validate the QDMA->PCIe-MT7603
 + * inject path. Defined in econet_qdma.c (needs the full struct en75_qdma). */
 +int en75_whnat_tx_probe(struct en75_qdma *qdma, u16 vid, unsigned int tag,
-+			bool set_imm, u32 msg0, u32 msg1);
++			bool set_imm, u32 msg0, u32 msg1,
++			u32 da_hi, u32 da_lo);
 +
  struct net_device *en75_alloc_gdm_port(struct en75_eth *eth,
- 				       struct device_node *np,
- 				       struct gdm __iomem *regs,
+				       struct device_node *np,
+				       struct gdm __iomem *regs,
 --- a/econet_qdma.c
 +++ b/econet_qdma.c
-@@ -699,6 +699,72 @@
+@@ -626,5 +626,10 @@ static int en75_poll_tx_complete(struct
+-		txq = netdev_get_tx_queue(skb->dev,
+-					  skb_get_queue_mapping(skb));
+-		netdev_tx_completed_queue(txq, 1, skb->len);
+-		if (netif_tx_queue_stopped(txq))
+-			netif_tx_wake_queue(txq);
++		/* Probe skbs use the dummy NAPI netdev and have no BQL
++		 * enqueue side, so only free them.
++		 */
++		if (skb->dev != qdma->napi_dev) {
++			txq = netdev_get_tx_queue(skb->dev,
++						  skb_get_queue_mapping(skb));
++			netdev_tx_completed_queue(txq, 1, skb->len);
++			if (netif_tx_queue_stopped(txq))
++				netif_tx_wake_queue(txq);
++		}
+@@ -699,6 +699,86 @@
  		EBUSY : 0;
  }
 
 +/* patch 383: WHNAT TX probe (Phase 0 fail-fast).
-+ * Build a synthetic broadcast frame with a recognizable "WHNATPROBE" marker,
-+ * optionally insert the WiFi mux VLAN tag, and post it to the QDMA TX ring with
-+ * the OEM WiFi msg (raw[0]=0x38 -> channel 7/queue 0; raw[1]=0x200000 -> WiFi
-+ * fport, bit 21). If the SoC wires a QDMA->PCIe-MT7603 inject path, the chip
-+ * transmits this over the air -- observe with a monitor sniffer on the AP's
-+ * channel (the AP must be "wifi up"). set_imm ORs TX_IMMEDIATE_DONE live (the
-+ * OEM sets it and we don't -- suspect #1: the WiFi egress yields no GDM "Done",
-+ * so the QDMA must self-complete the descriptor). Nothing here touches the
-+ * PPE/NAT: this isolates the single irreducible HW unknown. */
++ * Build a synthetic broadcast or directed frame with a recognizable
++ * "WHNATPROBE" marker, optionally insert the WiFi mux VLAN tag, and post it to
++ * the QDMA TX ring with the OEM WiFi msg (raw[0]=0x38 -> channel 7/queue 0;
++ * raw[1]=0x200000 -> WiFi fport, bit 21). If the SoC wires a QDMA->PCIe-MT7603
++ * inject path, the chip transmits this over the air -- observe with a monitor
++ * sniffer on the AP's channel (the AP must be "wifi up"). set_imm is
++ * deliberately refused: live F0 testing showed global TX_IMMEDIATE_DONE can
++ * wedge/reboot the XR500v after a WiFi-fport descriptor. Nothing here touches
++ * the PPE/NAT: this isolates the single irreducible HW unknown. */
 +int en75_whnat_tx_probe(struct en75_qdma *qdma, u16 vid, unsigned int tag,
-+			bool set_imm, u32 msg0, u32 msg1)
++			bool set_imm, u32 msg0, u32 msg1,
++			u32 da_hi, u32 da_lo)
 +{
 +	static const u8 src_mac[ETH_ALEN] = { 0x02, 'W', 'H', 'N', 'A', 'T' };
 +	static unsigned int seq;
 +	union desc_msg msg = { 0 };
 +	struct sk_buff *skb;
++	u8 dst_mac[ETH_ALEN];
 +	char *pl;
 +	u8 *p;
 +	int ret;
@@ -66,20 +91,32 @@ the PPE/NAT datapath; it is a diagnostic, dropped once the path is productized.
 +	if (!qdma)
 +		return -ENODEV;
 +
-+	if (set_imm) {
-+		struct qregs_qcfg qcfg = en75_rreg(&qdma->regs->qdma_cfg);
++	if (!qdma->napi_dev)
++		return -ENODEV;
 +
-+		set_qregs_qcfg_tx_immediate_done(&qcfg, true);
-+		en75_wreg(qcfg, &qdma->regs->qdma_cfg);
++	if (set_imm) {
++		pr_warn("XR500v WHNAT probe: refusing whnat_tx_imm (TX_IMMEDIATE_DONE wedged/rebooted F0 test)\n");
++		return -EOPNOTSUPP;
 +	}
 +
-+	skb = netdev_alloc_skb(NULL, ETH_FRAME_LEN);
++	skb = netdev_alloc_skb(qdma->napi_dev, ETH_FRAME_LEN);
 +	if (!skb)
 +		return -ENOMEM;
 +	skb_reserve(skb, NET_SKB_PAD);
 +
++	if (da_hi || da_lo) {
++		dst_mac[0] = da_hi >> 8;
++		dst_mac[1] = da_hi;
++		dst_mac[2] = da_lo >> 24;
++		dst_mac[3] = da_lo >> 16;
++		dst_mac[4] = da_lo >> 8;
++		dst_mac[5] = da_lo;
++	} else {
++		eth_broadcast_addr(dst_mac);
++	}
++
 +	p = skb_put(skb, 2 * ETH_ALEN);
-+	eth_broadcast_addr(p);				/* dst = broadcast */
++	memcpy(p, dst_mac, ETH_ALEN);
 +	memcpy(p + ETH_ALEN, src_mac, ETH_ALEN);	/* src = 02:57:48:4e:41:54 */
 +
 +	if (tag == 1 || tag == 2) {			/* WiFi mux tag */
@@ -100,8 +137,8 @@ the PPE/NAT datapath; it is a diagnostic, dropped once the path is productized.
 +	msg.raw[1] = msg1;
 +
 +	ret = en75_qdma_xmit(qdma, skb, &msg, 0);
-+	pr_info("XR500v WHNAT probe seq=%u vid=%u tag=%u imm=%d msg=%08x/%08x -> ret=%d\n",
-+		seq, vid, tag, set_imm, msg0, msg1, ret);
++	pr_info("XR500v WHNAT probe seq=%u vid=%u tag=%u imm=%d da=%pM msg=%08x/%08x -> ret=%d\n",
++		seq, vid, tag, set_imm, dst_mac, msg0, msg1, ret);
 +	seq++;
 +	if (ret < 0)
 +		kfree_skb(skb);
@@ -124,7 +161,7 @@ the PPE/NAT datapath; it is a diagnostic, dropped once the path is productized.
  static int en75_ppe_engine_set(bool on)
  {
  	void __iomem *g;
-@@ -401,6 +405,42 @@
+@@ -401,6 +405,47 @@
  /* echo 1 > /sys/module/econet_eth/parameters/ppe_test -> commit 1 test FoE entry */
  module_param_cb(ppe_test, &en75_ppe_test_ops, &en75_ppe_test, 0644);
 
@@ -132,10 +169,10 @@ the PPE/NAT datapath; it is a diagnostic, dropped once the path is productized.
 + * Set the knobs, then fire one frame at the WiFi via the QDMA:
 + *   whnat_tx_vid  = mux VID (= target vif index), stamped if whnat_tx_tag != 0
 + *   whnat_tx_tag  = 0 none | 1 -> 0x5678/vid | 2 -> 0x8100/vid
-+ *   whnat_tx_imm  = OR TX_IMMEDIATE_DONE into qdma[0] cfg before firing (the OEM
-+ *                   sets it and we don't -- suspect #1 for "posts but no Done")
++ *   whnat_tx_imm  = refused: TX_IMMEDIATE_DONE wedged/rebooted the F0 test box
 + *   whnat_tx_msg0 = TX msg word0 (default 0x38 = channel 7/queue 0)
 + *   whnat_tx_msg1 = TX msg word1 (default 0x200000 = WiFi fport, bit 21)
++ *   whnat_tx_da_hi/lo = optional unicast DA; zero means broadcast
 + *   echo 1 > whnat_tx_fire   -> shoot one frame; watch a monitor sniffer for the
 + *                               "WHNATPROBE" marker (AP must be wifi-up). */
 +static unsigned int whnat_tx_vid;
@@ -143,11 +180,15 @@ the PPE/NAT datapath; it is a diagnostic, dropped once the path is productized.
 +static bool whnat_tx_imm;
 +static unsigned int whnat_tx_msg0 = 0x38;
 +static unsigned int whnat_tx_msg1 = 0x200000;
++static unsigned int whnat_tx_da_hi;
++static unsigned int whnat_tx_da_lo;
 +module_param(whnat_tx_vid, uint, 0644);
 +module_param(whnat_tx_tag, uint, 0644);
 +module_param(whnat_tx_imm, bool, 0644);
 +module_param(whnat_tx_msg0, uint, 0644);
 +module_param(whnat_tx_msg1, uint, 0644);
++module_param(whnat_tx_da_hi, uint, 0644);
++module_param(whnat_tx_da_lo, uint, 0644);
 +
 +static int whnat_tx_fire_set(const char *val, const struct kernel_param *kp)
 +{
@@ -155,7 +196,8 @@ the PPE/NAT datapath; it is a diagnostic, dropped once the path is productized.
 +		return -ENODEV;
 +	return en75_whnat_tx_probe(en75_whnat_probe_qdma, (u16)whnat_tx_vid,
 +				   whnat_tx_tag, whnat_tx_imm,
-+				   whnat_tx_msg0, whnat_tx_msg1);
++				   whnat_tx_msg0, whnat_tx_msg1,
++				   whnat_tx_da_hi, whnat_tx_da_lo);
 +}
 +static const struct kernel_param_ops whnat_tx_fire_ops = {
 +	.set = whnat_tx_fire_set,
@@ -167,7 +209,7 @@ the PPE/NAT datapath; it is a diagnostic, dropped once the path is productized.
  /* === PPE binding first-light test params (357) ===
   * Set the flow (host-order ints + MAC hi/lo), then trigger:
   *   ppe_t_proto/sip/sport/dip/dport/smac_hi/smac_lo/dmac_hi/dmac_lo/dsaport/pt
-@@ -899,6 +939,7 @@
+@@ -899,6 +938,7 @@
  			goto error;
  		}
  	}

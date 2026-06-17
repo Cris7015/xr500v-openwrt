@@ -1,0 +1,60 @@
+Index: econet-eth-2026.02.13~c2f855cf/econet_eth.h
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_eth.h
++++ econet-eth-2026.02.13~c2f855cf/econet_eth.h
+@@ -165,6 +165,13 @@ struct en75_eth {
+ 	struct en75_ppe *ppe;	/* PPE/HNAT offload state (NULL until inited) */
+ };
+ 
++/* patch 356: the PPE hook call-sites (qdma RX bind hook + port TX bind hook)
++ * live outside econet_eth.c, so the attach-time singleton must be visible.
++ * These call-sites existed as loose build_dir edits in builds #42-73 and were
++ * silently LOST on a tree re-extract (the PPE lib still compiled -- nobody
++ * called it; COMMITs=0 with zero errors). Captured as a patch this time. */
++extern struct en75_ppe *en75_the_ppe;
++
+ /* Called in softirq context */
+ int en75_rx_before_recv(struct en75_eth *eth, struct sk_buff *skb,
+ 			enum etx_fport sport);
+Index: econet-eth-2026.02.13~c2f855cf/econet_eth.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_eth.c
++++ econet-eth-2026.02.13~c2f855cf/econet_eth.c
+@@ -332,7 +332,8 @@ static dma_addr_t en75_ppe_foe_phys;
+ #define EN75_PPE_GLO_CFG_ON	(EN75_PPE_GLO_CFG_EN | BIT(2) | BIT(3) | BIT(9))
+ 
+ static void __iomem *en75_ppe_base;	/* set in en75_ppe_init */
+-static struct en75_ppe *en75_the_ppe;	/* binding-phase PPE state */
++struct en75_ppe *en75_the_ppe;	/* binding-phase PPE state (patch 356: non-static,
++				 * the RX/TX hook call-sites live in qdma/port) */
+ 
+ static int en75_ppe_engine_set(bool on)
+ {
+Index: econet-eth-2026.02.13~c2f855cf/econet_qdma.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_qdma.c
++++ econet-eth-2026.02.13~c2f855cf/econet_qdma.c
+@@ -17,6 +17,7 @@
+ #include "qdma_desc.h"
+ #include "qdma_regs.h"
+ #include "econet_eth.h"
++#include "econet_ppe.h"	/* patch 356: RX bind hook */
+ 
+ /* The non-dma part of RX packet descriptor */
+ struct en75_q_rx_ent {
+Index: econet-eth-2026.02.13~c2f855cf/econet_port.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_port.c
++++ econet-eth-2026.02.13~c2f855cf/econet_port.c
+@@ -261,6 +261,11 @@ static netdev_tx_t en75_dev_xmit(struct
+ 	 * No-op (two READ_ONCE flag checks) on the normal forwarding path. */
+ 	en75_ppe_tx_maybe_bind(port->eth->ppe, skb);
+ 
++	/* patch 356 (re-captured TX bind hook, was a loose edit in builds
++	 * #42-73): OEM PpeTxHandler model -- parse the egress frame and
++	 * commit the full bind. Gated cheap inside (ppe_tx_hook + 50ms). */
++	en75_ppe_tx_maybe_bind(en75_the_ppe, skb);
++
+ 	ret = en75_qdma_xmit(port->qdma, skb, &msg, 0);
+ 
+ 	if (ret == -EBUSY) {

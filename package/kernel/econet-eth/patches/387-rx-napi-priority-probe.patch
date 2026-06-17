@@ -1,0 +1,121 @@
+econet-eth: add RX latency probe and RX NAPI scheduling knobs
+
+QDMA RX already uses an internal threaded dummy netdev (qdma*_eth), but the
+thread runs with normal scheduler priority. Add module params to optionally move
+only RX NAPI threads above normal tasks:
+
+  rx_napi_fifo_low=1  -> SCHED_FIFO priority 1
+  rx_napi_nice=N      -> nice adjustment when FIFO is off
+
+The default remains off. This gives us a module-only latency probe before
+touching the built-in EN751221 interrupt controller.
+
+Also expose dbg_rx_lat_last/max, measuring QDMA IRQ handler -> RX NAPI poll.
+irq_time is cleared once consumed so NAPI repolls do not reuse stale IRQ
+timestamps.
+---
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -1,6 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ #include <linux/spinlock.h>
+ #include <linux/netdevice.h>
++#include <linux/sched.h>
++#include <linux/moduleparam.h>
++#include <linux/ktime.h>
+ #include <net/page_pool/helpers.h>
+ #include <linux/skbuff.h>
+ #include <linux/etherdevice.h>
+@@ -40,6 +43,7 @@
+ 	int				buf_size;
+ 	struct napi_struct		napi;
+ 	struct page_pool		*page_pool;
++	ktime_t				irq_time;	/* dbg: RX irq->poll latency */
+ };
+ 
+ /* The non-dma part of TX packet descriptor */
+@@ -50,6 +54,15 @@
+ 	u16				freelist_next;
+ };
+ 
++/* dbg: latency instrumentation (us). Read via module params. */
++int en75_dbg_rx_lat_max, en75_dbg_rx_lat_last;
++static bool en75_rx_napi_fifo_low;
++static int en75_rx_napi_nice;
++module_param_named(dbg_rx_lat_max, en75_dbg_rx_lat_max, int, 0644);
++module_param_named(dbg_rx_lat_last, en75_dbg_rx_lat_last, int, 0444);
++module_param_named(rx_napi_fifo_low, en75_rx_napi_fifo_low, bool, 0644);
++module_param_named(rx_napi_nice, en75_rx_napi_nice, int, 0644);
++
+ struct en75_q_tx {
+ 	/* protect concurrent queue accesses
+ 	 * use _bh unless in napi poll */
+@@ -480,6 +493,15 @@
+ 	struct en75_qdma *qdma = q->qdma;
+ 	int cur, done = 0;
+ 
++	if (q->irq_time) {	/* dbg: RX irq->poll latency (us) */
++		int lat = (int)ktime_us_delta(ktime_get(), q->irq_time);
++
++		q->irq_time = 0;
++		if (lat > en75_dbg_rx_lat_max)
++			en75_dbg_rx_lat_max = lat;
++		en75_dbg_rx_lat_last = lat;
++	}
++
+ 	do {
+ 		cur = en75_qdma_rx_process(q, budget - done);
+ 		done += cur;
+@@ -530,6 +552,7 @@
+ 			});
+ 
+ 			if (p.type == IPS_DONE && p.source == IPSC_RX) {
++				qdma->q_rx[p.chain].irq_time = ktime_get(); /* dbg */
+ 				napi_schedule_irqoff(&qdma->q_rx[p.chain].napi);
+ 				disable_int |= BIT(bit);
+ 				continue;
+@@ -795,6 +818,36 @@
+ 	return ret;
+ }
+ 
++static void en75_qdma_tune_rx_napi_thread(struct en75_q_rx *q)
++{
++	struct task_struct *thread = q->napi.thread;
++	int qid = q - q->qdma->q_rx;
++	int nice = en75_rx_napi_nice;
++
++	if (!thread)
++		return;
++
++	if (en75_rx_napi_fifo_low) {
++		sched_set_fifo_low(thread);
++		dev_info(q->qdma->dev,
++			 "RX NAPI q%d thread %s[%d] set SCHED_FIFO prio 1\n",
++			 qid, thread->comm, thread->pid);
++		return;
++	}
++
++	if (nice < MIN_NICE)
++		nice = MIN_NICE;
++	else if (nice > MAX_NICE)
++		nice = MAX_NICE;
++
++	if (nice) {
++		set_user_nice(thread, nice);
++		dev_info(q->qdma->dev,
++			 "RX NAPI q%d thread %s[%d] set nice %d\n",
++			 qid, thread->comm, thread->pid, nice);
++	}
++}
++
+ /* Init functions, no locks, assumed non-concurrent */
+ 
+ static int en75_init_rx_queue(struct en75_q_rx *q,
+@@ -843,6 +896,7 @@
+ 	memset(q->desc, 0, sizeof(*q->desc));
+ 
+ 	netif_napi_add(qdma->napi_dev, &q->napi, en75_qdma_rx_napi_poll);
++	en75_qdma_tune_rx_napi_thread(q);
+ 
+ 	en75_wreg(dma_addr, &q->qchain_regs->rxbase);
+ 	

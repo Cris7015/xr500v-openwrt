@@ -1,0 +1,377 @@
+econet-eth: add ICMP phase latency probe
+
+dbg_rx_lat only measures the time between the QDMA RX hardirq and the first
+RX NAPI poll. That is useful, but it cannot tell whether a sparse ping spike
+is before the hardirq, inside NAPI, or after the stack sends the echo reply.
+
+Add a low-overhead ICMP echo probe that correlates echo request/reply by
+id/sequence and prints the driver-side phases:
+
+  QDMA RX hardirq -> RX NAPI poll -> request RX delivery -> reply TX post
+
+The probe is controlled by module params:
+
+  icmp_phase_probe=0/1
+  icmp_phase_log_us=N  (-1 disables logging, 0 logs every matched reply)
+
+---
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -4,6 +4,9 @@
+ #include <linux/sched.h>
+ #include <linux/moduleparam.h>
+ #include <linux/ktime.h>
++#include <linux/ip.h>
++#include <linux/icmp.h>
++#include <linux/smp.h>
+ #include <net/page_pool/helpers.h>
+ #include <linux/skbuff.h>
+ #include <linux/etherdevice.h>
+@@ -44,6 +47,14 @@ struct en75_q_rx {
+ 	struct napi_struct		napi;
+ 	struct page_pool		*page_pool;
+ 	ktime_t				irq_time;	/* dbg: RX irq->poll latency */
++	ktime_t				last_irq_time;
++	ktime_t				last_poll_time;
++	u32				last_irq_status;
++	u32				last_irq_mask;
++	u32				last_rx_hwi;
++	u32				last_rx_cpui;
++	int				last_irq_cpu;
++	int				last_poll_cpu;
+ };
+ 
+ /* The non-dma part of TX packet descriptor */
+@@ -63,6 +74,164 @@ module_param_named(dbg_rx_lat_last, en75_dbg_rx_lat_last, int, 0444);
+ module_param_named(rx_napi_fifo_low, en75_rx_napi_fifo_low, bool, 0644);
+ module_param_named(rx_napi_nice, en75_rx_napi_nice, int, 0644);
+ 
++#define EN75_ICMP_PHASE_SLOTS	64
++#define EN75_ICMP_IP_MF		0x2000
++#define EN75_ICMP_IP_OFFSET	0x1fff
++#define EN75_ICMP_VLAN_HLEN	4
++
++struct en75_icmp_phase_sample {
++	bool				used;
++	u16				id;
++	u16				seq;
++	u16				rx_desc;
++	u16				tx_desc;
++	u8				qrx;
++	u8				qtx;
++	u8				sport;
++	int				irq_cpu;
++	int				poll_cpu;
++	int				rx_cpu;
++	int				tx_cpu;
++	u32				irq_status;
++	u32				irq_mask;
++	u32				rx_hwi;
++	u32				rx_cpui;
++	ktime_t				irq_time;
++	ktime_t				poll_time;
++	ktime_t				rx_time;
++	ktime_t				tx_time;
++};
++
++static struct en75_icmp_phase_sample en75_icmp_phase[EN75_ICMP_PHASE_SLOTS];
++static DEFINE_SPINLOCK(en75_icmp_phase_lock);
++static unsigned int en75_icmp_phase_next;
++static bool en75_icmp_phase_probe = true;
++static int en75_icmp_phase_log_us = 1000;
++int en75_icmp_phase_rx_seen, en75_icmp_phase_tx_seen;
++int en75_icmp_phase_tx_match, en75_icmp_phase_tx_miss;
++module_param_named(icmp_phase_probe, en75_icmp_phase_probe, bool, 0644);
++module_param_named(icmp_phase_log_us, en75_icmp_phase_log_us, int, 0644);
++module_param_named(icmp_phase_rx_seen, en75_icmp_phase_rx_seen, int, 0444);
++module_param_named(icmp_phase_tx_seen, en75_icmp_phase_tx_seen, int, 0444);
++module_param_named(icmp_phase_tx_match, en75_icmp_phase_tx_match, int, 0444);
++module_param_named(icmp_phase_tx_miss, en75_icmp_phase_tx_miss, int, 0444);
++
++static bool en75_icmp_phase_parse_ip(const u8 *data, unsigned int len,
++				     u8 *type, u16 *id, u16 *seq)
++{
++	unsigned int ihl;
++	u16 frag;
++
++	if (len < 20)
++		return false;
++
++	if ((data[0] >> 4) != 4)
++		return false;
++
++	ihl = (data[0] & 0x0f) * 4;
++	if (ihl < 20 || len < ihl + 8)
++		return false;
++
++	if (data[9] != IPPROTO_ICMP)
++		return false;
++
++	frag = get_unaligned_be16(data + 6);
++	if (frag & (EN75_ICMP_IP_MF | EN75_ICMP_IP_OFFSET))
++		return false;
++
++	if (data[ihl] != ICMP_ECHO && data[ihl] != ICMP_ECHOREPLY)
++		return false;
++
++	*type = data[ihl];
++	*id = get_unaligned_be16(data + ihl + 4);
++	*seq = get_unaligned_be16(data + ihl + 6);
++
++	return true;
++}
++
++static bool en75_icmp_phase_parse_l2(const u8 *data, unsigned int len,
++				     unsigned int proto_off,
++				     u8 *type, u16 *id, u16 *seq)
++{
++	unsigned int off = proto_off + 2;
++	u16 proto;
++
++	if (len < proto_off + 2)
++		return false;
++
++	proto = get_unaligned_be16(data + proto_off);
++	while ((proto == ETH_P_8021Q || proto == ETH_P_8021AD ||
++		proto == 0x5678) &&
++	       len >= off + EN75_ICMP_VLAN_HLEN) {
++		proto = get_unaligned_be16(data + off + 2);
++		off += EN75_ICMP_VLAN_HLEN;
++	}
++
++	return proto == ETH_P_IP &&
++	       en75_icmp_phase_parse_ip(data + off, len - off,
++					type, id, seq);
++}
++
++static bool en75_icmp_phase_parse_skb(const struct sk_buff *skb,
++				      u8 *type, u16 *id, u16 *seq)
++{
++	const u8 *data = skb->data;
++	unsigned int len = skb_headlen(skb);
++
++	if (en75_icmp_phase_parse_l2(data, len, 12, type, id, seq))
++		return true;
++
++	if (en75_icmp_phase_parse_l2(data, len, 16, type, id, seq))
++		return true;
++
++	if (skb->protocol == htons(ETH_P_IP) &&
++	    en75_icmp_phase_parse_ip(data, len, type, id, seq))
++		return true;
++
++	return false;
++}
++
++static void en75_icmp_phase_rx(struct en75_q_rx *q, struct sk_buff *skb,
++			       u32 desc_i, u8 sport, u8 qid)
++{
++	struct en75_icmp_phase_sample *s;
++	unsigned long flags;
++	u16 id, seq;
++	u8 type;
++
++	if (!READ_ONCE(en75_icmp_phase_probe))
++		return;
++
++	if (!en75_icmp_phase_parse_skb(skb, &type, &id, &seq) ||
++	    type != ICMP_ECHO)
++		return;
++
++	en75_icmp_phase_rx_seen++;
++
++	spin_lock_irqsave(&en75_icmp_phase_lock, flags);
++	s = &en75_icmp_phase[en75_icmp_phase_next++ &
++			     (EN75_ICMP_PHASE_SLOTS - 1)];
++	*s = (struct en75_icmp_phase_sample) {
++		.used = true,
++		.id = id,
++		.seq = seq,
++		.rx_desc = desc_i,
++		.qrx = qid,
++		.sport = sport,
++		.irq_cpu = q->last_irq_cpu,
++		.poll_cpu = q->last_poll_cpu,
++		.rx_cpu = raw_smp_processor_id(),
++		.irq_status = q->last_irq_status,
++		.irq_mask = q->last_irq_mask,
++		.rx_hwi = q->last_rx_hwi,
++		.rx_cpui = q->last_rx_cpui,
++		.irq_time = q->last_irq_time,
++		.poll_time = q->last_poll_time,
++		.rx_time = ktime_get(),
++	};
++	spin_unlock_irqrestore(&en75_icmp_phase_lock, flags);
++}
++
+ struct en75_q_tx {
+ 	/* protect concurrent queue accesses
+ 	 * use _bh unless in napi poll */
+@@ -338,10 +482,13 @@ static void en75_qdma_rx_process_one(struct en75_q_rx *q, u32 cpu_i,
+ 	}
+ 
+ 	sport = get_erx_sport(&desc.msg.erx);
++	en75_icmp_phase_rx(q, skb, cpu_i, sport,
++			   q - &q->qdma->q_rx[0]);
+-	if (en75_rx_before_recv(q->qdma->eth, skb, sport))
++	if (en75_rx_before_recv(q->qdma->eth, skb, sport)) {
+ 		dev_kfree_skb(skb);
+-	else
++	} else {
+ 		napi_gro_receive(&q->napi, skb);
++	}
+ 
+ 	return;
+ 
+@@ -497,9 +643,13 @@ static int en75_qdma_rx_napi_poll(struct napi_struct *napi, int budget)
+ 	struct en75_q_rx *q = container_of(napi, struct en75_q_rx, napi);
+ 	struct en75_qdma *qdma = q->qdma;
+ 	int cur, done = 0;
++	ktime_t poll_time = ktime_get();
++
++	q->last_poll_time = poll_time;
++	q->last_poll_cpu = raw_smp_processor_id();
+ 
+ 	if (q->irq_time) {	/* dbg: RX irq->poll latency (us) */
+-		int lat = (int)ktime_us_delta(ktime_get(), q->irq_time);
++		int lat = (int)ktime_us_delta(poll_time, q->irq_time);
+ 
+ 		q->irq_time = 0;
+ 		if (lat > en75_dbg_rx_lat_max)
+@@ -533,9 +683,11 @@ static irqreturn_t en75_irq_handler(int irq_num, void *dev_instance)
+ 	for (i = 0; i < ARRAY_SIZE(irq->irqmask); i++) {
+ 		unsigned long regval;
+ 		u32 disable_int = 0;
++		u32 raw_status;
+ 		u8 bit;
+ 
+ 		regval = en75_rreg(irq->status_reg[i]);
++		raw_status = (u32)regval;
+ 
+ 		/* Status is write-1-to-clear: ack ALL pending causes first,
+ 		 * then mask to the enabled ones below. Some causes the driver
+@@ -546,7 +698,7 @@ static irqreturn_t en75_irq_handler(int irq_num, void *dev_instance)
+ 		 * never clears them, so the shared IRQ line stays asserted and
+ 		 * storms (~31k spurious irq21/s on the RX CPU), starving it
+ 		 * and adding multi-ms forwarding/ping jitter. */
+-		en75_wreg((u32)regval, irq->status_reg[i]);
++		en75_wreg(raw_status, irq->status_reg[i]);
+ 		regval &= irq->irqmask[i];
+ 
+ 		for_each_set_bit(bit, &regval, 32) {
+@@ -561,7 +713,16 @@ static irqreturn_t en75_irq_handler(int irq_num, void *dev_instance)
+ 			});
+ 
+ 			if (p.type == IPS_DONE && p.source == IPSC_RX) {
+-				qdma->q_rx[p.chain].irq_time = ktime_get(); /* dbg */
++				struct en75_q_rx *rxq = &qdma->q_rx[p.chain];
++				ktime_t irq_time = ktime_get();
++
++				rxq->irq_time = irq_time; /* dbg */
++				rxq->last_irq_time = irq_time;
++				rxq->last_irq_status = raw_status;
++				rxq->last_irq_mask = irq->irqmask[i];
++				rxq->last_rx_hwi = en75_rreg(&rxq->qchain_regs->rx_hwi);
++				rxq->last_rx_cpui = rxq->cpu_i;
++				rxq->last_irq_cpu = raw_smp_processor_id();
+ 				napi_schedule_irqoff(&qdma->q_rx[p.chain].napi);
+ 				disable_int |= BIT(bit);
+ 				continue;
+@@ -692,6 +854,89 @@ static int en75_poll_tx_complete(struct napi_struct *napi, int budget)
+ 	return done;
+ }
+ 
++static void en75_icmp_phase_tx(struct sk_buff *skb, int qid, u16 desc_i)
++{
++	struct en75_icmp_phase_sample found = { 0 };
++	bool matched = false;
++	unsigned long flags;
++	ktime_t tx_time;
++	u16 id, seq;
++	u8 type;
++	int i;
++
++	if (!READ_ONCE(en75_icmp_phase_probe))
++		return;
++
++	if (!en75_icmp_phase_parse_skb(skb, &type, &id, &seq) ||
++	    type != ICMP_ECHOREPLY)
++		return;
++
++	en75_icmp_phase_tx_seen++;
++	tx_time = ktime_get();
++
++	spin_lock_irqsave(&en75_icmp_phase_lock, flags);
++	for (i = 0; i < EN75_ICMP_PHASE_SLOTS; i++) {
++		struct en75_icmp_phase_sample *s;
++		unsigned int slot;
++
++		slot = (en75_icmp_phase_next - 1 - i) &
++		       (EN75_ICMP_PHASE_SLOTS - 1);
++		s = &en75_icmp_phase[slot];
++
++		if (!s->used || s->id != id || s->seq != seq)
++			continue;
++
++		s->used = false;
++		s->tx_time = tx_time;
++		s->tx_cpu = raw_smp_processor_id();
++		s->qtx = qid;
++		s->tx_desc = desc_i;
++		found = *s;
++		matched = true;
++		break;
++	}
++	spin_unlock_irqrestore(&en75_icmp_phase_lock, flags);
++
++	if (matched) {
++		int irq_poll_us = -1;
++		int poll_rx_us = -1;
++		int rx_tx_us = -1;
++		int irq_tx_us = -1;
++		int log_us;
++
++		en75_icmp_phase_tx_match++;
++
++		if (found.irq_time && found.poll_time)
++			irq_poll_us = (int)ktime_us_delta(found.poll_time,
++							  found.irq_time);
++		if (found.poll_time && found.rx_time)
++			poll_rx_us = (int)ktime_us_delta(found.rx_time,
++							 found.poll_time);
++		if (found.rx_time && found.tx_time)
++			rx_tx_us = (int)ktime_us_delta(found.tx_time,
++						       found.rx_time);
++		if (found.irq_time && found.tx_time)
++			irq_tx_us = (int)ktime_us_delta(found.tx_time,
++							found.irq_time);
++
++		log_us = READ_ONCE(en75_icmp_phase_log_us);
++		if (log_us >= 0 &&
++		    (log_us == 0 ||
++		     irq_poll_us >= log_us || poll_rx_us >= log_us ||
++		     rx_tx_us >= log_us || irq_tx_us >= log_us))
++			pr_info("XR500v ICMPPHASE id=%u seq=%u qrx=%u qtx=%u sport=%u desc=%u/%u cpu=%d/%d/%d/%d us=%d/%d/%d/%d hwi=%u cpui=%u irq_status=%08x irq_mask=%08x\n",
++				found.id, found.seq, found.qrx, found.qtx,
++				found.sport, found.rx_desc, found.tx_desc,
++				found.irq_cpu, found.poll_cpu, found.rx_cpu,
++				found.tx_cpu, irq_poll_us, poll_rx_us,
++				rx_tx_us, irq_tx_us, found.rx_hwi,
++				found.rx_cpui, found.irq_status,
++				found.irq_mask);
++	} else {
++		en75_icmp_phase_tx_miss++;
++	}
++}
++
+ int en75_qdma_xmit(struct en75_qdma *qdma, struct sk_buff *skb,
+ 		   union desc_msg *msg, int qid)
+ {
+@@ -733,6 +979,7 @@ int en75_qdma_xmit(struct en75_qdma *qdma, struct sk_buff *skb,
+ 
+ 	skb_tx_timestamp(skb);
+ 
++	en75_icmp_phase_tx(skb, qid, index);
+ 	en75_wreg((u32)next_index, &q->qchain_regs->tx_cpui);
+ 
+ 	if (q->debug_tx_cnt) {

@@ -1,0 +1,38 @@
+qdma: ack all pending IRQ causes, not just the enabled ones
+
+en75_irq_handler masked the int_status read to the driver's enabled bits
+*before* writing it back to the (write-1-to-clear) status register. Causes the
+driver leaves disabled but that the hardware still latches are therefore never
+acked. On the EN751221 the TX "no descriptor" cause (bit 2) is asserted
+whenever a TX ring sits idle and is not in the enabled mask, so it is never
+cleared: the shared QDMA IRQ line stays high and storms ~31k spurious irq21/s
+on the CPU that services RX. That steals the RX CPU continuously and adds
+multi-millisecond, jittery latency to every forwarded/terminated packet (ping
+to the device: min 0.6 ms but avg 5-6 ms / max 10-27 ms).
+
+Fix: ack the full pending status first (it is write-1-to-clear), then mask to
+the enabled bits for processing. Idle irq21 drops from ~31k/s to the real
+packet rate.
+
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -532,11 +532,16 @@ static irqreturn_t en75_irq_handler(int irq_num, void *dev_instance)
+ 		u32 disable_int = 0;
+ 		u8 bit;
+
+ 		regval = en75_rreg(irq->status_reg[i]);
+-		regval &= irq->irqmask[i];
+
+-		/* You must write the bits back to the status register
+-		 * or you will keep receiving the same interrupt. */
++		/* Status is write-1-to-clear: ack ALL pending causes first,
++		 * then mask to the enabled ones below. Some causes the driver
++		 * leaves disabled stay latched in hardware (notably TX NO_DSCP
++		 * while a TX ring is idle); writing back only the enabled bits
++		 * never clears them, so the shared IRQ line stays asserted and
++		 * storms (~31k spurious irq21/s on the RX CPU), starving it
++		 * and adding multi-ms forwarding/ping jitter. */
+ 		en75_wreg((u32)regval, irq->status_reg[i]);
++		regval &= irq->irqmask[i];
+
+ 		for_each_set_bit(bit, &regval, 32) {

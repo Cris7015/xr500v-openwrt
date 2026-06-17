@@ -1,0 +1,73 @@
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.h
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.h
+@@ -213,6 +213,7 @@ struct en75_ppe {
+ extern bool en75_ppe_offload_enabled;
+ /* diagnostic: when true, the RX path logs crsn/ppe_entry/sport (rate-limited) */
+ extern bool en75_ppe_rxdump;
++extern bool en75_ppe_fpdump;	/* build #75: capture first sport>=8 bounce */
+ /* build #41: one-shot atomic dump (DRAM[slot] + 16 CAH lines data-words) from the RX
+  * hook, to catch our flow IN the cache at the crsn=15 instant (no userspace race) */
+ extern bool en75_ppe_atomic;
+Index: econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_ppe.c
++++ econet-eth-2026.02.13~c2f855cf/econet_ppe.c
+@@ -486,6 +486,7 @@ u32 en75_ppe_test_commit(struct en75_ppe
+ 
+ bool en75_ppe_offload_enabled;	/* RX hook is inert until a test/offload arms it */
+ bool en75_ppe_rxdump;		/* diagnostic: dump crsn/ppe_entry on RX */
++bool en75_ppe_fpdump;		/* build #75: one-shot dump of first sport>=8 bounced frame */
+ bool en75_ppe_atomic;		/* build #41: one-shot atomic cache+DRAM dump from RX hook */
+ bool en75_ppe_foedump;		/* diagnostic: dump the engine-built FoE entry */
+ u32  en75_force_hash = 0xffffffff;  /* committest: if != ~0, commit at this slot (engine hash) */
+Index: econet-eth-2026.02.13~c2f855cf/econet_eth.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_eth.c
++++ econet-eth-2026.02.13~c2f855cf/econet_eth.c
+@@ -419,6 +419,7 @@ module_param(ppe_t_pt, uint, 0644);
+ static unsigned int ppe_t_pseport = 1;	/* 1=GDM1, 7=DISCARD (divert oracle) */
+ module_param(ppe_t_pseport, uint, 0644);
+ module_param_named(ppe_rxdump, en75_ppe_rxdump, bool, 0644);
++module_param_named(ppe_fpdump, en75_ppe_fpdump, bool, 0644);
+ module_param_named(ppe_foedump, en75_ppe_foedump, bool, 0644);
+ module_param_named(ppe_atomic, en75_ppe_atomic, bool, 0644);
+ module_param_named(ppe_t_hash, en75_force_hash, uint, 0644);
+Index: econet-eth-2026.02.13~c2f855cf/econet_qdma.c
+===================================================================
+--- econet-eth-2026.02.13~c2f855cf.orig/econet_qdma.c
++++ econet-eth-2026.02.13~c2f855cf/econet_qdma.c
+@@ -196,13 +196,31 @@ static void en75_qdma_rx_process_one(str
+ 	 * HIT_UNBIND_RATE_REACHED(0x0f) -- accept both). 'hash' is the RAW engine
+ 	 * FoE slot. en75_ppe_check_skb() takes ppe->lock; never eats the skb. */
+ 	if (READ_ONCE(en75_ppe_rxdump) || READ_ONCE(en75_ppe_offload_enabled) ||
+-	    READ_ONCE(en75_ppe_foedump)) {
++	    READ_ONCE(en75_ppe_foedump) || READ_ONCE(en75_ppe_fpdump)) {
+ 		u8 crsn = get_erx_crsn(&desc.msg.erx);
+ 
+ 		if (READ_ONCE(en75_ppe_foedump) && q->qdma->eth->ppe &&
+ 		    (crsn == MTK_PPE_CPU_REASON_HIT_UNBIND ||
+ 		     crsn == MTK_PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED))
+ 			en75_ppe_dump_slot(q->qdma->eth->ppe, hash);
++		/* build #75 (patch 357, re-anchored on the 355 block): one-shot
++		 * capture of the FIRST bounced frame (sport>=8 = the engine
++		 * returned a HW-forwarded frame to CPU instead of egressing).
++		 * Dumps the descriptor msg words + the L2/L3 head to tell
++		 * whether the engine already did the NAT+PPPoE rewrite (=> only
++		 * egress steering wrong) or bounced it raw. Auto-clears. */
++		if (READ_ONCE(en75_ppe_fpdump) &&
++		    get_erx_sport(&desc.msg.erx) >= 8) {
++			WRITE_ONCE(en75_ppe_fpdump, false);
++			pr_info("XR500v FPDUMP: sport=%u crsn=%u ppe_entry=%u len=%u\n",
++				get_erx_sport(&desc.msg.erx), crsn, hash, len);
++			pr_info("XR500v FPDUMP descmsg: %08x %08x %08x %08x\n",
++				desc.msg.raw[0], desc.msg.raw[1],
++				desc.msg.raw[2], desc.msg.raw[3]);
++			print_hex_dump(KERN_INFO, "XR500v FPDUMP frame: ",
++				DUMP_PREFIX_OFFSET, 16, 1, skb->data,
++				min_t(unsigned int, len, 80u), true);
++		}
+ 		if (READ_ONCE(en75_ppe_rxdump)) {
+ 			u16 et12 = len >= 14 ? get_unaligned_be16(skb->data + 12) : 0;
+ 			u16 et16 = len >= 18 ? get_unaligned_be16(skb->data + 16) : 0;

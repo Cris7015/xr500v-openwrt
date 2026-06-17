@@ -1,0 +1,97 @@
+econet-eth: reserve RX headroom so WHNAT re-inject is zero-copy
+
+A re-injected WiFi force-to-CPU skb reached mac80211 with only ~4 bytes
+headroom, forcing pskb_expand_head (a full ~1500-byte realloc+copy of every
+forwarded frame, also defeating page_pool recycling); reserving 64 bytes of RX
+headroom makes the re-inject zero-copy. Measured: UDP WiFi forwarding
+271->514 Mbit/s, CPU/byte ~halved.
+
+The DMA buffer is offset by EN75_RX_HEADROOM (dma_addr += 64, dma_len -= 64,
+matching dma_sync + the length bound) and the skb reserves the same 64 bytes
+before __skb_put(). A dbg_wifi_hr_min module param tracks the minimum headroom
+seen on a re-injected frame (read ~4 before the fix, 68 after).
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -76,10 +76,16 @@
+ 
+ /* dbg: latency instrumentation (us). Read via module params. */
+ int en75_dbg_rx_lat_max, en75_dbg_rx_lat_last;
++/* WHNAT zero-copy diag: min headroom seen on a re-injected WiFi force-to-CPU
++ * skb. Before the RX-headroom fix this reads ~4 (mac80211 then reallocs+copies
++ * the whole frame every time); after the fix it should read EN75_RX_HEADROOM+4.
++ * Reset by writing a big value (e.g. echo 9999 > .../dbg_wifi_hr_min). */
++int en75_dbg_wifi_hr_min = 9999;
+ static bool en75_rx_napi_fifo_low;
+ static int en75_rx_napi_nice;
+ module_param_named(dbg_rx_lat_max, en75_dbg_rx_lat_max, int, 0644);
+ module_param_named(dbg_rx_lat_last, en75_dbg_rx_lat_last, int, 0444);
++module_param_named(dbg_wifi_hr_min, en75_dbg_wifi_hr_min, int, 0644);
+ module_param_named(rx_napi_fifo_low, en75_rx_napi_fifo_low, bool, 0644);
+ module_param_named(rx_napi_nice, en75_rx_napi_nice, int, 0644);
+ 
+@@ -413,6 +419,13 @@
+ 	struct en75_qdma_cfg 		cfg;
+ };
+ 
++/* WHNAT zero-copy: reserve headroom in every RX buffer so a force-to-CPU frame
++ * re-injected into mac80211 (which needs ~24 B to push the 802.11 header) does
++ * NOT trigger pskb_expand_head -- a full ~1500 B realloc+copy per forwarded
++ * frame that also defeats page_pool recycling. 64 is cache-aligned and leaves
++ * >1600 B usable in the 2048 B buffer (MTU 1500 + tags fits comfortably). */
++#define EN75_RX_HEADROOM	64
++
+ static void en75_fill_rx_queue(struct en75_q_rx *q, u32 end_i)
+ {
+ 	u32 ndesc = q->ndesc;
+@@ -433,8 +446,9 @@
+ 
+ 		WARN_ON_ONCE(e->dma_addr);
+ 		e->buf = page_address(page) + offset;
+-		e->dma_addr = page_pool_get_dma_addr(page) + offset;
+-		e->dma_len = SKB_WITH_OVERHEAD(q->buf_size);
++		e->dma_addr = page_pool_get_dma_addr(page) + offset +
++			      EN75_RX_HEADROOM;
++		e->dma_len = SKB_WITH_OVERHEAD(q->buf_size) - EN75_RX_HEADROOM;
+ 
+ 		WRITE_ONCE(pdesc->info, (struct desc_info) { .pkt_len = e->dma_len });
+ 		WRITE_ONCE(pdesc->pkt_addr, e->dma_addr);
+@@ -550,7 +564,8 @@
+ 	memcpy(&desc, &q->desc[cpu_i], sizeof(desc));
+ 
+ 	dma_sync_single_for_cpu(q->qdma->dev, e->dma_addr,
+-				SKB_WITH_OVERHEAD(q->buf_size), dir);
++				SKB_WITH_OVERHEAD(q->buf_size) - EN75_RX_HEADROOM,
++				dir);
+ 	
+ 	/* Not needed but a couple of WARN_ON_ONCE() check this later */
+ 	e->dma_addr = 0;
+@@ -559,7 +574,7 @@
+ 	WRITE_ONCE(q->desc[cpu_i].pkt_addr, 0);
+ 
+ 	len = desc.info.pkt_len;
+-	if (!len || len > SKB_WITH_OVERHEAD(q->buf_size))
++	if (!len || len > SKB_WITH_OVERHEAD(q->buf_size) - EN75_RX_HEADROOM)
+ 		goto return_page;
+ 
+ 	if (WARN_ON_ONCE(is_desc_info_nls(&desc.info)))
+@@ -569,6 +584,7 @@
+ 	if (!skb)
+ 		goto return_page;
+ 
++	skb_reserve(skb, EN75_RX_HEADROOM);
+ 	__skb_put(skb, len);
+ 	skb_mark_for_recycle(skb);
+ 	skb->ip_summed = CHECKSUM_UNNECESSARY;
+@@ -693,6 +709,12 @@
+ 				skb_pull(skb, 4);
+ 			}
+ 			skb->dev = wdev ? wdev : fcpu_out;
++			if (wdev) {	/* WHNAT zero-copy diag: track min headroom */
++				int hr = skb_headroom(skb);
++
++				if (hr < en75_dbg_wifi_hr_min)
++					en75_dbg_wifi_hr_min = hr;
++			}
+ 			en75_ppe_fcpu_xmit_cnt++;
+ 			if (READ_ONCE(en75_ppe_rxdump))
+ 				pr_info_ratelimited("XR500v FCPU-XMIT: len=%u -> %s (wifi=%d)\n",

@@ -1,0 +1,146 @@
+econet-eth: cache the per-poll WHNAT vif lookup
+
+Cache the per-poll WHNAT vif lookup so en75_whnat_vif_by_idx()'s
+irqsave-spinlock + dev_hold() runs once per distinct vif per NAPI poll instead
+of per frame; one hold per distinct vif, released after the batch flush.
+
+Consecutive force-to-CPU frames in a poll almost always target the same BSS
+(one offloaded flow -> one vif), so a tiny per-poll cache (tci idx -> held dev)
+collapses the repeated locked lookups. Only non-NULL hits are cached, bounded
+by the real vif count, so garbage tags can't overflow it. The batch then queues
+with put_dev=false (the cache owns the refs) and en75_wifi_vif_cache_release()
+drops them once, after the flush.
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -66,6 +66,18 @@
+ 	bool				put_dev;
+ };
+ 
++/* WHNAT per-poll vif lookup cache: en75_whnat_vif_by_idx() takes an irq-save
++ * spinlock + dev_hold() per call. Consecutive force-to-CPU frames in one NAPI
++ * poll almost always target the same vif (one offloaded flow -> one BSS), so
++ * we cache (tci idx -> held dev) for the poll: ONE lock+hold per distinct vif,
++ * released once at poll end. Only non-NULL hits are cached (bounded by the
++ * number of real vifs), so a stream of garbage tags can't overflow it. */
++struct en75_wifi_vif_cache {
++	struct net_device		*dev[EN75_FCPU_BATCH_MAX];
++	u16				idx[EN75_FCPU_BATCH_MAX];
++	int				n;
++};
++
+ /* The non-dma part of TX packet descriptor */
+ struct en75_q_tx_ent {
+ 	struct sk_buff			*skb;
+@@ -548,10 +560,49 @@
+ 	__skb_queue_tail(&batch[free].queue, skb);
+ }
+ 
++/* Look up the WiFi vif for a force-to-CPU tag, reusing a per-poll held ref.
++ * On a miss, take the real (locked) ref once and cache it; only non-NULL
++ * results are cached so garbage tags re-look-up (rare) instead of overflowing.
++ * The returned ref is owned by the cache and freed by _cache_release(). */
++static struct net_device *en75_wifi_vif_cached(struct en75_wifi_vif_cache *c,
++					       u16 idx)
++{
++	struct net_device *dev;
++	int i;
++
++	for (i = 0; i < c->n; i++)
++		if (c->idx[i] == idx)
++			return c->dev[i];	/* cached held ref */
++
++	dev = en75_whnat_vif_by_idx(idx);	/* locked lookup: held or NULL */
++	if (dev && c->n < EN75_FCPU_BATCH_MAX) {
++		c->idx[c->n] = idx;
++		c->dev[c->n] = dev;
++		c->n++;
++	} else if (dev) {
++		/* cache full needs > EN75_WHNAT_MAX_VIFS distinct real vifs in
++		 * one poll, which can't happen. Drop the ref, don't leak. */
++		WARN_ON_ONCE(1);
++		dev_put(dev);
++		dev = NULL;
++	}
++	return dev;
++}
++
++static void en75_wifi_vif_cache_release(struct en75_wifi_vif_cache *c)
++{
++	int i;
++
++	for (i = 0; i < c->n; i++)
++		dev_put(c->dev[i]);	/* only non-NULL refs were cached */
++	c->n = 0;
++}
++
+ static void en75_qdma_rx_process_one(struct en75_q_rx *q, u32 cpu_i,
+ 				     enum dma_data_direction dir,
+ 				     struct net_device *fcpu_out,
+-				     struct en75_fcpu_batch *fcpu_batch)
++				     struct en75_fcpu_batch *fcpu_batch,
++				     struct en75_wifi_vif_cache *vif_cache)
+ {
+ 	struct en75_q_rx_ent *e = &q->entry[cpu_i];
+ 	struct sk_buff *skb;
+@@ -699,8 +750,8 @@
+ 
+ 		atomic64_inc(&en75_rxstat_fcpu_frames);
+ 
+-		if (tagged)	/* WiFi vif by TCI? (returns a held ref or NULL) */
+-			wdev = en75_whnat_vif_by_idx(
++		if (tagged)	/* WiFi vif by TCI? (per-poll cached held ref) */
++			wdev = en75_wifi_vif_cached(vif_cache,
+ 				get_unaligned_be16(skb->data + 14) & 0xfff);
+ 
+ 		if (wdev || fcpu_out) {
+@@ -722,7 +773,7 @@
+ 			if (atomic_cmpxchg(&en75_rxstat_xmit_dev_logged, 0, 1) == 0)
+ 				pr_info("XR500v FCPU-XMIT dev=%s wifi=%d len=%u\n",
+ 					skb->dev->name, !!wdev, skb->len);
+-			en75_fcpu_batch_queue(fcpu_batch, skb, !!wdev);
++			en75_fcpu_batch_queue(fcpu_batch, skb, false);
+ 			return;
+ 		}
+ 	}
+@@ -745,7 +796,8 @@
+ 
+ static int en75_qdma_rx_process(struct en75_q_rx *q, int budget,
+ 				struct net_device *fcpu_out,
+-				struct en75_fcpu_batch *fcpu_batch)
++				struct en75_fcpu_batch *fcpu_batch,
++				struct en75_wifi_vif_cache *vif_cache)
+ {
+ 	enum dma_data_direction dir = page_pool_get_dma_dir(q->page_pool);
+ 	u32 hardware_i = en75_rreg(&q->qchain_regs->rx_hwi);
+@@ -759,7 +811,8 @@
+ 	cpu_i = (q->cpu_i + 1) % ndesc;
+ 
+ 	for (done = 0; done < budget && cpu_i != hardware_i; done++) {
+-		en75_qdma_rx_process_one(q, cpu_i, dir, fcpu_out, fcpu_batch);
++		en75_qdma_rx_process_one(q, cpu_i, dir, fcpu_out, fcpu_batch,
++					 vif_cache);
+ 		cpu_i = (cpu_i + 1) % ndesc;
+ 	}
+ 
+@@ -885,6 +938,7 @@
+ 	struct en75_q_rx *q = container_of(napi, struct en75_q_rx, napi);
+ 	struct en75_qdma *qdma = q->qdma;
+ 	struct en75_fcpu_batch fcpu_batch[EN75_FCPU_BATCH_MAX];
++	struct en75_wifi_vif_cache vif_cache = { .n = 0 };
+ 	struct net_device *fcpu_out = NULL;
+ 	int cur, done = 0;
+ 	ktime_t poll_time = ktime_get();
+@@ -909,11 +963,12 @@
+ 
+ 	do {
+ 		cur = en75_qdma_rx_process(q, budget - done, fcpu_out,
+-					   fcpu_batch);
++					   fcpu_batch, &vif_cache);
+ 		done += cur;
+ 	} while (cur && done < budget);
+ 
+ 	en75_fcpu_batch_flush(fcpu_batch);
++	en75_wifi_vif_cache_release(&vif_cache);
+ 
+ 	if (fcpu_out)
+ 		dev_put(fcpu_out);

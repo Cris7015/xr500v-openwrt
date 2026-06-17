@@ -1,0 +1,364 @@
+econet-eth: WHNAT force-to-CPU re-inject batching + rx-poll histogram
+
+The WHNAT half-offload (F3) re-injects each force-to-CPU frame into the stack
+with its own dev_queue_xmit(). Under load that is one xmit (and one dev_put)
+per frame, all to the same handful of vifs. Batch them: chain the per-poll
+force-to-CPU skbs by destination netdev (en75_fcpu_batch[], one slot per vif +
+one) and issue a single dev_queue_xmit() per distinct dev at the end of the
+NAPI poll -- for IFF_NO_QUEUE / non-tap devs the chain is handed off as one
+list, dropping the per-frame queue-lock churn. en75_qdma_rx_process_one() now
+takes the batch and just queues; the napi poll inits, then flushes it.
+
+Also adds debug-only rx-poll instrumentation alongside the batch:
+atomic64 counters for poll count, total/force-to-CPU frames and a power-of-two
+histogram of frames-per-poll (rx_poll_hist_*), exposed via module_param_cb
+read-only sysfs, with a rx_stats_reset write knob. Pure diagnostics; no
+datapath effect beyond the counters.
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -7,6 +7,7 @@
+ #include <linux/ip.h>
+ #include <linux/icmp.h>
+ #include <linux/smp.h>
++#include <linux/atomic.h>
+ #include <net/page_pool/helpers.h>
+ #include <linux/skbuff.h>
+ #include <linux/etherdevice.h>
+@@ -57,6 +58,14 @@
+ 	int				last_poll_cpu;
+ };
+ 
++#define EN75_FCPU_BATCH_MAX	(EN75_WHNAT_MAX_VIFS + 1)
++
++struct en75_fcpu_batch {
++	struct sk_buff_head		queue;
++	struct net_device		*dev;
++	bool				put_dev;
++};
++
+ /* The non-dma part of TX packet descriptor */
+ struct en75_q_tx_ent {
+ 	struct sk_buff			*skb;
+@@ -74,6 +83,112 @@
+ module_param_named(rx_napi_fifo_low, en75_rx_napi_fifo_low, bool, 0644);
+ module_param_named(rx_napi_nice, en75_rx_napi_nice, int, 0644);
+ 
++static atomic64_t en75_rxstat_poll_count = ATOMIC64_INIT(0);
++static atomic64_t en75_rxstat_total_frames = ATOMIC64_INIT(0);
++static atomic64_t en75_rxstat_fcpu_frames = ATOMIC64_INIT(0);
++static atomic64_t en75_rxstat_hist_1 = ATOMIC64_INIT(0);
++static atomic64_t en75_rxstat_hist_2 = ATOMIC64_INIT(0);
++static atomic64_t en75_rxstat_hist_4 = ATOMIC64_INIT(0);
++static atomic64_t en75_rxstat_hist_8 = ATOMIC64_INIT(0);
++static atomic64_t en75_rxstat_hist_16 = ATOMIC64_INIT(0);
++static atomic64_t en75_rxstat_hist_32 = ATOMIC64_INIT(0);
++static atomic64_t en75_rxstat_hist_64p = ATOMIC64_INIT(0);
++static atomic_t en75_rxstat_xmit_dev_logged = ATOMIC_INIT(0);
++static int en75_rxstat_reset;
++
++static int en75_rxstat_u64_get(char *buffer, const struct kernel_param *kp)
++{
++	return scnprintf(buffer, PAGE_SIZE, "%lld\n",
++			 (s64)atomic64_read((atomic64_t *)kp->arg));
++}
++
++static const struct kernel_param_ops en75_rxstat_u64_ops = {
++	.get = en75_rxstat_u64_get,
++};
++
++static void en75_rxstat_reset_all(void)
++{
++	atomic64_set(&en75_rxstat_poll_count, 0);
++	atomic64_set(&en75_rxstat_total_frames, 0);
++	atomic64_set(&en75_rxstat_fcpu_frames, 0);
++	atomic64_set(&en75_rxstat_hist_1, 0);
++	atomic64_set(&en75_rxstat_hist_2, 0);
++	atomic64_set(&en75_rxstat_hist_4, 0);
++	atomic64_set(&en75_rxstat_hist_8, 0);
++	atomic64_set(&en75_rxstat_hist_16, 0);
++	atomic64_set(&en75_rxstat_hist_32, 0);
++	atomic64_set(&en75_rxstat_hist_64p, 0);
++	atomic_set(&en75_rxstat_xmit_dev_logged, 0);
++}
++
++static int en75_rxstat_reset_set(const char *val,
++				 const struct kernel_param *kp)
++{
++	bool reset;
++
++	if (kstrtobool(val, &reset))
++		return -EINVAL;
++	if (reset)
++		en75_rxstat_reset_all();
++	return 0;
++}
++
++static const struct kernel_param_ops en75_rxstat_reset_ops = {
++	.set = en75_rxstat_reset_set,
++	.get = param_get_int,
++};
++
++module_param_cb(rx_poll_count, &en75_rxstat_u64_ops,
++		&en75_rxstat_poll_count, 0444);
++module_param_cb(rx_total_frames, &en75_rxstat_u64_ops,
++		&en75_rxstat_total_frames, 0444);
++module_param_cb(rx_fcpu_frames, &en75_rxstat_u64_ops,
++		&en75_rxstat_fcpu_frames, 0444);
++module_param_cb(rx_poll_hist_1, &en75_rxstat_u64_ops,
++		&en75_rxstat_hist_1, 0444);
++module_param_cb(rx_poll_hist_2, &en75_rxstat_u64_ops,
++		&en75_rxstat_hist_2, 0444);
++module_param_cb(rx_poll_hist_4, &en75_rxstat_u64_ops,
++		&en75_rxstat_hist_4, 0444);
++module_param_cb(rx_poll_hist_8, &en75_rxstat_u64_ops,
++		&en75_rxstat_hist_8, 0444);
++module_param_cb(rx_poll_hist_16, &en75_rxstat_u64_ops,
++		&en75_rxstat_hist_16, 0444);
++module_param_cb(rx_poll_hist_32, &en75_rxstat_u64_ops,
++		&en75_rxstat_hist_32, 0444);
++module_param_cb(rx_poll_hist_64p, &en75_rxstat_u64_ops,
++		&en75_rxstat_hist_64p, 0444);
++module_param_cb(rx_stats_reset, &en75_rxstat_reset_ops,
++		&en75_rxstat_reset, 0644);
++
++static void en75_rxstat_note_poll(int done)
++{
++	atomic64_t *bucket;
++
++	atomic64_inc(&en75_rxstat_poll_count);
++	if (!done)
++		return;
++
++	atomic64_add(done, &en75_rxstat_total_frames);
++
++	if (done <= 1)
++		bucket = &en75_rxstat_hist_1;
++	else if (done <= 2)
++		bucket = &en75_rxstat_hist_2;
++	else if (done <= 4)
++		bucket = &en75_rxstat_hist_4;
++	else if (done <= 8)
++		bucket = &en75_rxstat_hist_8;
++	else if (done <= 16)
++		bucket = &en75_rxstat_hist_16;
++	else if (done <= 32)
++		bucket = &en75_rxstat_hist_32;
++	else
++		bucket = &en75_rxstat_hist_64p;
++
++	atomic64_inc(bucket);
++}
++
+ #define EN75_ICMP_PHASE_SLOTS	64
+ #define EN75_ICMP_IP_MF		0x2000
+ #define EN75_ICMP_IP_OFFSET	0x1fff
+@@ -333,9 +448,96 @@
+ 	en75_wreg(cpu_i, &q->qchain_regs->rx_cpui);
+ }
+ 
++static void en75_fcpu_batch_init(struct en75_fcpu_batch *batch)
++{
++	int i;
++
++	for (i = 0; i < EN75_FCPU_BATCH_MAX; i++) {
++		__skb_queue_head_init(&batch[i].queue);
++		batch[i].dev = NULL;
++		batch[i].put_dev = false;
++	}
++}
++
++static void en75_fcpu_batch_flush_one(struct en75_fcpu_batch *batch)
++{
++	struct sk_buff *skb;
++
++	if (!batch->dev)
++		return;
++
++	if (batch->queue.qlen > 1 &&
++	    (batch->dev->priv_flags & IFF_NO_QUEUE) &&
++	    !dev_nit_active(batch->dev)) {
++		struct sk_buff *head = NULL, *tail = NULL;
++		unsigned int dev_put_cnt = batch->queue.qlen;
++
++		while ((skb = __skb_dequeue(&batch->queue))) {
++			skb_reset_mac_header(skb);
++			if (!head)
++				head = skb;
++			else
++				tail->next = skb;
++			tail = skb;
++		}
++
++		tail->next = NULL;
++		dev_queue_xmit(head);
++
++		if (batch->put_dev) {
++			while (dev_put_cnt--)
++				dev_put(batch->dev);
++		}
++	} else {
++		while ((skb = __skb_dequeue(&batch->queue))) {
++			dev_queue_xmit(skb);
++			if (batch->put_dev)
++				dev_put(batch->dev);
++		}
++	}
++
++	batch->dev = NULL;
++	batch->put_dev = false;
++}
++
++static void en75_fcpu_batch_flush(struct en75_fcpu_batch *batch)
++{
++	int i;
++
++	for (i = 0; i < EN75_FCPU_BATCH_MAX; i++)
++		en75_fcpu_batch_flush_one(&batch[i]);
++}
++
++static void en75_fcpu_batch_queue(struct en75_fcpu_batch *batch,
++				  struct sk_buff *skb, bool put_dev)
++{
++	struct net_device *dev = skb->dev;
++	int free = -1;
++	int i;
++
++	for (i = 0; i < EN75_FCPU_BATCH_MAX; i++) {
++		if (batch[i].dev == dev && batch[i].put_dev == put_dev) {
++			__skb_queue_tail(&batch[i].queue, skb);
++			return;
++		}
++		if (!batch[i].dev && free < 0)
++			free = i;
++	}
++
++	if (free < 0) {
++		en75_fcpu_batch_flush(batch);
++		free = 0;
++	}
++
++	batch[free].dev = dev;
++	batch[free].put_dev = put_dev;
++	__skb_queue_tail(&batch[free].queue, skb);
++}
++
+ static void en75_qdma_rx_process_one(struct en75_q_rx *q, u32 cpu_i,
+ 				     enum dma_data_direction dir,
+-				     struct net_device *fcpu_out)
++				     struct net_device *fcpu_out,
++				     struct en75_fcpu_batch *fcpu_batch)
+ {
+ 	struct en75_q_rx_ent *e = &q->entry[cpu_i];
+ 	struct sk_buff *skb;
+@@ -479,6 +681,8 @@
+ 		bool tagged = (tpid == ETH_P_8021Q || tpid == 0x5678);
+ 		struct net_device *wdev = NULL;
+ 
++		atomic64_inc(&en75_rxstat_fcpu_frames);
++
+ 		if (tagged)	/* WiFi vif by TCI? (returns a held ref or NULL) */
+ 			wdev = en75_whnat_vif_by_idx(
+ 				get_unaligned_be16(skb->data + 14) & 0xfff);
+@@ -493,9 +697,10 @@
+ 			if (READ_ONCE(en75_ppe_rxdump))
+ 				pr_info_ratelimited("XR500v FCPU-XMIT: len=%u -> %s (wifi=%d)\n",
+ 						    skb->len, skb->dev->name, !!wdev);
+-			dev_queue_xmit(skb);
+-			if (wdev)
+-				dev_put(wdev);
++			if (atomic_cmpxchg(&en75_rxstat_xmit_dev_logged, 0, 1) == 0)
++				pr_info("XR500v FCPU-XMIT dev=%s wifi=%d len=%u\n",
++					skb->dev->name, !!wdev, skb->len);
++			en75_fcpu_batch_queue(fcpu_batch, skb, !!wdev);
+ 			return;
+ 		}
+ 	}
+@@ -516,34 +721,28 @@
+ 	page_pool_put_full_page(q->page_pool, page, false);
+ }
+ 
+-static int en75_qdma_rx_process(struct en75_q_rx *q, int budget)
++static int en75_qdma_rx_process(struct en75_q_rx *q, int budget,
++				struct net_device *fcpu_out,
++				struct en75_fcpu_batch *fcpu_batch)
+ {
+ 	enum dma_data_direction dir = page_pool_get_dma_dir(q->page_pool);
+ 	u32 hardware_i = en75_rreg(&q->qchain_regs->rx_hwi);
+-	struct net_device *fcpu_out = NULL;
+ 	int ndesc = q->ndesc;
+ 	u32 cpu_i;
+ 	int done;
+ 
+-	/* patch 372: resolve the half-offload egress dev once per poll. */
+-	if (READ_ONCE(en75_ppe_fcpu_xmit))
+-		fcpu_out = dev_get_by_name(&init_net, en75_ppe_fcpu_odev);
+-
+ 	/* The stored value of cpu_i is the last entry actually handled.
+ 	 * Whereas hardware_i is the next entry that has not yet been received.
+ 	 */
+ 	cpu_i = (q->cpu_i + 1) % ndesc;
+ 
+ 	for (done = 0; done < budget && cpu_i != hardware_i; done++) {
+-		en75_qdma_rx_process_one(q, cpu_i, dir, fcpu_out);
++		en75_qdma_rx_process_one(q, cpu_i, dir, fcpu_out, fcpu_batch);
+ 		cpu_i = (cpu_i + 1) % ndesc;
+ 	}
+ 
+ 	en75_fill_rx_queue(q, cpu_i);
+ 
+-	if (fcpu_out)
+-		dev_put(fcpu_out);
+-
+ 	return done;
+ }
+ 
+@@ -663,9 +862,17 @@
+ {
+ 	struct en75_q_rx *q = container_of(napi, struct en75_q_rx, napi);
+ 	struct en75_qdma *qdma = q->qdma;
++	struct en75_fcpu_batch fcpu_batch[EN75_FCPU_BATCH_MAX];
++	struct net_device *fcpu_out = NULL;
+ 	int cur, done = 0;
+ 	ktime_t poll_time = ktime_get();
+ 
++	en75_fcpu_batch_init(fcpu_batch);
++
++	/* patch 372: resolve the half-offload egress dev once per poll. */
++	if (READ_ONCE(en75_ppe_fcpu_xmit))
++		fcpu_out = dev_get_by_name(&init_net, en75_ppe_fcpu_odev);
++
+ 	q->last_poll_time = poll_time;
+ 	q->last_poll_cpu = raw_smp_processor_id();
+ 
+@@ -679,10 +886,16 @@
+ 	}
+ 
+ 	do {
+-		cur = en75_qdma_rx_process(q, budget - done);
++		cur = en75_qdma_rx_process(q, budget - done, fcpu_out,
++					   fcpu_batch);
+ 		done += cur;
+ 	} while (cur && done < budget);
+ 
++	en75_fcpu_batch_flush(fcpu_batch);
++
++	if (fcpu_out)
++		dev_put(fcpu_out);
++
+ 	if (done < budget && napi_complete(napi)) {
+ 		union en75_irq_purpose purpose;
+ 		union irq_bit b;
+@@ -692,6 +905,8 @@
+ 		en75_qdma_set_irqmask(qdma, b, true);
+ 	}
+ 
++	en75_rxstat_note_poll(done);
++
+ 	return done;
+ }
+ 
+@@ -1737,4 +1952,3 @@
+ 
+ 	return qdma;
+ }
+-
