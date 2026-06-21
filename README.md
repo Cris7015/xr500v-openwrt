@@ -2,7 +2,7 @@
 
 OpenWrt port for the **TP-Link Archer XR500v** GPON router — SoC: EcoNet **EN751221** (MIPS 34Kc, big-endian).
 
-## Status (2026-05-30) — FUNCTIONAL ✅
+## Status (2026-06-21) — FUNCTIONAL ✅
 
 | Function | State |
 |---|---|
@@ -13,7 +13,8 @@ OpenWrt port for the **TP-Link Archer XR500v** GPON router — SoC: EcoNet **EN7
 | **256 MB RAM** | ✅ (244 MB usable) |
 | **LAN TX throughput** | ✅ 161 Mbps as endpoint (BQL fix, was ~5M) |
 | Bridge (4 LAN + WiFi) + persistent config + internet | ✅ |
-| **HW-NAT (PPE flow offload)** | ⚠️ partial — LAN↔LAN wire-speed + LAN→WAN upload work; **WAN→LAN download over PPPoE currently stalls in HW-offload mode** (under investigation). Use software offload (`flow_offloading=1`, `flow_offloading_hw=0`) for reliable downloads meanwhile |
+| **HW-NAT (PPE flow offload)** | 🧪 **experimental — functional, under validation.** LAN↔LAN (~935 Mbit/s), LAN→WAN upload, and WAN→LAN PPPoE download all HW-offload at wire-speed with the CPU idle. Recently landed (egress DSA-port encoding + symmetric engine teardown) and **not yet soak-tested for long-term stability** — fall back to software offload (`flow_offloading_hw=0`) if you hit issues |
+| **WiFi HW forwarding (WHNAT, half-offload)** | 🧪 experimental — the PPE NATs in HW and the CPU re-injects to the radio; forwarded UDP ~514 Mbit/s (OEM-class) after the RX zero-copy fix. The OEM also uses half-offload (no full DMA-to-chip path exists on this silicon) |
 | **Telephone / VoIP (RJ11 FXS)** | ✅ working — clean bidirectional SIP calls + ring/answer/hangup (reconstructed SLIC driver) |
 | WAN / xPON (GPON fiber) | ❌ not supported (separate MAC block) |
 
@@ -58,7 +59,16 @@ make defconfig && make -j$(nproc)
 - `240-trgmii-cascade-cal` — port of `macMT7530doP6Cal` TRGMII from the OEM SDK.
 - `330-bql-min-limit` — **TX throughput fix**: `dql.min_limit=262144` on the GDM txqs. BQL was collapsing to ~86 bytes (QDMA signals TX-done per packet) → TX 5M → 161M (32×).
 
-*(The PPE WIP patches 340/350 are in the git history, commit `39fb218`. They were removed from the functional build: software forwarding already achieves ~590M, HW NAT offload is not needed.)*
+### HW-NAT (PPE flow offload) — experimental 🧪
+A QDMA-based MTK-PPE clone (mainline `mtk_ppe` model, FoE V1) drives the hardware NAT. **Functional and committed, but recently landed and not yet soak-tested** — treat as experimental and keep `flow_offloading_hw=0` as the safe fallback.
+- `378 / 380 / 381` — PPE/flowtable offload core: FoE table, RX/TX bind hooks, lazy engine-arm on the first `FLOW_BLOCK_BIND`.
+- `383` — derive `ft_active` from the block-list (a WiFi UNBIND at boot must not clear the global flag while the LAN ports are still offloading).
+- `390 / 391 / 392` — **WHNAT** WiFi-forwarding perf: force-to-CPU batching, **RX zero-copy headroom** (the big one — +64 B headroom kills the per-frame `pskb_expand_head`; forwarded UDP 271 → 514 Mbit/s, ≈ OEM), and a per-poll vif cache.
+- `393` — encode the **egress DSA port** in the flowtable FoE entry (`set_dsa` from the `FLOW_ACTION_REDIRECT` dev). Without it every LAN entry is identical (`l2.etype=ETH_P_IP`) → the cascaded MT7530 falls back to ARL-by-MAC → only the conduit-adjacent port HW-forwards and the other user ports black-hole. Fixes LAN↔LAN to user ports **and** the WAN→LAN PPPoE download.
+- `394` — **symmetric engine teardown** on `FLOW_BLOCK_UNBIND`. The BIND arms the engine and steers all GDM1 ingress to the PPE, but the UNBIND never disarmed it, so toggling `flow_offloading` under load left a half-armed engine black-holing traffic until reboot. Adds `en75_ppe_engine_disarm()` (de-steer GDM1 → CPU, flush FoE, disable engine, clear the latch).
+- `395` — gate the per-packet trace logs behind a `ppe_trace` module-param (default off) so production builds keep `dmesg`/the serial console quiet under load.
+
+*(The earlier PPE WIP patches 340/350 from before this rework are in the git history, commit `39fb218`.)*
 
 ## VoIP / Telephone (FXS)  ✅
 
