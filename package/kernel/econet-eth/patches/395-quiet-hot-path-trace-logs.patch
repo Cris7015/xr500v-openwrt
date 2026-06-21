@@ -1,0 +1,234 @@
+--- a/econet_eth.c
++++ b/econet_eth.c
+@@ -782,6 +782,13 @@
+  * NOTE: pairs with the switch-side special tag (gsw_stag, econet-gsw); whether
+  * that is still required is being verified separately. */
+ static bool en75_ppe_armed;
++
++/* gates the per-packet/flow trace logs (ppe_trace_rl in econet_ppe.h); default
++ * OFF so production builds keep dmesg/console quiet under load. */
++bool en75_ppe_trace;
++module_param_named(ppe_trace, en75_ppe_trace, bool, 0644);
++MODULE_PARM_DESC(ppe_trace, "verbose per-packet/flow PPE trace logs (default off)");
++
+ int en75_ppe_engine_arm(struct en75_ppe *ppe)
+ {
+ 	if (!ppe || !en75_ppe_base)
+--- a/econet_ppe.h
++++ b/econet_ppe.h
+@@ -264,6 +264,14 @@
+ /* symmetric teardown, called from FLOW_BLOCK_UNBIND when the block-list empties */
+ void en75_ppe_engine_disarm(struct en75_ppe *ppe);
+ 
++/* Per-packet/flow PPE trace logs (RX-rec/REGISTER/RX-bind/PREBIND/FLIP/TX-bind)
++ * are gated behind this module-param, default OFF, so production builds don't
++ * flood dmesg (and don't storm the serial console under load). Enable for debug:
++ *   echo 1 > /sys/module/econet_eth/parameters/ppe_trace   */
++extern bool en75_ppe_trace;
++#define ppe_trace_rl(fmt, ...) \
++	do { if (READ_ONCE(en75_ppe_trace)) pr_info_ratelimited(fmt, ##__VA_ARGS__); } while (0)
++
+ /* patch 356 */
+ struct en75_ppe *en75_ppe_attach(struct device *dev, void __iomem *base,
+ 				 void __iomem *fe_base, void *foe_virt,
+--- a/econet_ppe.c
++++ b/econet_ppe.c
+@@ -184,7 +184,7 @@
+ 		en75_cah_flip_line(ppe, (u32)line, pse);
+ 	writel(readl(ppe->base + EN75_PPE_CAH_GATE) | BIT(0),
+ 	       ppe->base + EN75_PPE_CAH_GATE);				/* gate up */
+-	pr_info_ratelimited("XR500v CAH-bind(#60) idx=%u want_ports=%08x lines=%u scanned=%d line=%d dp=%u\n",
++	ppe_trace_rl("XR500v CAH-bind(#60) idx=%u want_ports=%08x lines=%u scanned=%d line=%d dp=%u\n",
+ 			    idx, want_ports, lines, scanned, line, pse);
+ }
+ 
+@@ -686,7 +686,7 @@
+ 	en75_rx_ring[i].dport = get_unaligned_be16(l4 + 2);
+ 	en75_rx_ring[i].slot  = hash;
+ 	en75_rx_ring[i].valid = 1;
+-	pr_info_ratelimited("XR500v RX-rec(#57) slot=%u eo=%d %08x:%u -> %08x:%u\n",
++	ppe_trace_rl("XR500v RX-rec(#57) slot=%u eo=%d %08x:%u -> %08x:%u\n",
+ 		hash, eo, en75_rx_ring[i].sip, en75_rx_ring[i].sport,
+ 		en75_rx_ring[i].dip, en75_rx_ring[i].dport);
+ }
+@@ -825,7 +825,7 @@
+ 				}
+ 				e->hash = hash;
+ 				en75_foe_entry_commit(ppe, &fin, hash);
+-				pr_info_ratelimited("XR500v FT(380) RX-bind slot=%u %08x:%u->%08x:%u (preserve-key)\n",
++				ppe_trace_rl("XR500v FT(380) RX-bind slot=%u %08x:%u->%08x:%u (preserve-key)\n",
+ 						    hash, sip, sport, dip, dport);
+ 				return;
+ 			}
+@@ -1048,7 +1048,7 @@
+ {
+ 	u32 *w = (u32 *)((u8 *)ppe->foe_virt + (u32)hash * EN75_FOE_ENTRY_SIZE);
+ 
+-	pr_info_ratelimited("XR500v FoE[%u]: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
++	ppe_trace_rl("XR500v FoE[%u]: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+ 			    hash, w[0], w[1], w[2], w[3], w[4],
+ 			    w[5], w[6], w[7], w[8], w[9]);
+ }
+@@ -1648,7 +1648,7 @@
+ 		if (!READ_ONCE(en75_ppe_no_cache))
+ 			en75_ppe_cache_clean_all(ppe);
+ 		en75_ppe_diag_event(EN75_PPE_DIAG_PREBIND_PROMOTE);
+-		pr_info_ratelimited("XR500v PREBIND promote: slot=%u UNBIND->BIND (crsn=0x1a) ib1=%08x ib2=%08x\n",
++		ppe_trace_rl("XR500v PREBIND promote: slot=%u UNBIND->BIND (crsn=0x1a) ib1=%08x ib2=%08x\n",
+ 				    hash, hwe->ib1, hwe->ipv4.ib2);
+ 	}
+ 	spin_unlock_bh(&ppe->lock);
+@@ -1670,7 +1670,7 @@
+ 	if (READ_ONCE(en75_ppe_bind_on_rate)) {
+ 		if (crsn != 0x0f) {
+ 			en75_ppe_diag_gate_skip(crsn);
+-			pr_info_ratelimited("XR500v PPE rate-gate: skip crsn=%u slot=%u\n",
++			ppe_trace_rl("XR500v PPE rate-gate: skip crsn=%u slot=%u\n",
+ 					    crsn, hash);
+ 			return;
+ 		}
+@@ -1738,7 +1738,7 @@
+ 			if (!READ_ONCE(en75_ppe_no_cache))
+ 				en75_ppe_cache_clean_all(ppe);
+ 			en75_ppe_diag_event(EN75_PPE_DIAG_PREBIND_ARM);
+-			pr_info_ratelimited("XR500v PREBIND arm: slot=%u preb=1 dp=%u ib1=%08x ib2=%08x ports=%08x\n",
++			ppe_trace_rl("XR500v PREBIND arm: slot=%u preb=1 dp=%u ib1=%08x ib2=%08x ports=%08x\n",
+ 					    hash, en75_flip_dp, hwe->ib1,
+ 					    hwe->ipv4.ib2, hwe->ipv4.orig.ports);
+ 			goto out;
+@@ -1757,7 +1757,7 @@
+ 		else
+ 			en75_ppe_cah_clear_one(ppe, hash);
+ 		en75_ppe_diag_event(EN75_PPE_DIAG_FLIP);
+-		pr_info_ratelimited("XR500v FLIP slot=%u UNBIND->BIND dp=%u sip=%08x dip=%08x ports=%08x\n",
++		ppe_trace_rl("XR500v FLIP slot=%u UNBIND->BIND dp=%u sip=%08x dip=%08x ports=%08x\n",
+ 				    hash, en75_flip_dp, hwe->ipv4.orig.src_ip,
+ 				    hwe->ipv4.orig.dest_ip, hwe->ipv4.orig.ports);
+ 		goto out;
+@@ -1802,11 +1802,11 @@
+ 		en75_foe_entry_set_pse_port(&cand->data, en75_rx_bind_pse);
+ 		en75_foe_entry_commit(ppe, &cand->data, hash);
+ 		en75_ppe_diag_event(EN75_PPE_DIAG_RX_COMMIT);
+-		pr_info_ratelimited("XR500v PPE RX-bind: COMMIT reg-flow to DRAM slot=%u dp=%u (SW-build)\n",
++		ppe_trace_rl("XR500v PPE RX-bind: COMMIT reg-flow to DRAM slot=%u dp=%u (SW-build)\n",
+ 				    hash, en75_rx_bind_pse);
+ 	} else {
+ 		en75_ppe_diag_event(EN75_PPE_DIAG_NOBIND);
+-		pr_info_ratelimited("XR500v PPE RX-bind NObind: slot=%u empty, ncand=%d\n",
++		ppe_trace_rl("XR500v PPE RX-bind NObind: slot=%u empty, ncand=%d\n",
+ 				    hash, ncand);
+ 	}
+ out:
+@@ -1921,16 +1921,16 @@
+ 	 * ratelimited so the per-packet flood doesn't bury the COMMIT log.
+ 	 * patch 372: behind ppe_rxdump (perf runs want silence). */
+ 	if (READ_ONCE(en75_ppe_rxdump)) {
+-		pr_info_ratelimited("XR500v TX-bind EGRESS dir=%s slot=%u dmac=%pM smac=%pM eo=%d dp_bm=%02x sid=0x%04x\n",
++		ppe_trace_rl("XR500v TX-bind EGRESS dir=%s slot=%u dmac=%pM smac=%pM eo=%d dp_bm=%02x sid=0x%04x\n",
+ 			return_dir ? "ret" : "up", en75_tx_bind_slot,
+ 			dmac, smac, eo, dp_bm, sid);
+-		pr_info_ratelimited("XR500v TX-bind EGRESS dir=%s new=%08x:%u -> %08x:%u proto=%u ihl=%u\n",
++		ppe_trace_rl("XR500v TX-bind EGRESS dir=%s new=%08x:%u -> %08x:%u proto=%u ihl=%u\n",
+ 			return_dir ? "ret" : "up", nsip, nsport, ndip,
+ 			ndport, ipproto, ihl);
+ 	}
+ 	if (READ_ONCE(en75_tx_dpbm_override) >= 0) {
+ 		dp_bm = READ_ONCE(en75_tx_dpbm_override) & 0xff;
+-		pr_info_ratelimited("XR500v TX-bind DSA override dp_bm=%02x\n", dp_bm);
++		ppe_trace_rl("XR500v TX-bind DSA override dp_bm=%02x\n", dp_bm);
+ 	}
+ 
+ 	spin_lock_bh(&ppe->lock);
+@@ -1941,7 +1941,7 @@
+ 		}
+ 	if (ncand != 1) {
+ 		spin_unlock_bh(&ppe->lock);
+-		pr_info_ratelimited("XR500v TX-bind: ncand=%d (need 1), skip\n", ncand);
++		ppe_trace_rl("XR500v TX-bind: ncand=%d (need 1), skip\n", ncand);
+ 		return;
+ 	}
+ 
+@@ -2098,7 +2098,7 @@
+ 		}
+ 		if (!have_key || rx < 0) {
+ 			spin_unlock_bh(&ppe->lock);
+-			pr_info_ratelimited("XR500v TX-bind(#58): dir=%s rx=%d scan_key=%d sip=%08x dip=%08x dport=%u (keymatch=%d st[I/U/B/F]=%d/%d/%d/%d) -- retry\n",
++			ppe_trace_rl("XR500v TX-bind(#58): dir=%s rx=%d scan_key=%d sip=%08x dip=%08x dport=%u (keymatch=%d st[I/U/B/F]=%d/%d/%d/%d) -- retry\n",
+ 					    return_dir ? "ret" : "up", rx,
+ 					    have_key, nsip, ndip, ndport, keymatch,
+ 					    st_hist[0], st_hist[1], st_hist[2], st_hist[3]);
+@@ -2117,7 +2117,7 @@
+ 		     (e.ipv4.orig.dest_ip == ndip ||
+ 		      e.ipv4.orig.dest_ip == swab32(ndip)))) {
+ 			spin_unlock_bh(&ppe->lock);
+-			pr_info_ratelimited("XR500v TX-bind(374): dir=%s self-loop key nsip=%08x ndip=%08x, skip\n",
++			ppe_trace_rl("XR500v TX-bind(374): dir=%s self-loop key nsip=%08x ndip=%08x, skip\n",
+ 					    return_dir ? "ret" : "up", nsip, ndip);
+ 			return;
+ 		}
+@@ -2148,14 +2148,14 @@
+ 			e.ib1 &= ~MTK_FOE_IB1_BIND_VLAN_LAYER;
+ 			e.ib1 |= MTK_FOE_IB1_BIND_VLAN_TAG |
+ 				 FIELD_PREP(MTK_FOE_IB1_BIND_VLAN_LAYER, 1);
+-			pr_info_ratelimited("XR500v FORCE-CPU: slot=%u dest_port=%u fqos=%u vlan1=%u etype=5678\n",
++			ppe_trace_rl("XR500v FORCE-CPU: slot=%u dest_port=%u fqos=%u vlan1=%u etype=5678\n",
+ 					    fslot, fdp,
+ 					    !!(e.ipv4.ib2 & MTK_FOE_IB2_PSE_QOS),
+ 					    fslot);
+ 		}
+ 		en75_foe_entry_commit(ppe, &e, en75_rx_ring[rx].slot);
+ 		en75_tx_committed_slot[dir] = en75_rx_ring[rx].slot;	/* patch 372 */
+-		pr_info_ratelimited("XR500v TX-bind(#58) commit LOOKUP dir=%s slot=%u (scan_slot=%d key=%s) sip=%08x dip=%08x ports=%08x dp=%u ib2=%08x\n",
++		ppe_trace_rl("XR500v TX-bind(#58) commit LOOKUP dir=%s slot=%u (scan_slot=%d key=%s) sip=%08x dip=%08x ports=%08x dp=%u ib2=%08x\n",
+ 			return_dir ? "ret" : "up", en75_rx_ring[rx].slot, slot,
+ 			slot >= 0 ? "engine" : "RXrecon", e.ipv4.orig.src_ip,
+ 			e.ipv4.orig.dest_ip, e.ipv4.orig.ports, en75_flip_dp,
+@@ -2174,7 +2174,7 @@
+ 	WRITE_ONCE(en75_tx_bind_arm, false);		/* one commit per RX arm */
+ 	spin_unlock_bh(&ppe->lock);
+ 
+-	pr_info_ratelimited("XR500v TX-bind COMMIT(#45 descr) dir=%s slot=%u swab=%u ib1=%08x ib2=%08x etype=%04x sid=0x%04x dp_bm=%02x\n",
++	ppe_trace_rl("XR500v TX-bind COMMIT(#45 descr) dir=%s slot=%u swab=%u ib1=%08x ib2=%08x etype=%04x sid=0x%04x dp_bm=%02x\n",
+ 		return_dir ? "ret" : "up", en75_tx_committed_slot[dir],
+ 		READ_ONCE(en75_ppe_tuple_swab), e.ib1, e.ipv4.ib2,
+ 		e.ipv4.l2.etype, sid, dp_bm);
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -658,7 +658,7 @@
+ 		u16 fet12 = len >= 14 ? get_unaligned_be16(skb->data + 12) : 0;
+ 
+ 		if (fet12 == 0x5678)
+-			pr_info_ratelimited("XR500v RX-5678: sport=%u crsn=%u ppe_entry=%u len=%u raw32=%*phN\n",
++			ppe_trace_rl("XR500v RX-5678: sport=%u crsn=%u ppe_entry=%u len=%u raw32=%*phN\n",
+ 				get_erx_sport(&desc.msg.erx), crsn, hash, len,
+ 				min_t(int, len, 32), skb->data);
+ 
+@@ -708,7 +708,7 @@
+ 			u16 et12 = len >= 14 ? get_unaligned_be16(skb->data + 12) : 0;
+ 			u16 et16 = len >= 18 ? get_unaligned_be16(skb->data + 16) : 0;
+ 
+-			pr_info_ratelimited("XR500v PPE rx: crsn=%u ppe_entry=%u sport=%u ip4=%u ip6=%u l2vld=%u l4f=%u untag=%u sp_tag=%04x tci=%04x et12=%04x et16=%04x len=%d raw32=%*phN\n",
++			ppe_trace_rl("XR500v PPE rx: crsn=%u ppe_entry=%u sport=%u ip4=%u ip6=%u l2vld=%u l4f=%u untag=%u sp_tag=%04x tci=%04x et12=%04x et16=%04x len=%d raw32=%*phN\n",
+ 				crsn, hash, get_erx_sport(&desc.msg.erx),
+ 				is_erx_ip4(&desc.msg.erx), is_erx_ip6(&desc.msg.erx),
+ 				is_erx_l2vld(&desc.msg.erx), is_erx_l4f(&desc.msg.erx),
+@@ -768,7 +768,7 @@
+ 			}
+ 			en75_ppe_fcpu_xmit_cnt++;
+ 			if (READ_ONCE(en75_ppe_rxdump))
+-				pr_info_ratelimited("XR500v FCPU-XMIT: len=%u -> %s (wifi=%d)\n",
++				ppe_trace_rl("XR500v FCPU-XMIT: len=%u -> %s (wifi=%d)\n",
+ 						    skb->len, skb->dev->name, !!wdev);
+ 			if (atomic_cmpxchg(&en75_rxstat_xmit_dev_logged, 0, 1) == 0)
+ 				pr_info("XR500v FCPU-XMIT dev=%s wifi=%d len=%u\n",
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -669,7 +669,7 @@
+ 	en75_foe_entry_register(en75_the_ppe, fe);
+ 	WRITE_ONCE(en75_ppe_offload_enabled, true);
+ 
+-	pr_info_ratelimited("XR500v FT(380) REGISTER ck=%lx sid=%d wifi=%d etype=%04x odev=%s nact=%d %pI4:%u->%pI4:%u => %pI4:%u->%pI4:%u dmac=%pM smac=%pM\n",
++	ppe_trace_rl("XR500v FT(380) REGISTER ck=%lx sid=%d wifi=%d etype=%04x odev=%s nact=%d %pI4:%u->%pI4:%u => %pI4:%u->%pI4:%u dmac=%pM smac=%pM\n",
+ 		f->cookie, sid, wifi_idx, ntohs(e.ipv4.l2.etype), odev ? odev->name : "NULL", i,
+ 		&o_sip, ntohs(o_sport), &o_dip, ntohs(o_dport),
+ 		&n_sip, ntohs(n_sport), &n_dip, ntohs(n_dport),
