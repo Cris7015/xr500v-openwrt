@@ -1,0 +1,52 @@
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -547,6 +547,7 @@
+ 	u8 l4proto;
+ 	int sid = 0, i, wifi_idx;
+ 	struct en75_flow_entry *fe;
++	struct net_device *odev = NULL;	/* fport-p3p4: egress netdev from REDIRECT */
+ 
+ 	if (!en75_the_ppe)
+ 		return -ENODEV;
+@@ -588,6 +589,10 @@
+ 		case FLOW_ACTION_PPPOE_PUSH:
+ 			sid = act->pppoe.sid;
+ 			break;
++		case FLOW_ACTION_REDIRECT:
++		case FLOW_ACTION_MIRRED:
++			odev = act->dev;	/* fport-p3p4: the egress netdev */
++			break;
+ 		default:
+ 			break;
+ 		}
+@@ -609,6 +614,18 @@
+ 			       eth.h_source, eth.h_dest);
+ 	en75_foe_entry_set_ipv4_tuple(&e, false, o_sip, o_sport, o_dip, o_dport);
+ 	en75_foe_entry_set_ipv4_tuple(&e, true, n_sip, n_sport, n_dip, n_dport);
++	/* fix fport-p3p4: encode the physical egress DSA port BEFORE pppoe (as the old
++	 * tx_bind + the gsw/tag-mtk.c tagger do). The FT path never did this, so all 4
++	 * LAN entries came out with l2.etype=ETH_P_IP(0x0800) and the cascaded MT7530
++	 * fell back to ARL-by-MAC: only p2 (lan3, next to the conduit) resolved, p1/p3/p4
++	 * (lan4/lan2/lan1) blackholed. l2.etype = BIT(dp->index) [| BIT(7) passthrough on
++	 * the MCM switch]. Restores the 06-16 935M behaviour the flowtable path dropped. */
++	if (wifi_idx < 0 && odev && dsa_user_dev_check(odev)) {
++		struct dsa_port *dp = dsa_port_from_netdev(odev);
++
++		if (!IS_ERR(dp))
++			en75_foe_entry_set_dsa(&e, dp->index, dp->ds->index != 0);
++	}
+ 	if (sid)
+ 		en75_foe_entry_set_pppoe(&e, sid);
+ 	if (wifi_idx >= 0) {
+@@ -652,8 +669,9 @@
+ 	en75_foe_entry_register(en75_the_ppe, fe);
+ 	WRITE_ONCE(en75_ppe_offload_enabled, true);
+ 
+-	pr_info_ratelimited("XR500v FT(380) REGISTER ck=%lx sid=%d wifi=%d %pI4:%u->%pI4:%u => %pI4:%u->%pI4:%u dmac=%pM smac=%pM\n",
+-		f->cookie, sid, wifi_idx, &o_sip, ntohs(o_sport), &o_dip, ntohs(o_dport),
++	pr_info_ratelimited("XR500v FT(380) REGISTER ck=%lx sid=%d wifi=%d etype=%04x odev=%s nact=%d %pI4:%u->%pI4:%u => %pI4:%u->%pI4:%u dmac=%pM smac=%pM\n",
++		f->cookie, sid, wifi_idx, ntohs(e.ipv4.l2.etype), odev ? odev->name : "NULL", i,
++		&o_sip, ntohs(o_sport), &o_dip, ntohs(o_dport),
+ 		&n_sip, ntohs(n_sport), &n_dip, ntohs(n_dport),
+ 		eth.h_dest, eth.h_source);
+ 	return 0;
