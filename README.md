@@ -13,6 +13,7 @@ OpenWrt port for the **TP-Link Archer XR500v** GPON router — SoC: EcoNet **EN7
 | **256 MB RAM** | ✅ (244 MB usable) |
 | **LAN TX throughput** | ✅ 161 Mbps as endpoint (BQL fix, was ~5M) |
 | Bridge (4 LAN + WiFi) + persistent config + internet | ✅ |
+| **HW-NAT (PPE flow offload)** | ⚠️ partial — LAN↔LAN wire-speed + LAN→WAN upload work; **WAN→LAN download over PPPoE currently stalls in HW-offload mode** (under investigation). Use software offload (`flow_offloading=1`, `flow_offloading_hw=0`) for reliable downloads meanwhile |
 | **Telephone / VoIP (RJ11 FXS)** | ✅ working — clean bidirectional SIP calls + ring/answer/hangup (reconstructed SLIC driver) |
 | WAN / xPON (GPON fiber) | ❌ not supported (separate MAC block) |
 
@@ -38,7 +39,7 @@ make defconfig && make -j$(nproc)
 **Pinned base:** `cjdelisle/openwrt` @ `f3605b31fb` (branch `plan-b-nazox1`).
 **`config.seed`** captures what lives in `.config` (gitignored): USB packages (`kmod-usb3`, `usb-storage`, `usb-xhci-mtk`, `fs-vfat`, `fs-exfat`) + kernel diet (`KALLSYMS`/`DEBUG_INFO` off, required so the compressed kernel fits in the `kernel1` partition of 3 MB).
 
-> ⚠️ **Lesson learned (important):** always run `make package/kernel/econet-eth/clean` before a fresh build, and **do NOT leave backup directories** (`*-bak`, `*-disabled`, `*.iter*`) under `package/`: OpenWrt scans all of `package/` and compiles those stale drivers in parallel, overwriting the correct one in the rootfs (this cost hours of "ethernet broken").
+> **⚠️ Build hygiene:** run `make package/kernel/econet-eth/clean` before a fresh build, and do not leave backup directories (`*-bak`, `*-disabled`, `*.iter*`) under `package/`. OpenWrt scans the entire `package/` tree and builds any such stale copies in parallel, which can overwrite the intended driver in the rootfs.
 
 ## Key technical notes
 - **Nested DSA topology** — `target/linux/econet/dts/en751221.dtsi`: on-die `switch@1fb58000` with a child `mdio { switch@1f (mediatek,mcm) }`. MCM user PHYs at MDIO **1–4** (port0/PHY0 has no RJ45 jack).
