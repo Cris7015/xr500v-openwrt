@@ -1,0 +1,59 @@
+--- a/econet_eth.c
++++ b/econet_eth.c
+@@ -820,6 +820,29 @@
+ 	return 0;
+ }
+ 
++/* Symmetric teardown for en75_ppe_engine_arm. Called from FLOW_BLOCK_UNBIND
++ * when the LAST flowtable block goes away (toggle offload to none/sw, firewall
++ * reload). Without it the engine stays armed and GDM1_FWD(0x500) keeps steering
++ * ALL conduit ingress into a PPE whose FoE entries are stale/empty -> a black
++ * hole that persists until reboot (the en75_ppe_armed latch also makes any
++ * corrective re-arm a no-op). Reverse order of arm: de-steer GDM1 back to CPU
++ * FIRST so traffic falls back to the SW path, only THEN flush the FoE table and
++ * disable the engine -- never leave traffic steered into a torn-down engine. */
++void en75_ppe_engine_disarm(struct en75_ppe *ppe)
++{
++	if (!ppe || !en75_ppe_base)
++		return;
++	if (!READ_ONCE(en75_ppe_armed))		/* not armed -> no-op (symmetric guard) */
++		return;
++	en75_ppe_fe_rw(ppe, 0x500, true, 0x03f00000);	/* GDM1_FWD: steer back to CPU */
++	en75_ppe_flush_all(ppe);			/* invalidate FoE + clear offload_enabled */
++	en75_ppe_engine_set(false);			/* GLO_CFG.EN off */
++	WRITE_ONCE(en75_ppe_engine, false);
++	WRITE_ONCE(en75_ppe_armed, false);		/* clear latch -> next BIND re-arms clean */
++	pr_info("XR500v PPE: engine DISARMED (flowtable UNBIND, list empty) GDM1_FWD=0x%08x\n",
++		readl(ppe->fe_base + 0x500));
++}
++
+ static void en75_ppe_init(struct en75_eth_pvt *eth)
+ {
+ 	void __iomem *base = (void __iomem *)eth->regs->ppe;
+--- a/econet_ppe.h
++++ b/econet_ppe.h
+@@ -261,6 +261,8 @@
+ /* patch 381: productized one-shot HW engine-arm (steering + cache + flags),
+  * called lazily on the first flowtable FLOW_BLOCK_BIND. Replaces op139. */
+ int en75_ppe_engine_arm(struct en75_ppe *ppe);
++/* symmetric teardown, called from FLOW_BLOCK_UNBIND when the block-list empties */
++void en75_ppe_engine_disarm(struct en75_ppe *ppe);
+ 
+ /* patch 356 */
+ struct en75_ppe *en75_ppe_attach(struct device *dev, void __iomem *base,
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -759,6 +759,13 @@
+ 		 * at boot) must NOT clear this global flag while the LAN ports are
+ 		 * still offloading -- else RX drops to the NObind path + HW-NAT dies. */
+ 		WRITE_ONCE(en75_ppe_ft_active, !list_empty(&en75_ft_block_cb_list));
++		/* fix (2026-06-21): when the LAST flowtable block goes away (toggle
++		 * offload to none/sw + firewall reload), tear the engine DOWN to mirror
++		 * the BIND-time arm. Without this the engine stays armed + GDM1 keeps
++		 * steering all ingress into a PPE with stale FoE -> black hole that
++		 * persists until reboot (the armed latch even kills the corrective re-arm). */
++		if (list_empty(&en75_ft_block_cb_list))
++			en75_ppe_engine_disarm(en75_the_ppe);
+ 		return 0;
+ 	default:
+ 		return -EOPNOTSUPP;
