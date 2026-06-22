@@ -74,7 +74,7 @@
 
 		interrupt-controller;
 		#interrupt-cells = <1>;
-		econet,shadow-interrupts = <7 2>, <8 3>, <13 12>, <30 29>;
+		econet,shadow-interrupts = <7 2>, <8 3>, <30 29>;	/* PCM (hwirq 11) is NOT per-cpu: it is an ordinary peripheral -> request_irq() -> handle_level_irq(). The OEM enum's SI_PC_INT(13)/SI_PC1_INT(12) are two distinct PCM IRQs, not a primary/shadow per-cpu pair; PCM0 uses SI_PC1_INT -> hardware bit 11 */
 	};
 
 	scuclk: clock-controller@1fb00000 {
@@ -88,7 +88,7 @@
 		compatible = "econet,en751221-pcm";
 		reg = <0x1fbd0000 0x1000>;
 		interrupt-parent = <&intc>;
-		interrupts = <12>;	/* OEM PCM_INT=12 for PCM0; verify on HW */
+		interrupts = <11>;	/* PCM0 = intc hardware bit 11 (HW-confirmed: the IRQ fires ~200 Hz with the voice engine armed, 0 when idle). OEM SI_PC1_INT (enum 12) -> bit 11 via the intc's irq-1 offset; the earlier <13>/<12> were the wrong lines (the PCM never asserted there) */
 		status = "disabled";
 	};
 

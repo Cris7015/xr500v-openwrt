@@ -27,6 +27,7 @@
 #include <linux/kthread.h>
 #include <linux/wait.h>
 #include <linux/uaccess.h>
+#include <linux/irqdomain.h>
 
 #include "pcm-en751221.h"
 
@@ -884,6 +885,28 @@ module_param(tx_msb, int, 0644);
 static int voice_fifo_sz = VOICE_FIFO_SZ;
 module_param(voice_fifo_sz, int, 0644);
 
+/* Servicing mode for the voice thread:
+ *   1 = IRQ-driven: sleep until the PCM raises a descriptor-completion IRQ
+ *       (PCM_IMR armed with TX/RX_DESC_UPDATE), woken by pcm_irq. A 5ms timeout
+ *       fallback guarantees a missed IRQ can never starve the ring (audio-safe).
+ *   0 = legacy: the old usleep_range() busy-poll (~0.5-2.5ms cadence).
+ * Live-tunable for A/B: echo {0,1} > /sys/module/pcm_en751221/parameters/voice_use_irq */
+static int voice_use_irq = 1;
+module_param(voice_use_irq, int, 0644);
+
+/* Safety poll fallback (ms) when IRQ-driven: the thread wakes at least this often
+ * even if no IRQ arrives. The 15-deep ring is ~150ms so this is a wide margin. */
+static int voice_irq_timeout_ms = 5;
+module_param(voice_irq_timeout_ms, int, 0644);
+
+/* Diagnostic/bring-up override: force the PCM to request a specific intc hwirq
+ * instead of the DT 'interrupts' value. -1 = use the DT. Lets us hot-test the
+ * real PCM intc line (e.g. 12 vs 13) WITHOUT reflashing the DTB:
+ *   insmod pcm-en751221.ko pcm_hwirq=12
+ * Mapped through the en751221-intc irq_domain. */
+static int pcm_hwirq = -1;
+module_param(pcm_hwirq, int, 0444);
+
 /* TX mute flag, set by the SLIC hook poller via pcm_en751221_voice_set_mute().
  * When the line goes on-hook mid-call the analog loop opens and the capture path
  * picks up a loud dead-line transient; muting here feeds silence to the peer in
@@ -899,6 +922,8 @@ static struct {
 	struct kfifo cap;	/* mic -> userspace (read) */
 	struct kfifo play;	/* userspace (write) -> earpiece */
 	wait_queue_head_t cap_wq, play_wq;
+	wait_queue_head_t irq_wq;	/* woken by pcm_irq on descriptor completion */
+	int irq_pending;		/* set by pcm_irq, cleared by the voice thread */
 } vs;
 
 /*
@@ -1028,6 +1053,17 @@ static int pcm_voice_thread(void *data)
 		if (progressed) {
 			wake_up_interruptible(&vs.cap_wq);
 			wake_up_interruptible(&vs.play_wq);
+		}
+		if (READ_ONCE(voice_use_irq)) {
+			/* Sleep until the PCM signals a descriptor completed; the
+			 * timeout is a safety net so a missed IRQ never wedges audio. */
+			int t = READ_ONCE(voice_irq_timeout_ms);
+
+			wait_event_interruptible_timeout(vs.irq_wq,
+				READ_ONCE(vs.irq_pending) || kthread_should_stop(),
+				msecs_to_jiffies(t > 0 ? t : 5));
+			WRITE_ONCE(vs.irq_pending, 0);
+		} else if (progressed) {
 			usleep_range(500, 1000);
 		} else {
 			usleep_range(1500, 2500);
@@ -1103,6 +1139,8 @@ int pcm_en751221_voice_start(void)
 	}
 	init_waitqueue_head(&vs.cap_wq);
 	init_waitqueue_head(&vs.play_wq);
+	init_waitqueue_head(&vs.irq_wq);
+	WRITE_ONCE(vs.irq_pending, 0);
 	memset(vs.txb, 0, PCM_DESC_NUM * VOICE_FB);
 	memset(vs.rxb, 0, PCM_DESC_NUM * VOICE_CHANS * VOICE_FB);
 
@@ -1143,6 +1181,11 @@ int pcm_en751221_voice_start(void)
 	pcm_wr(p, PCM_TX_POLLING_DEMAND, 1);
 	pcm_wr(p, PCM_RX_POLLING_DEMAND, 1);
 
+	/* Arm descriptor-completion interrupts so pcm_irq wakes the voice thread
+	 * (no-op for audio if voice_use_irq=0 -- the thread ignores the wakes). */
+	pcm_wr(p, PCM_ISR, pcm_rd(p, PCM_ISR));	/* W1C stale before unmasking */
+	pcm_wr(p, PCM_IMR, PCM_INT_TX_DESC_UPDATE | PCM_INT_RX_DESC_UPDATE);
+
 	WRITE_ONCE(voice_tx_mute, 0);	/* a new call always starts un-muted */
 	vs.thr = kthread_run(pcm_voice_thread, NULL, "pcm-voice");
 	if (IS_ERR(vs.thr)) {
@@ -1162,6 +1205,8 @@ void pcm_en751221_voice_stop(void)
 	if (!vs.active)
 		return;
 	vs.active = false;
+	if (p)
+		pcm_wr(p, PCM_IMR, 0);	/* mask before tearing down (no stray wakes) */
 	if (vs.thr)
 		kthread_stop(vs.thr);
 	vs.thr = NULL;
@@ -1528,22 +1573,149 @@ static irqreturn_t pcm_irq(int irq, void *data)
 	if (!isr)
 		return IRQ_NONE;
 
-	pcm_wr(p, PCM_ISR, isr);		/* acknowledge */
-	dev_dbg(p->dev, "PCM IRQ, ISR=0x%08x\n", isr);
+	pcm_wr(p, PCM_ISR, isr);		/* W1C acknowledge (clears the level) */
+
+	/* A descriptor completed -> wake the voice thread so it drains/refills the
+	 * rings. This replaces the thread's usleep busy-poll when voice_use_irq=1. */
+	if (isr & (PCM_INT_TX_DESC_UPDATE | PCM_INT_RX_DESC_UPDATE)) {
+		WRITE_ONCE(vs.irq_pending, 1);
+		wake_up_interruptible(&vs.irq_wq);
+	}
+	/* Ring starvation / bus error: latched + logged, not fatal (the thread's
+	 * re-arm + polling-demand recovers). 0x3d in the ISR is this case. */
+	if (isr & (PCM_INT_TX_BUF_UNDER_RUN | PCM_INT_RX_BUF_OVER_RUN |
+		   PCM_INT_AHB_BUS_ERR))
+		dev_dbg(p->dev, "PCM IRQ underrun/overrun ISR=0x%08x\n", isr);
 	return IRQ_HANDLED;
 }
 
 static int pcm_regs_show(struct seq_file *s, void *unused)
 {
 	struct pcm_dev *p = s->private;
+	void __iomem *intc;
 	int i;
 
 	for (i = 0; i < PCM_REG_COUNT; i++)
 		seq_printf(s, "reg[%2d] @0x%02x = 0x%08x\n",
 			   i, PCM_REG(i), pcm_rd(p, i));
+
+	/* Find the PCM's real intc input: dump the EN751221 intc (0x1fb40000).
+	 * Read PENDING as-is, then briefly unmask everything (local IRQs off so the
+	 * chained handler can't dispatch) to capture the RAW pending, then restore.
+	 * Compare the dump during a call (PCM asserting) vs idle: the bit that turns
+	 * on is the PCM's line. MASK0/1=0x04/0x50, PEND0/1=0x08/0x54. */
+	intc = ioremap(0x1fb40000, 0x100);
+	if (intc) {
+		unsigned long flags;
+		u32 racc0 = 0, racc1 = 0;
+		int k;
+
+		/* OEM intc reg map (tc3162.h): ITR(type)@00 IMR(mask)@04 IPR(pend)@08
+		 * ISR(status)@0c IPRn(priority)@10-2c IVSR@30-4c IMR_1@50 IPR_1@54.
+		 * The mainline driver only uses 04/08/50/54 -- dump the rest to find
+		 * why the PCM line never reaches the CPU. Read raw (no mask change). */
+		seq_printf(s, "intc ITR  @00 = 0x%08x (type edge/level)\n",
+			   ioread32(intc + 0x00));
+		seq_printf(s, "intc IMR0 @04 = 0x%08x   IMR1 @50 = 0x%08x (mask)\n",
+			   ioread32(intc + 0x04), ioread32(intc + 0x50));
+		seq_printf(s, "intc IPR0 @08 = 0x%08x   IPR1 @54 = 0x%08x (pending)\n",
+			   ioread32(intc + 0x08), ioread32(intc + 0x54));
+		seq_printf(s, "intc ISR  @0c = 0x%08x (raw status)\n",
+			   ioread32(intc + 0x0c));
+		for (i = 0x10; i <= 0x2c; i += 4)
+			seq_printf(s, "intc IPRn @%02x = 0x%08x (priority)\n",
+				   i, ioread32(intc + i));
+		for (i = 0x30; i <= 0x4c; i += 4)
+			seq_printf(s, "intc IVSR @%02x = 0x%08x (vpe route)\n",
+				   i, ioread32(intc + i));
+		seq_printf(s, "intc IPSR @58 = 0x%08x   @5c = 0x%08x\n",
+			   ioread32(intc + 0x58), ioread32(intc + 0x5c));
+		seq_printf(s, "intc IVSR @60 = 0x%08x   @64 = 0x%08x\n",
+			   ioread32(intc + 0x60), ioread32(intc + 0x64));
+
+		/* OR-sample IPR over ~10ms with all inputs unmasked (IRQs off per
+		 * burst, so no dispatch) to catch a brief/edge pending the single read
+		 * could miss. Catching bit30(timer, 1kHz) proves the sampler works. */
+		for (k = 0; k < 2000; k++) {
+			u32 sm0, sm1;
+
+			local_irq_save(flags);
+			sm0 = ioread32(intc + 0x04);
+			sm1 = ioread32(intc + 0x50);
+			iowrite32(~0u, intc + 0x04);
+			iowrite32(~0u, intc + 0x50);
+			racc0 |= ioread32(intc + 0x08);
+			racc1 |= ioread32(intc + 0x54);
+			iowrite32(sm0, intc + 0x04);
+			iowrite32(sm1, intc + 0x50);
+			local_irq_restore(flags);
+			udelay(5);
+		}
+		seq_printf(s, "intc orIPR0=0x%08x  orIPR1=0x%08x (2000 samp ~10ms, all-unmasked)\n",
+			   racc0, racc1);
+		iounmap(intc);
+	}
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(pcm_regs);
+
+/*
+ * Self-contained PCM IRQ delivery test: arm the voice engine (voice_start ->
+ * DMA TX/RX on, IMR=0x0c, descriptors clocking), OR-sample the intc raw status
+ * for ~20ms to see if the PCM asserts ANY intc input, then disarm. No SIP call
+ * needed. Compare against idle: any new bit in orISR(0c)/orIPR vs idle = the PCM
+ * line. Returns -EBUSY if a real call is in progress (engine already active).
+ */
+static int pcm_irqtest_show(struct seq_file *s, void *unused)
+{
+	struct pcm_dev *p = s->private;
+	void __iomem *intc;
+	u32 isr, imr, dma, racc0 = 0, racc1 = 0, isracc = 0;
+	unsigned long flags;
+	int k, ret;
+
+	ret = pcm_en751221_voice_start();
+	if (ret) {
+		seq_printf(s, "voice_start failed: %d (a call may be active)\n", ret);
+		return 0;
+	}
+	msleep(30);				/* let the DMA clock + descriptors complete */
+
+	isr = pcm_rd(p, PCM_ISR);
+	imr = pcm_rd(p, PCM_IMR);
+	dma = pcm_rd(p, PCM_TX_RX_DMA_CTRL);
+
+	intc = ioremap(0x1fb40000, 0x100);
+	if (intc) {
+		for (k = 0; k < 4000; k++) {	/* ~20ms armed window */
+			u32 sm0, sm1;
+
+			local_irq_save(flags);
+			sm0 = ioread32(intc + 0x04);
+			sm1 = ioread32(intc + 0x50);
+			iowrite32(~0u, intc + 0x04);
+			iowrite32(~0u, intc + 0x50);
+			racc0 |= ioread32(intc + 0x08);
+			racc1 |= ioread32(intc + 0x54);
+			isracc |= ioread32(intc + 0x0c);
+			iowrite32(sm0, intc + 0x04);
+			iowrite32(sm1, intc + 0x50);
+			local_irq_restore(flags);
+			udelay(5);
+		}
+		iounmap(intc);
+	}
+
+	pcm_en751221_voice_stop();
+
+	seq_printf(s, "armed: PCM ISR=0x%08x IMR=0x%08x DMA=0x%08x  (want ISR&IMR!=0, DMA=0x0f000003)\n",
+		   isr, imr, dma);
+	seq_printf(s, "intc over ~20ms armed: orIPR0=0x%08x orIPR1=0x%08x orISR(0c)=0x%08x\n",
+		   racc0, racc1, isracc);
+	seq_puts(s, "(idle baseline orIPR0=0x60800008 = bits 3,23,29,30 timer+nbrs; a NEW bit 11/12/13 = PCM)\n");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(pcm_irqtest);
 
 static int pcm_loopback_selftest_show(struct seq_file *s, void *unused)
 {
@@ -1694,8 +1866,20 @@ static int pcm_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	/* IRQ is optional in phase 1: a wrong DT number must not block bring-up */
-	p->irq = platform_get_irq_optional(pdev, 0);
+	/* IRQ is optional: a wrong DT number must not block bring-up.
+	 * pcm_hwirq>=0 overrides the DT line (hot-test the real PCM intc input). */
+	if (pcm_hwirq >= 0) {
+		struct device_node *in = of_find_compatible_node(NULL, NULL,
+							"econet,en751221-intc");
+		struct irq_domain *dom = in ? irq_find_host(in) : NULL;
+
+		of_node_put(in);
+		p->irq = dom ? irq_create_mapping(dom, pcm_hwirq) : 0;
+		dev_info(dev, "pcm_hwirq override: hwirq %d -> virq %d\n",
+			 pcm_hwirq, p->irq);
+	} else {
+		p->irq = platform_get_irq_optional(pdev, 0);
+	}
 	if (p->irq > 0) {
 		ret = devm_request_irq(dev, p->irq, pcm_irq, 0,
 				       dev_name(dev), p);
@@ -1706,6 +1890,7 @@ static int pcm_probe(struct platform_device *pdev)
 
 	p->dbg = debugfs_create_dir("pcm-en751221", NULL);
 	debugfs_create_file("regs", 0444, p->dbg, p, &pcm_regs_fops);
+	debugfs_create_file("irqtest", 0444, p->dbg, p, &pcm_irqtest_fops);
 	debugfs_create_file("loopback_selftest", 0444, p->dbg, p,
 			    &pcm_loopback_selftest_fops);
 	debugfs_create_file("rx_scan2", 0444, p->dbg, p, &pcm_rx_scan2_fops);
