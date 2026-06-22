@@ -54,8 +54,10 @@ endef
 define KernelPackage/econet-eth/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/etc/init.d/econet-switch $(1)/etc/init.d/
+	$(INSTALL_BIN) ./files/etc/init.d/econet-swap $(1)/etc/init.d/
 	$(INSTALL_DIR) $(1)/etc/rc.d
 	ln -sf ../init.d/econet-switch $(1)/etc/rc.d/S99econet-switch
+	ln -sf ../init.d/econet-swap $(1)/etc/rc.d/S15econet-swap
 endef
 
 $(eval $(call KernelPackage,econet-eth))

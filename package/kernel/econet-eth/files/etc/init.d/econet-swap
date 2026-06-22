@@ -1,0 +1,43 @@
+#!/bin/sh /etc/rc.common
+# econet-swap: load the econet stack from the overlay BEFORE netifd (S20).
+# modules-boot.d loads econet-eth from ROM (pre-overlay, not swappable); this
+# service replaces it cold (the network has not come up yet) => a real fresh
+# boot on the overlay .ko. Falls back to the ROM module so we never lose the net.
+START=15
+
+boot() {
+	LOG=/root/econet_swap.log
+	{
+		echo "swap $(date)"
+		M=/lib/modules/6.12.80
+		# Wait for the deps the ROM loads: on slow boots kmodloader
+		# (modules-boot.d) has not finished loading dsa_core + econet_eth when
+		# S15 runs, and the insmod below fails with "Unknown symbol". Waiting
+		# for econet_gsw here would hang ~40s every boot (the swap itself loads
+		# it, further down), so wait for dsa_core + econet_eth instead -> ~1s.
+		i=0
+		while [ $i -lt 15 ]; do
+			[ -d /sys/module/dsa_core ] && [ -d /sys/module/econet_eth ] && break
+			sleep 1
+			i=$((i+1))
+		done
+		echo "deps wait ${i}s: dsa_core=$([ -d /sys/module/dsa_core ] && echo ok) gsw=$([ -d /sys/module/econet_gsw ] && echo ok)"
+		# Tear the ROM stack down in reverse dep order, then bring it back up
+		# with modprobe (resolves the symbol graph; a bare insmod races and
+		# fails with Unknown symbol mt7530_*/dsa_register_switch on some boots).
+		rmmod econet_gsw_mdio 2>/dev/null
+		rmmod econet_gsw_mmio 2>/dev/null
+		rmmod econet_gsw 2>/dev/null
+		rmmod mtk_tag 2>/dev/null
+		rmmod econet_eth 2>/dev/null
+		# Swap in the overlay .ko and reload via modprobe (automatic deps).
+		insmod $M/econet-eth.ko || insmod /rom/lib/modules/6.12.80/econet-eth.ko || echo ETH_LOAD_FAIL
+		modprobe mtk-tag 2>/dev/null
+		modprobe econet-gsw 2>/dev/null
+		modprobe econet-gsw-mmio 2>/dev/null
+		modprobe econet-gsw-mdio 2>/dev/null
+		sleep 2
+		/etc/init.d/network restart 2>/dev/null
+		echo "crsn=$(ls /sys/module/econet_eth/parameters 2>/dev/null | grep -c crsn) lan=$(ip -br link 2>/dev/null | grep -c lan[0-9])"
+	} >> $LOG 2>&1
+}

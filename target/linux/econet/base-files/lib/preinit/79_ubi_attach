@@ -25,29 +25,23 @@ attach_and_premount_ubifs_overlay() {
 			echo "[ubi-hook] ubiattach failed" >/dev/console
 			return 0
 		}
-		# UBI attach is async-event-driven for /dev/ubi0_0 creation.
-		# Force mdev to populate /dev from /sys, then wait.
-		mdev -s 2>/dev/null
-		local i=0
-		while [ ! -e /dev/ubi0_0 ] && [ $i -lt 50 ]; do
-			usleep 100000 2>/dev/null || sleep 1
-			i=$((i + 1))
-			# nudge mdev periodically in case events are pending
-			[ $((i % 10)) -eq 0 ] && mdev -s 2>/dev/null
-		done
 	fi
-	if [ ! -e /dev/ubi0_0 ]; then
-		# Last resort: explicit mknod from /sys/class/ubi/ubi0_0/dev
-		local devmajmin
-		[ -r /sys/class/ubi/ubi0_0/dev ] && devmajmin=$(cat /sys/class/ubi/ubi0_0/dev)
-		if [ -n "$devmajmin" ]; then
-			local maj=${devmajmin%:*} min=${devmajmin#*:}
-			mknod /dev/ubi0_0 c "$maj" "$min" 2>/dev/null
-			echo "[ubi-hook] mknod ubi0_0 c $maj $min" >/dev/console
+	# ubiattach is a SYNCHRONOUS ioctl: by the time it returns, /sys/class/ubi/*
+	# already exists. Create the device nodes straight from sysfs. (This busybox
+	# has no usleep and no mdev, and there is no devtmpfs -> the old loop fell
+	# back to 'sleep 1' x50 = ~50s wasted.)
+	for n in ubi0 ubi0_0; do
+		if [ ! -e /dev/$n ] && [ -r /sys/class/ubi/$n/dev ]; then
+			dm=$(cat /sys/class/ubi/$n/dev)
+			mknod /dev/$n c "${dm%:*}" "${dm#*:}" 2>/dev/null
+			echo "[ubi-hook] mknod $n c ${dm%:*} ${dm#*:}" >/dev/console
 		fi
-	fi
-	[ -e /dev/ubi0_0 ] || { echo "[ubi-hook] /dev/ubi0_0 missing after mdev+mknod" >/dev/console; return 0; }
-	echo "[ubi-hook] /dev/ubi0_0 exists" >/dev/console
+	done
+	# belt-and-braces: a few short retries in case sysfs lags briefly
+	local i=0
+	while [ ! -e /dev/ubi0_0 ] && [ $i -lt 3 ]; do sleep 1; i=$((i + 1)); done
+	[ -e /dev/ubi0_0 ] || { echo "[ubi-hook] /dev/ubi0_0 missing" >/dev/console; return 0; }
+	echo "[ubi-hook] /dev/ubi0_0 exists (fast-path)" >/dev/console
 
 	# UBIFS-warmup trick: the kernel-time UBIFS mount via mount_root fails
 	# with -EINVAL when journal replay is needed. Mount + umount once here
