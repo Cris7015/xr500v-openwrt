@@ -27,6 +27,19 @@ cp -r "$REPO"/target/*  "$OWRT/target/"
 # kmod source edits don't auto-rebuild; clean the kmods we tweak so they recompile
 make -C "$OWRT" package/kernel/econet-eth/clean package/kernel/econet-pcm/clean package/kernel/mt76/clean >/dev/null 2>&1 || true
 
+# re-apply local feed patches (LuCI/etc. fixes not yet upstream). Idempotent —
+# git-apply --check skips ones already present — so this survives `feeds update`.
+# luci-base is cleaned afterwards so the patched source actually recompiles.
+applied=0
+for p in "$REPO"/patches/feeds/*/*.patch; do
+  [ -e "$p" ] || continue
+  feed="$(basename "$(dirname "$p")")"
+  if git -C "$OWRT/feeds/$feed" apply -p1 --check "$p" 2>/dev/null; then
+    git -C "$OWRT/feeds/$feed" apply -p1 "$p" && echo "  applied feed patch: ${p#"$REPO"/}" && applied=1
+  fi
+done
+[ "$applied" = 1 ] && make -C "$OWRT" package/feeds/luci/luci-base/clean >/dev/null 2>&1 || true
+
 echo "==> [2/3] make -j$JOBS ${*:-world}"
 cd "$OWRT"
 make -j"$JOBS" "${@:-world}"
