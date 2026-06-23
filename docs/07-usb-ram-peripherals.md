@@ -199,7 +199,15 @@ The full LED GPIO map (WPS=7, USB=11, GPON=2, ALARM=24, phone1=25, phone2=26, in
 
 The chassis has the usual physical controls — a recessed reset button and a WPS button (plus the power switch, which is a hard power control, not a GPIO input). The OEM firmware maps these to SoC GPIO inputs via its `tp_button`/`tp_gpio` configuration.
 
-**Current OpenWrt status:** the port does **not** yet declare a `gpio-keys` node — there is no `gpio-keys`/button node anywhere in `target/linux/econet/`, and no `KEY_RESTART`/`KEY_WPS` handling is wired. So under OpenWrt the reset and WPS buttons are presently inert (no `rfkill`/factory-reset/WPS trigger bound to them). The GPIO controller that would back them (the TC3162 block above) is fully functional, so adding a `gpio-keys` node with the correct input GPIOs and `linux,code` values (`KEY_RESTART`, `KEY_WPS_BUTTON`) is a straightforward follow-up; the exact input GPIO numbers should be read out of the OEM `tp_button` mapping (present in the extracted OEM config / driver logs) and confirmed empirically by polling `TC_DATA0/1` while pressing each button. This is an open gap, not a hardware limitation.
+**Current OpenWrt status (working).** All three buttons are wired up as a `gpio-keys-polled` node in the device tree — the TC3162 GPIO controller exposes no per-line interrupts, so the keys are polled and events are delivered by `kmod-gpio-button-hotplug`. The GPIO lines were read from the OEM `tp_btn_def` table and confirmed on the device, all active-low:
+
+| Button | GPIO | `linux,code` |
+|---|---|---|
+| Reset | 0 | `KEY_RESTART` |
+| Wi-Fi | 4 | `KEY_RFKILL` (toggles both radios) |
+| WPS | 9 | `KEY_WPS_BUTTON` |
+
+Wi-Fi and WPS are verified working (WPS needs a full `wpad`/`hostapd` with WPS support, e.g. `wpad-mbedtls`, and `option wps_pushbutton '1'` on the AP). **The Reset button's factory-reset path is confirmed working (2026-06-23):** holding Reset ≥ 5 s runs the standard handler (`jffs2reset -y && reboot`), which wipes the config back to defaults. Importantly, on this device's **UBI overlay** the reset re-initializes cleanly on the next boot — `mount_root` re-creates the UBIFS overlay (it does *not* fall back to tmpfs) — and the DSA LAN comes straight back up on the `board.d` default config, so no manual switch reconfiguration is needed after a reset.
 
 ---
 
