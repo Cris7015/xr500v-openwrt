@@ -19,10 +19,33 @@ attach_and_premount_ubifs_overlay() {
 	[ -n "$mtdnum" ] || { echo "[ubi-hook] no mtdnum (openwrt_ubi missing)" >/dev/console; return 0; }
 	echo "[ubi-hook] mtdnum=$mtdnum (openwrt_ubi)" >/dev/console
 
-	# Attach UBI if not already attached
-	if [ ! -e /dev/ubi0_0 ]; then
-		ubiattach -m "$mtdnum" -d 0 >/dev/console 2>&1 || {
-			echo "[ubi-hook] ubiattach failed" >/dev/console
+	# Attach UBI. On a factory-fresh / web-flashed / wiped unit the partition
+	# holds no valid UBI yet, so ubiattach fails -> format it and attach the
+	# fresh UBI (first-boot auto-provision). Without this the overlay falls
+	# back to a RAM-only tmpfs and configuration does not persist.
+	if [ ! -d /sys/class/ubi/ubi0 ]; then
+		if ! ubiattach -m "$mtdnum" -d 0 >/dev/console 2>&1; then
+			echo "[ubi-hook] no valid UBI -> ubiformat (first provision)" >/dev/console
+			ubiformat "/dev/mtd$mtdnum" -y >/dev/console 2>&1
+			ubiattach -m "$mtdnum" -d 0 >/dev/console 2>&1 || {
+				echo "[ubi-hook] ubiattach failed after format" >/dev/console
+				return 0
+			}
+		fi
+	fi
+
+	# Create the rootfs_data volume if the (freshly formatted) UBI has none yet.
+	if [ ! -d /sys/class/ubi/ubi0_0 ]; then
+		# ubimkvol talks to the /dev/ubi0 control node, but the mknod loop
+		# below only runs afterwards -> create that node here first.
+		if [ ! -e /dev/ubi0 ] && [ -r /sys/class/ubi/ubi0/dev ]; then
+			dm=$(cat /sys/class/ubi/ubi0/dev)
+			mknod /dev/ubi0 c "${dm%:*}" "${dm#*:}" 2>/dev/null
+			echo "[ubi-hook] mknod ubi0 c ${dm%:*} ${dm#*:} (for mkvol)" >/dev/console
+		fi
+		echo "[ubi-hook] no rootfs_data volume -> ubimkvol (first provision)" >/dev/console
+		ubimkvol /dev/ubi0 -N rootfs_data -m >/dev/console 2>&1 || {
+			echo "[ubi-hook] ubimkvol failed" >/dev/console
 			return 0
 		}
 	fi
