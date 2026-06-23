@@ -26,7 +26,8 @@ a fact was only partially verified, it is marked as such rather than overstated.
 
 These pages were drafted from point-in-time reverse-engineering notes of differing ages,
 so individual claims reflect the state at the time each was written. The overall status
-table below, and in particular the LED, Wi-Fi and VoIP rows, is current as of **2026-05-30**.
+table below is current as of **2026-06-22**, and now reflects the working hardware NAT
+offload (PPE/HNAT) and the FXS telephony, both validated since the earlier notes.
 "Working" means observed on the running device; facts that were only partially verified are
 labelled as such inline. Throughput figures are noted with the test configuration they were
 measured in, because the device's role and the measurement path materially change the number.
@@ -40,7 +41,9 @@ measured in, because the device's role and the measurement path materially chang
 | Boot to console (UART, A/B slot) | Working | 03 | Slot A = stock OEM, slot B = OpenWrt; selected by `bflag` |
 | Ethernet — 4× GbE LAN | Working | 04 | Nested dual-switch DSA; HW switching at near line rate, CPU idle |
 | LAN TX throughput (device as endpoint) | Working | 04 | ~161 Mbps after the BQL fix (was ~5 Mbps); see throughput note below |
-| Software forwarding | Working | 04 | ~590 Mbps bidirectional measured in a dedicated router test configuration; HW NAT (PPE) offload not integrated |
+| Software forwarding | Working | 04 | ~590 Mbps bidirectional in a router test configuration (CPU-bound software path) |
+| **HW-NAT — PPE flow offload** | Working (experimental) | 04 | Auto-arms at boot; **LAN↔LAN ~929 Mbit/s wire-speed**, WAN→LAN PPPoE download ~678 Mbps, CPU idle. Not yet long-soak-tested |
+| **Wi-Fi HW forwarding (WHNAT)** | Working (experimental) | 05 | PPE NATs in HW + CPU re-injects to the radio; forwarded UDP ~514 Mbit/s (OEM-class) |
 | Wi-Fi 5 GHz | Working | 05 | MT7662 / `mt76x2e`, AP VHT80, up to 20 dBm from factory EEPROM |
 | Wi-Fi 2.4 GHz | Working | 05 | MT7603 / `mt7603e`, second PCIe radio; required OEM PCIe reset + synthetic EEPROM |
 | USB | Working | 07 | xHCI; USB2 mass storage = `/dev/sda`; USB3 has no wired T-PHY |
@@ -56,8 +59,9 @@ measured in, because the device's role and the measurement path materially chang
 > as an L2 node on a switch and was not in the internet path. The validated end-to-end
 > figure with the device acting as the iperf3 *endpoint* is asymmetric and CPU-bound:
 > roughly **TX 153 / RX 76 Mbps** over a single LAN port (CPU saturated, RX software path
-> the more expensive direction). HW NAT (PPE) offload is not yet integrated, which is the
-> path to higher routed throughput.
+> the more expensive direction). Those are the **software** path; the **PPE hardware NAT
+> offload is now integrated and auto-arms at boot**, so routed/forwarded flows run at
+> wire-speed with the CPU idle — LAN↔LAN ~929 Mbit/s, WAN→LAN PPPoE download ~678 Mbps.
 
 ---
 

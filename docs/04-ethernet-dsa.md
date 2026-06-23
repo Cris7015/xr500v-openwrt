@@ -185,17 +185,23 @@ Three distinct numbers are easy to conflate, so to be precise about what is veri
 
 In the configuration under which it normally runs, the device is an **L2 bridge node** (no firewall, management IP on `br-lan`) and is *not* in any internet forwarding path, so the ~590 Mbps forwarding figure should be read as a capability of the data path under test, not a number observed during day-to-day use.
 
-## PPE / HNAT hardware offload (port status)
+## PPE / HNAT hardware NAT offload (working)
 
-To push CPU-routed *forwarding* from ~160 Mbps toward ~600 Mbps line rate, the main path is the MediaTek **PPE/HNAT** hardware packet-offload engine that the OEM uses and the public fork left as a TODO. The EN751221 PPE classifies as **mt7622-class**: `offload_version = 2`, FoE entry **V1 / 80 bytes**, 16384 entries. Evidence it's portable: the RX descriptor already carries `crsn` (CPU reason) and `ppe_entry` (14-bit = 16384, exactly `MTK_PPE_ENTRIES`); the PPE register block is mapped at `BFB50C00` with a separate accounting block at `BFB52000`; and all `mtk_ppe_regs.h` offsets fit the 1 KB window.
+The device offloads forwarded/NATed traffic to the MediaTek **PPE/HNAT** hardware flow engine — the same one the OEM uses, which the public fork left as a TODO. The EN751221 PPE is **mt7622-class**: `offload_version = 2`, FoE entry **V1 / 80 bytes**, 16384 entries, register block at `BFB50C00` (accounting at `BFB52000`); the mainline `mtk_ppe_regs.h` offsets match the silicon as-is. As of **2026-06-21** the full path is **functional and auto-arms at boot** — marked *experimental* (committed, not yet long-soak-tested; fall back to `flow_offloading_hw=0` if you hit issues).
 
-Progress so far (these patches live in git history at commit `39fb218`, **not** in the functional build):
+**Measured (HW offload, CPU idle):**
 
-- **Phase 1 — PPE init (done, patch 340):** allocates the 16384×80B FoE table (1.28 MB) via `dmam_alloc_coherent`, writes `TB_BASE`/`TB_CFG`/aging/rate/flow_cfg. Key confirmation: `TB_BASE` and `TB_CFG` read back exactly as written → the mainline `mtk_ppe_regs.h` offsets match the EN751221 as-is. No LAN regression.
-- **Phase 2a — engine alive (done, patch 350):** the hardware tags every RX packet with `crsn = 0x1e = PPE_BYPASS` plus a per-flow `ppe_entry` hash → the PPE is *alive and processing ingress*, but the **GDM bypasses it** (sends ingress straight to the CPU without a flow lookup).
-- **Phase 3 — GDM steering + flowtable + routing (pending, the hard one):** configure the GDM `fwd_cfg` to steer unicast ingress into the PPE instead of bypass (the `econet_port.c` TODO), port `mtk_ppe_offload.c` (register a flow block via `TC_SETUP_FT`, build V1 FoE entries), and handle `crsn == 0x0f` (HIT_UNBIND_RATE_REACHED) to auto-bind. Testing it also requires reconfiguring the device as an actual *router* (WAN + separate LAN subnet + NAT + a client behind a LAN port) so there are offloadable flows.
+- **LAN ↔ LAN** (user port): **~929 Mbit/s, wire-speed**; CPU ~95 % idle, ~99 % of traffic on the HW path.
+- **WAN → LAN** PPPoE download (over the ethernet-WAN GPON bypass): **~678 Mbit/s** (Movistar line rate), RX-CPU flat.
+- LAN → WAN upload is offloaded the same way.
 
-The patches were **removed from the working build deliberately**: software forwarding already gives ~590 Mbps in the router test configuration, which is adequate for typical residential links, so HW NAT offload is not required for throughput. PPE remains a future optimization, not a blocker. (A cheaper interim option — `uci firewall flow_offloading=1` software offload — could give roughly 2× without the HW port.)
+**How it was solved (patches, all committed):**
+
+- **PPE init + auto-arm** (patch 378 core + 381): allocate the 16384×80 B FoE table, program `TB_BASE`/`TB_CFG`/aging/flow_cfg, and **arm the engine inside the flowtable `FLOW_BLOCK_BIND`** so it comes up by itself at boot — no manual poke. `TB_BASE`/`TB_CFG` read back as written → the offsets are correct.
+- **Root cause** (patch 393, commit `dc92ba6`): `en75_flow_offload_replace` was **not encoding the egress DSA port**, so `l2.etype` carried no port bitmap, the MT7530 fell back to ARL-by-MAC, and only one port resolved while the rest black-holed — the long-hunted "only p2 works" bug. The fix derives the egress port from `FLOW_ACTION_REDIRECT.dev` (`dsa_port_from_netdev`); the FoE register then shows `etype=0x88 odev=lan2`. The **same egress-port bug** was what blocked the WAN→LAN download, so patch 393 fixed both at once.
+- **Symmetric teardown** (patch 394, commit `5c9ef77`): repeatedly toggling `flow_offloading` (none/sw/hw) under load used to hang the router — the BIND armed the engine but the UNBIND never disarmed it. The fix de-steers GDM1 back to the CPU and flushes the FoE on UNBIND.
+
+**Operational notes.** The reliable oracle for "is it offloading" is a **flat RX-CPU under load** (plus the throughput), *not* the `RXHWF` counter — which can read 0 while HW is forwarding. `econet` loads from `modules-boot.d`/squashfs *before* the overlay, so the offload `.ko` must be **flashed into `rootfs1`**; an overlay deploy does not take effect. A separate Wi-Fi half-offload (**WHNAT**) NATs in HW and lets the CPU re-inject to the radio (forwarded UDP ~514 Mbit/s, OEM-class). Full recipe + gotchas live in the fork's `tools/xr500v/whnat/MURAL-HWNAT.md`.
 
 ## Cross-references
 

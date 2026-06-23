@@ -75,6 +75,67 @@ Notes:
 - In the historical RE backup, the partitions were dumped as `mtd1_boot.bin` … `mtd9_bootflag.bin` (see [Backups & recovery](#backups--recovery-artifacts)); `misc` corresponds to `mtd5_misc.bin`. The numbering there is the dump order, not the DTS partition index.
 - The `misc` partition supplies the real factory MAC (offset 0xf100) and MT7662 calibration EEPROM (offset 0xe0000) via DT nvmem cells; see [05-wifi-mt7603-mt7662.md](05-wifi-mt7603-mt7662.md).
 
+### Visual flash map
+
+The dual-boot **A/B** layout at a glance. Slot A keeps the **untouched stock OEM firmware** as a recovery anchor; OpenWrt lives entirely in slot B; the writable overlay is a dedicated UBI partition in the formerly-empty tail. This is **not** a typical OpenWrt layout (most devices replace the firmware outright) — it is exactly what makes the XR500v recoverable from any soft brick.
+
+```
+0x0000000 ┌────────────────────────────────────┐
+          │  boot           256 KB   bldr       │  RO — damage = HARD BRICK
+0x0040000 ├────────────────────────────────────┤
+          │  romfile        256 KB   OEM config │  RO
+0x0080000 ╞════════════════════════════════════╡ ┐
+          │  kernel           3 MB   stock      │ │  🅰 SLOT A
+0x0380000 ├────────────────────────────────────┤ │     stock OEM, left
+          │  rootfs_stock    16 MB   stock      │ │     intact = recovery
+0x1380000 ╞════════════════════════════════════╡ ┘
+          │  misc           4.5 MB   EEPROM+MAC │  RO — WiFi cal + MAC (nvmem)
+0x1800000 ╞════════════════════════════════════╡ ┐
+          │  kernel1          3 MB   OpenWrt    │ │  🅱 SLOT B
+0x1b00000 ├────────────────────────────────────┤ │     OpenWrt
+          │  rootfs1         16 MB   OpenWrt    │ │     (squashfs · linux,rootfs)
+0x2b00000 ╞════════════════════════════════════╡ ┘
+          │  others        4.96 MB   reserve    │  OEM data — do not overwrite
+0x2fe0000 ├────────────────────────────────────┤
+          │  bootflag       128 KB   A/B sel    │  `DUAL` magic · bldr-referenced
+0x3000000 ╞════════════════════════════════════╡  ◄── factory free space starts
+          │  openwrt_ubi     64 MB   overlay    │  OpenWrt addition · UBI · persistent
+0x7000000 └────────────────────────────────────┘
+            0x7000000–0x8000000 (16 MB) = BMT reserve / unallocated
+```
+
+At runtime `mtdsplit` also exposes a virtual `rootfs_data` sub-partition (the free space *after* the squashfs inside `rootfs1`). It is unused here because the writable overlay is the dedicated `openwrt_ubi` (UBI) volume, not the squashfs tail — so on this device `rootfs_data` stays empty.
+
+### DTS source (canonical)
+
+The map above is declared **once**, as a standard `fixed-partitions` node, in the device tree (`target/linux/econet/dts/en751221_tplink_archer-xr500v.dts`); `/proc/mtd` and this page both derive from it:
+
+```dts
+&nand {
+	status = "okay";
+	econet,bmt;                          /* TrendChip bad-block-table */
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0       { label = "boot";         reg = <0x0000000 0x0040000>; read-only; };
+		partition@40000   { label = "romfile";      reg = <0x0040000 0x0040000>; read-only; };
+		partition@80000   { label = "kernel";       reg = <0x0080000 0x0300000>; read-only; };    /* slot A */
+		partition@380000  { label = "rootfs_stock"; reg = <0x0380000 0x1000000>; read-only; };    /* slot A */
+		partition@1380000 { label = "misc";         reg = <0x1380000 0x0480000>; read-only;
+			nvmem-layout { compatible = "fixed-layout"; /* mac-base @0xf100, MT7662 eeprom @0xe0000 */ };
+		};
+		partition@1800000 { label = "kernel1";      reg = <0x1800000 0x0300000>; };               /* slot B */
+		partition@1b00000 { label = "rootfs1";      reg = <0x1b00000 0x1000000>; linux,rootfs; };  /* slot B */
+		partition@2b00000 { label = "others";       reg = <0x2b00000 0x04e0000>; };
+		partition@2fe0000 { label = "bootflag";     reg = <0x2fe0000 0x0020000>; };
+		partition@3000000 { label = "openwrt_ubi";  reg = <0x3000000 0x4000000>; };               /* overlay */
+	};
+};
+```
+
 ---
 
 ## TrendChip image header & the patcher
