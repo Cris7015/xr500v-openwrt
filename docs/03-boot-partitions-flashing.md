@@ -239,9 +239,17 @@ The patched `sysupgrade.bin` is split into the two partition payloads:
 6. bflag set 1, power-cycle (no intercept) -> OpenWrt
 ```
 
+### Web install (stock web UI, no UART)
+
+The TFTP path above needs UART access to flip `bflag`, which a typical owner does not have. The UART-free alternative is to re-wrap the OpenWrt image so the **stock** firmware-upgrade web page accepts it. The project's `make_web_image.py` takes the **trendchip-patched** sysupgrade plus the OEM kernel's HGW header and emits a full partition-layout image (`0x1300000` = kernel1 + rootfs1) carrying a checksum that both the stock web validator and the bootloader accept. Upload it through the stock *Firmware Upgrade* page → it writes slot B, sets `bflag = 1`, and reboots into OpenWrt — no UART, no telnet.
+
+> ⚠️ The input MUST be the **trendchip-patched** sysupgrade (`-patched.bin`), not the raw one. The bootloader reads the rootfs pointer from the trendchip header; with a raw image that field is `0xFF`, so the loader decompresses the kernel and then crashes with `kernel_rootfs_ptr to FFFFFFFF` → Undefined Exception. The packager should print `trendchip : 4c3d2e1f aa55aa55`, not `ffffffff`.
+
+A factory-fresh unit therefore goes **virgin → web-flash → persistent OpenWrt** with zero manual steps (the overlay auto-provisions, below). Recovery from any bad flash is always the UART route: intercept the bootloader, `bflag set 0`, power-cycle → stock (slot A is never written).
+
 ### First-boot UBI provisioning
 
-On a freshly flashed device the `openwrt_ubi` partition is empty, so `mount_root` falls back to tmpfs. UBI is provisioned once per device from the running OpenWrt (it is intentionally **not** pre-loaded from stock — pushing a UBI image through the OEM flash path corrupts the OOB and makes mainline UBI mark good PEBs as bad). After the first OpenWrt boot:
+On a freshly flashed (or web-flashed, or wiped) device the `openwrt_ubi` partition holds no valid UBI. The preinit hook `lib/preinit/79_ubi_attach` **auto-provisions** it on first boot: if `ubiattach` fails it runs `ubiformat`, and if the `rootfs_data` volume is missing it creates it with `ubimkvol` (after `mknod`-ing the `/dev/ubi0` control node first) — so the box comes straight up with a persistent UBIFS overlay, no manual step. (UBI is intentionally **not** pre-loaded from stock — pushing a UBI image through the OEM flash path corrupts the OOB and makes mainline UBI mark good PEBs as bad.) The equivalent manual sequence, kept here for debugging:
 
 ```sh
 ubiformat /dev/mtd<openwrt_ubi> -y        # one time

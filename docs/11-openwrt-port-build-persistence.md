@@ -186,11 +186,11 @@ Pre-loading a UBI image through stock `mtd writeflash` does **not** work: the OE
 
 These two kernel patches plus the preinit hook are exactly what any first EN751221 device combining a UBIFS overlay with `can-write-factory-bbt` needs, and are upstreamable to `cjdelisle/openwrt`.
 
-### First-boot provisioning (the gotcha)
+### First-boot provisioning (automatic)
 
-The preinit hook **attaches and mounts** an existing `rootfs_data` volume — it does **not create** one. After a fresh flash the UBI partition is empty, so the hook logs "missing /dev/ubi0_0", `mount_root` falls back to tmpfs, and every `uci commit` is lost on reboot. This is the single most common "why didn't my config persist" symptom.
+The preinit hook now **self-provisions** the UBI on first boot: it attaches `openwrt_ubi`, `ubiformat`s the partition if no valid UBI is present, then creates the `rootfs_data` volume with `ubimkvol` if it is missing. A factory-fresh / web-flashed / wiped device comes straight up with a persistent UBIFS overlay — no manual step, no tmpfs fallback. (Historically the hook only *attached* an existing volume and did not create one, so a fresh flash fell back to tmpfs and lost every `uci commit` — the most common "why didn't my config persist" symptom. Resolved.)
 
-Provision **once per device**, from running OpenWrt, on the slot-B rootfs partition (the mtd number is the slot-B `rootfs1` — historically `mtd7`; on a repartitioned image with a dedicated `openwrt_ubi` slot it is e.g. `mtd10`, so confirm with `cat /proc/mtd`):
+The equivalent manual sequence, kept as a debugging reference (confirm the mtd number with `cat /proc/mtd` — it is the dedicated `openwrt_ubi` slot, e.g. `mtd10`):
 
 ```sh
 ubidetach -m <mtd> 2>/dev/null
@@ -203,7 +203,7 @@ reboot
 
 After this one-time step the preinit hook finds `/dev/ubi0_0` on every boot, the warmup runs, `mount_root` sets up `overlayfs:/overlay on /` over UBIFS, and config (and live-installed modules — the whole VoIP stack reloads from `/lib/modules` + `rc.local` without reflashing) persists across reboots. Confirmed surviving reboots after the ~28-iteration bring-up.
 
-> A permanent fix is noted as pending: add `if [ ! -e /dev/ubi0_0 ]; then ubimkvol /dev/ubi0 -N rootfs_data -m; fi` to the hook after `ubiattach`, making provisioning automatic. The manual one-time step is kept for now because flashing is occasional.
+> **Done (2026-06-23).** `lib/preinit/79_ubi_attach` now auto-provisions: `ubiformat` when `ubiattach` fails (no valid UBI), and `ubimkvol` when the `rootfs_data` volume is missing — creating the `/dev/ubi0` control node first, since `ubimkvol` needs it and the original `mknod` loop ran afterwards. Verified end-to-end on real hardware: web-flashed onto a zeroed `openwrt_ubi` → first boot auto-provisions and mounts the persistent overlay. The manual sequence above is now only a debugging reference.
 
 ### Reflashing without losing the overlay
 
