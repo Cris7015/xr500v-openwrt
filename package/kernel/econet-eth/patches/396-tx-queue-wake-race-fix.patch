@@ -1,0 +1,70 @@
+econet-eth: fix permanent conduit TX stall under software forwarding
+
+The conduit netdev (eth0) is allocated with 256 TX queues but every one of
+them -- and every DSA user-port egress -- funnels into a single hardware
+ring, q_tx[0] (en75_dev_xmit() hardcodes qid 0). There is no
+ndo_select_queue, so the stack scatters forwarded flows across all 256
+queues. Flow control is per-queue: en75_dev_xmit() stops the queue of the
+packet that hit a full ring, and en75_poll_tx_complete() wakes only the
+queue of the skb it just freed.
+
+The stop path (-EBUSY) returns *before* the skb is posted to the ring, so a
+queue stopped on ring-full holds no in-flight descriptor. No future
+completion can ever carry that queue's mapping, so its wake condition is
+never evaluated; the ring drains via other queues' completions while the
+stranded queue stays DRV_XOFF forever. There is no ndo_tx_timeout to reset
+it, so it is permanent until reboot. Under sustained software forwarding
+(no hardware offload) the ring fills constantly and a high-rate flow keeps
+hashing onto the dead queue -- the LAN port freezes at ~150 Mbit/s with
+packets stuck in the qdisc. Hardware NAT never hits this: the PPE does the
+egress and the conduit ring is barely used.
+
+The gating resource (ring space) is global to all 256 queues, so the wake
+must be too. Keep the per-skb BQL accounting, but after the drain loop wake
+all of the conduit's queues. netif_tx_wake_all_queues() only clears
+DRV_XOFF, not BQL's STACK_XOFF, so the anti-bufferbloat tuning (the BQL
+min-limit) is preserved; if the ring re-fills, the next xmit re-stops the
+queue and the next completion re-wakes it (self-healing).
+
+Signed-off-by: Cristian Papa <pcristian292@gmail.com>
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -1067,6 +1067,7 @@
+ 	struct qregs_doneq_state state;
+ 	struct en75_tx_doneq *done_q;
+ 	struct en75_qdma *qdma;
++	struct net_device *wake_dev = NULL;
+ 	int id, irq_queued;
+ 	u32 done = 0, head;
+ 
+@@ -1138,13 +1139,28 @@
+ 			txq = netdev_get_tx_queue(skb->dev,
+ 						  skb_get_queue_mapping(skb));
+ 			netdev_tx_completed_queue(txq, 1, skb->len);
+-			if (netif_tx_queue_stopped(txq))
+-				netif_tx_wake_queue(txq);
++			/* All of this netdev's TX queues funnel into the single
++			 * HW ring q_tx[0]; the gating resource (ring space) is
++			 * shared. A queue stopped on ring-full holds no
++			 * descriptor of its own (en75_qdma_xmit returns -EBUSY
++			 * before posting the skb), so it can never generate a
++			 * completion to wake itself -> permanent stall. Defer a
++			 * device-wide wake to after the drain loop instead of the
++			 * per-queue wake. */
++			wake_dev = skb->dev;
+ 		}
+ 
+ 		dev_kfree_skb_any(skb);
+ 	}
+ 
++	/* Freed at least one ring slot: wake every TX queue of the conduit so
++	 * the descriptor-less stranded queue(s) restart. netif_tx_wake_all_queues
++	 * only clears DRV_XOFF (not BQL's STACK_XOFF), so the BQL throttle from
++	 * patch 330 is preserved; if the ring re-fills, the next xmit re-stops
++	 * the queue and the next completion re-wakes it (self-healing). */
++	if (wake_dev)
++		netif_tx_wake_all_queues(wake_dev);
++
+ 	if (done) {
+ 		int i, len = done >> 7;
+ 
