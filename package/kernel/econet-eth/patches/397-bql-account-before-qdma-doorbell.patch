@@ -1,0 +1,188 @@
+econet-eth: account BQL before ringing QDMA TX doorbell
+
+The TX completion path calls netdev_tx_completed_queue(), which ends in
+dql_completed().  That code BUG_ONs if the driver completes more bytes than
+were queued.
+
+en75_dev_xmit() posted the descriptor and rang the QDMA doorbell inside
+en75_qdma_xmit(), then only afterwards called netdev_tx_sent_queue().  On this
+SoC small packets can complete very quickly, and the threaded TX done NAPI can
+run before en75_dev_xmit() reaches the enqueue-side BQL accounting.  The result
+is a legitimate completion racing ahead of the accounting and tripping:
+
+  dql_completed: BUG_ON(count > num_queued - dql->num_completed)
+
+Keep the accounting tied to the descriptor itself and perform the enqueue-side
+BQL update immediately before the QDMA doorbell.  Completion then uses the
+stored netdev_queue/length rather than skb->dev at completion time; that also
+keeps direct internal QDMA users, such as the WHNAT probe, out of BQL unless
+the normal netdev xmit path explicitly supplied a TX queue.
+
+Also stop the selected netdev queue before the doorbell when this descriptor
+consumes the last free slot.  That closes the companion stop/wake race where a
+very fast completion could wake queues before en75_dev_xmit() got around to
+stopping the just-filled queue.
+
+--- a/econet_eth.h
++++ b/econet_eth.h
+@@ -203,7 +203,8 @@
+ int en75_qdma_unuse(struct en75_qdma *qdma);
+ int en75_qdma_destroy(struct en75_qdma *qdma);
+ int en75_qdma_xmit(struct en75_qdma *qdma, struct sk_buff *skb,
+-		   union desc_msg *msg, int qid);
++		   union desc_msg *msg, int qid, struct netdev_queue *txq,
++		   unsigned int bql_len);
+ 
+ 
+ /* patch 383: WHNAT TX probe (Phase 0 fail-fast) -- fire a synthetic frame at
+--- a/econet_port.c
++++ b/econet_port.c
+@@ -268,7 +268,7 @@
+ 	 * commit the full bind. Gated cheap inside (ppe_tx_hook + 50ms). */
+ 	en75_ppe_tx_maybe_bind(en75_the_ppe, skb);
+ 
+-	ret = en75_qdma_xmit(port->qdma, skb, &msg, 0);
++	ret = en75_qdma_xmit(port->qdma, skb, &msg, 0, txq, len);
+ 
+ 	if (ret == -EBUSY) {
+ 		/* TX ring full: en75_qdma_xmit() returns -EBUSY *before*
+@@ -288,10 +288,13 @@
+ 	if (ret < 0)
+ 		goto error;
+ 
+-	netdev_tx_sent_queue(txq, len);
+-
+-	if (ret == EBUSY)
+-		netif_tx_stop_queue(txq);
++	if (ret == EBUSY) {
++		/* Descriptor was posted and BQL was accounted inside
++		 * en75_qdma_xmit(); the queue was stopped before ringing the
++		 * doorbell so a fast completion cannot wake-before-stop.
++		 */
++		return NETDEV_TX_OK;
++	}
+ 
+ 	return NETDEV_TX_OK;
+ 
+--- a/econet_qdma.c
++++ b/econet_qdma.c
+@@ -81,6 +81,9 @@
+ /* The non-dma part of TX packet descriptor */
+ struct en75_q_tx_ent {
+ 	struct sk_buff			*skb;
++	struct netdev_queue		*txq;
++	struct net_device		*wake_dev;
++	unsigned int			bql_len;
+ 	dma_addr_t			dma_addr;
+ 	u16				dma_len;
+ 	u16				freelist_next;
+@@ -1085,8 +1088,10 @@
+ 		struct en75_q_tx_ent *e;
+ 		struct en75_q_tx *q;
+ 		struct netdev_queue *txq;
++		struct net_device *dev;
+ 		struct sk_buff *skb;
+ 		struct desc desc;
++		unsigned int bql_len;
+ 
+ 		if (val == 0xffffffffU)
+ 			break;
+@@ -1118,6 +1123,9 @@
+ 
+ 		e = &q->entry[index];
+ 		skb = e->skb;
++		txq = e->txq;
++		dev = e->wake_dev;
++		bql_len = e->bql_len;
+ 
+ 		dma_unmap_single(qdma->dev, e->dma_addr, e->dma_len,
+ 				 DMA_TO_DEVICE);
+@@ -1135,10 +1143,8 @@
+ 		/* Probe skbs use the dummy NAPI netdev and have no BQL
+ 		 * enqueue side, so only free them.
+ 		 */
+-		if (skb->dev != qdma->napi_dev) {
+-			txq = netdev_get_tx_queue(skb->dev,
+-						  skb_get_queue_mapping(skb));
+-			netdev_tx_completed_queue(txq, 1, skb->len);
++		if (txq) {
++			netdev_tx_completed_queue(txq, 1, bql_len);
+ 			/* All of this netdev's TX queues funnel into the single
+ 			 * HW ring q_tx[0]; the gating resource (ring space) is
+ 			 * shared. A queue stopped on ring-full holds no
+@@ -1147,7 +1153,7 @@
+ 			 * completion to wake itself -> permanent stall. Defer a
+ 			 * device-wide wake to after the drain loop instead of the
+ 			 * per-queue wake. */
+-			wake_dev = skb->dev;
++			wake_dev = dev;
+ 		}
+ 
+ 		dev_kfree_skb_any(skb);
+@@ -1266,7 +1272,8 @@
+ }
+ 
+ int en75_qdma_xmit(struct en75_qdma *qdma, struct sk_buff *skb,
+-		   union desc_msg *msg, int qid)
++		   union desc_msg *msg, int qid, struct netdev_queue *txq,
++		   unsigned int bql_len)
+ {
+ 	struct en75_q_tx *q = &qdma->q_tx[qid];
+ 	int len = skb_headlen(skb);
+@@ -1274,6 +1281,7 @@
+ 	u16 index, next_index;
+ 	struct desc *desc;
+ 	dma_addr_t addr;
++	bool ring_full;
+ 	int ret;
+ 
+ 	guard(spinlock_bh)(&q->lock_bh);
+@@ -1301,12 +1309,29 @@
+ 
+ 	e->skb = skb;
+ 	e->dma_addr = addr;
++	e->txq = txq;
++	e->bql_len = bql_len;
++	e->wake_dev = txq ? skb->dev : NULL;
+ 	e->dma_len = len;
+ 	q->freelist_head = next_index;
+ 
+ 	skb_tx_timestamp(skb);
+ 
+ 	en75_icmp_phase_tx(skb, qid, index);
++	ring_full = q->entry[next_index].freelist_next == 0xffff;
++
++	/* BQL must be visible before the hardware can complete this descriptor.
++	 * Otherwise the TX done NAPI can race ahead and dql_completed() will see
++	 * more completed bytes than queued bytes. If this descriptor fills the
++	 * ring, stop the queue before the doorbell for the same reason: a fast
++	 * completion must not wake the queue before we stop it.
++	 */
++	if (txq) {
++		netdev_tx_sent_queue(txq, bql_len);
++		if (ring_full)
++			netif_tx_stop_queue(txq);
++	}
++
+ 	en75_wreg((u32)next_index, &q->qchain_regs->tx_cpui);
+ 
+ 	if (q->debug_tx_cnt) {
+@@ -1318,8 +1343,7 @@
+ 		q->debug_tx_cnt[chq]++;
+ 	}
+ 
+-	return q->entry[next_index].freelist_next == 0xffff ?
+-		EBUSY : 0;
++	return ring_full ? EBUSY : 0;
+ }
+ 
+ /* patch 383: WHNAT TX probe (Phase 0 fail-fast).
+@@ -1393,7 +1417,7 @@
+ 	msg.raw[0] = msg0;
+ 	msg.raw[1] = msg1;
+ 
+-	ret = en75_qdma_xmit(qdma, skb, &msg, 0);
++	ret = en75_qdma_xmit(qdma, skb, &msg, 0, NULL, 0);
+ 	pr_info("XR500v WHNAT probe seq=%u vid=%u tag=%u imm=%d da=%pM msg=%08x/%08x -> ret=%d\n",
+ 		seq, vid, tag, set_imm, dst_mac, msg0, msg1, ret);
+ 	seq++;
