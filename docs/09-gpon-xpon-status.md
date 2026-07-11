@@ -21,6 +21,13 @@
 > with rogue-ONU and Tx-SD clear.  Its uninitialised LOS bit is **not** evidence
 > of an optical signal.  See
 > [`notes/2026-07-10-gpon-no-olt-phase2-passive-status.md`](../notes/2026-07-10-gpon-no-olt-phase2-passive-status.md).
+> Phase 3 made the xPON MMIO probe a persistent DT platform driver, extended
+> the TX safety snapshot, and identified the OEM physical TX-disable gate as
+> active-high GPIO16.  The live router now confirms both independent inhibits:
+> GPIO16 is an asserted output and `PHYSET3.TXEN` is clear.  An audit also shows
+> why Merbanan's current PON-PHY driver cannot be loaded as a passive probe: its
+> `probe()` performs mode/reset/counter/IRQ writes.  See
+> [`notes/2026-07-10-gpon-no-olt-phase3-xpon-platform-baseline.md`](../notes/2026-07-10-gpon-no-olt-phase3-xpon-platform-baseline.md).
 
 GPON is the one major subsystem of the Archer XR500v that does **not** work under the OpenWrt port. The key fact for this subsystem is that this is not for lack of source code: the OEM xPON/GPON driver for the EN751221 exists as full, readable C in the same 2.6.36 `tclinux_phoenix` OEM tree the [VoIP/FXS driver](06-voip-fxs-telephony.md) was reconstructed from — roughly 55,000 lines across `xpon` (~43,700 LOC) and `xpon_phy` (~11,700 LOC), including a ~210 KB MAC register header (`epon_mac_reg_c_header_en7521.h`) with ~1,574 register definitions for exactly this chip, and covering both EPON (MPCP) and GPON (OMCI) modes. GPON is unported because of scale and testability, not missing or blob code:
 
@@ -116,6 +123,13 @@ Notes on this:
   claim of optical link.  There is still **no** functional xPON MAC node, xPON
   PHY/SerDes driver, PLOAM data path or OMCI stack.  The `green:gpon` LED
   remains a static placeholder.
+- A second diagnostic-only platform node owns the xPON PHY window at
+  `0x1faf0000`.  It persistently snapshots mode/FSM/sync, analogue status,
+  interrupt state and all known TX generators without writing or latching
+  anything.  It also reserves GPIO16 `TX_DISABLE` with `GPIOD_ASIS`; the live
+  state is output-high/asserted while `PHYSET3.TXEN`, PRBS, test-frame and
+  rogue-test enables are clear.  This is the fail-closed baseline for a later
+  RX-only init prototype, not an active PHY driver.
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 

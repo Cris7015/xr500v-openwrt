@@ -41,6 +41,19 @@
 		};
 	};
 
+	/* Persistent read-only snapshot of the xPON PHY/SerDes block.  This is a
+	 * diagnostic binding, not the active PHY driver: it has no IRQ, reset,
+	 * clock, TX, counter-latch, or register-write path. */
+	xpon_phy_diag: xpon-phy@1faf0000 {
+		compatible = "econet,en751221-xpon-phy-diag";
+		reg = <0x1faf0000 0x1000>;
+		/* OEM userfs/led.conf maps LED_PHY_TX_POWER_DISABLE to GPIO16;
+		 * asserted high.  The diagnostic requests it GPIOD_ASIS and never
+		 * changes its direction or level. */
+		tx-disable-gpios = <&gpio 16 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+
 	/* build #63: reserved high region for the PPE FoE table, OEM-style
 	 * (OEM PpeFoeBase = ioremap(0x0dc00000)). no-map -> kernel never uses
 	 * it; the econet-eth driver accesses it uncached via KSEG1. Testing if

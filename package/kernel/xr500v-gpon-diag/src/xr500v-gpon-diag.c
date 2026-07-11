@@ -10,12 +10,12 @@
 
 #include <linux/bitfield.h>
 #include <linux/debugfs.h>
+#include <linux/gpio/consumer.h>
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
 #include <linux/seq_file.h>
-
-#define XR500V_XPON_PHY_BASE_DEFAULT	0x1faf0000
-#define XR500V_XPON_PHY_SIZE		0x1000
 
 #define PHYSET2		0x0104
 #define   PHYSET2_PHYRDY		BIT(2)
@@ -26,6 +26,10 @@
 #define   PHYSET3_TXEN		BIT(5)
 #define   PHYSET3_XP_PHYRST	BIT(28)
 #define   PHYSET3_XP_SRST	BIT(27)
+
+#define PHYSET5		0x0110
+#define   PHYSET5_TXBDELAY_SEL	BIT(23)
+#define   PHYSET5_TXBIT_DLY_SEL	GENMASK(22, 19)
 
 #define PHYSET10	0x0124
 #define   PHYSET10_GPON_MODE	BIT(31)
@@ -47,6 +51,19 @@
 #define ANACAL1		0x0140
 #define ANACAL2		0x0144
 
+#define ANAPWD		0x0150
+#define   ANAPWD_TX_PD_EN	BIT(11)
+#define   ANAPWD_TX_PD		BIT(4)
+#define   ANAPWD_TXDRVEN_DIS	BIT(3)
+#define   ANAPWD_TX_SER_PWD	BIT(2)
+#define   ANAPWD_TX_BENSER_PWD	BIT(1)
+
+#define TDCSTA1		0x01f4
+
+#define MISC		0x01fc
+#define   MISC_ROGUE_ONU_TX_TEST_MODE BIT(28)
+#define   MISC_TX_MODE_SW_SEL	BIT(27)
+
 #define PHYRX_STATUS	0x021c
 #define   PHYRX_FEC_STATUS	GENMASK(15, 8)
 #define   PHYRX_SYNC_STATUS	GENMASK(7, 0)
@@ -59,8 +76,16 @@
 #define NOSOL_CODE_CNT	0x0240
 #define RX_CODE_CNT	0x0244
 
+#define PHYTX_STATUS	0x040c
+#define TX_FRAME_COUNTER 0x0434
+#define TX_BURST_COUNTER 0x0438
+#define BISTCTL_PRBS_TX_EN 0x04a4
+#define TEST_FRAME_EN	0x0510
+
 #define XPON_STA	0x05e0
 #define   XPON_STA_LOS	BIT(0)
+#define GIO1_SETTING	0x05e8
+#define GIO2_SETTING	0x05ec
 #define XPON_INT_EN	0x05f0
 #define XPON_INT_STA	0x05f8
 #define   XPON_INT_PHYRDY	BIT(5)
@@ -70,18 +95,16 @@
 #define   XPON_INT_TRANS_LOS	BIT(0)
 
 struct xr500v_gpon_diag {
+	struct device *dev;
 	void __iomem *base;
+	resource_size_t phys_base;
+	struct gpio_desc *tx_disable_gpio;
 	struct dentry *debugfs_dir;
 };
 
-static struct xr500v_gpon_diag diag;
-static unsigned long phy_base = XR500V_XPON_PHY_BASE_DEFAULT;
-module_param(phy_base, ulong, 0444);
-MODULE_PARM_DESC(phy_base, "physical base of the EN751221 xPON PHY CSR block");
-
-static u32 xpon_read(u32 reg)
+static u32 xpon_read(struct xr500v_gpon_diag *diag, u32 reg)
 {
-	return ioread32(diag.base + reg);
+	return ioread32(diag->base + reg);
 }
 
 struct xpon_reg_desc {
@@ -92,12 +115,16 @@ struct xpon_reg_desc {
 static const struct xpon_reg_desc xpon_regs[] = {
 	{ "PHYSET2",       PHYSET2 },
 	{ "PHYSET3",       PHYSET3 },
+	{ "PHYSET5",       PHYSET5 },
 	{ "PHYSET10",      PHYSET10 },
 	{ "PHYSTA1",       PHYSTA1 },
 	{ "XPON_SETTING",  XPON_SETTING },
 	{ "ANASTA1",       ANASTA1 },
 	{ "ANACAL1",       ANACAL1 },
 	{ "ANACAL2",       ANACAL2 },
+	{ "ANAPWD",        ANAPWD },
+	{ "TDCSTA1",       TDCSTA1 },
+	{ "MISC",          MISC },
 	{ "PHYRX_STATUS",  PHYRX_STATUS },
 	{ "XP_ERRCNT_EN",  XP_ERRCNT_EN },
 	{ "XP_ERRCNT_CTL", XP_ERRCNT_CTL },
@@ -105,36 +132,65 @@ static const struct xpon_reg_desc xpon_regs[] = {
 	{ "ERR_CODE_CNT",  ERR_CODE_CNT },
 	{ "NOSOL_CODE_CNT", NOSOL_CODE_CNT },
 	{ "RX_CODE_CNT",   RX_CODE_CNT },
+	{ "PHYTX_STATUS",  PHYTX_STATUS },
+	{ "TX_FRAME_COUNTER", TX_FRAME_COUNTER },
+	{ "TX_BURST_COUNTER", TX_BURST_COUNTER },
+	{ "BISTCTL_PRBS_TX_EN", BISTCTL_PRBS_TX_EN },
+	{ "TEST_FRAME_EN", TEST_FRAME_EN },
 	{ "XPON_STA",      XPON_STA },
+	{ "GIO1_SETTING",  GIO1_SETTING },
+	{ "GIO2_SETTING",  GIO2_SETTING },
 	{ "XPON_INT_EN",   XPON_INT_EN },
 	{ "XPON_INT_STA",  XPON_INT_STA },
 };
 
 static int regs_show(struct seq_file *s, void *unused)
 {
+	struct xr500v_gpon_diag *diag = s->private;
 	unsigned int i;
 
-	seq_printf(s, "physical_base: 0x%08lx\n", phy_base);
+	seq_printf(s, "physical_base: 0x%08llx\n",
+		   (unsigned long long)diag->phys_base);
 	for (i = 0; i < ARRAY_SIZE(xpon_regs); i++)
 		seq_printf(s, "0x%04x %-16s 0x%08x\n",
 			   xpon_regs[i].offset, xpon_regs[i].name,
-			   xpon_read(xpon_regs[i].offset));
+			   xpon_read(diag, xpon_regs[i].offset));
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(regs);
 
 static int status_show(struct seq_file *s, void *unused)
 {
-	u32 set2 = xpon_read(PHYSET2);
-	u32 set3 = xpon_read(PHYSET3);
-	u32 set10 = xpon_read(PHYSET10);
-	u32 physta1 = xpon_read(PHYSTA1);
-	u32 anasta1 = xpon_read(ANASTA1);
-	u32 rx = xpon_read(PHYRX_STATUS);
-	u32 sta = xpon_read(XPON_STA);
-	u32 ints = xpon_read(XPON_INT_STA);
+	struct xr500v_gpon_diag *diag = s->private;
+	u32 set2 = xpon_read(diag, PHYSET2);
+	u32 set3 = xpon_read(diag, PHYSET3);
+	u32 set5 = xpon_read(diag, PHYSET5);
+	u32 set10 = xpon_read(diag, PHYSET10);
+	u32 physta1 = xpon_read(diag, PHYSTA1);
+	u32 anasta1 = xpon_read(diag, ANASTA1);
+	u32 anapwd = xpon_read(diag, ANAPWD);
+	u32 misc = xpon_read(diag, MISC);
+	u32 rx = xpon_read(diag, PHYRX_STATUS);
+	u32 sta = xpon_read(diag, XPON_STA);
+	u32 ints = xpon_read(diag, XPON_INT_STA);
+	u32 prbs = xpon_read(diag, BISTCTL_PRBS_TX_EN);
+	u32 test_frame = xpon_read(diag, TEST_FRAME_EN);
 	u32 state = FIELD_GET(PHYSTA1_PHY_CURR, physta1);
 	u32 sync = FIELD_GET(PHYRX_SYNC_STATUS, rx);
+	int tx_disable_dir;
+	int tx_disable_raw;
+	int tx_disable_asserted;
+
+	if (diag->tx_disable_gpio) {
+		tx_disable_dir = gpiod_get_direction(diag->tx_disable_gpio);
+		tx_disable_raw = gpiod_get_raw_value_cansleep(diag->tx_disable_gpio);
+		tx_disable_asserted =
+			gpiod_get_value_cansleep(diag->tx_disable_gpio);
+	} else {
+		tx_disable_dir = -ENOENT;
+		tx_disable_raw = -ENOENT;
+		tx_disable_asserted = -ENOENT;
+	}
 
 	seq_printf(s, "mode:                 %s\n",
 		   set10 & PHYSET10_GPON_MODE ? "GPON" : "EPON/unknown");
@@ -152,6 +208,38 @@ static int status_show(struct seq_file *s, void *unused)
 		   sta & XPON_STA_LOS ? "yes" : "no");
 	seq_printf(s, "tx_enable:            %s\n",
 		   set3 & PHYSET3_TXEN ? "YES" : "no");
+	if (tx_disable_dir < 0) {
+		seq_printf(s, "tx_disable_gpio:      unavailable (%d)\n",
+			   tx_disable_dir);
+	} else {
+		seq_printf(s, "tx_disable_direction: %s\n",
+			   tx_disable_dir ? "input" : "output");
+		seq_printf(s, "tx_disable_raw:       %s\n",
+			   tx_disable_raw > 0 ? "high" :
+			   tx_disable_raw == 0 ? "low" : "read-error");
+		seq_printf(s, "tx_disable_asserted:  %s\n",
+			   tx_disable_asserted > 0 ? "yes" :
+			   tx_disable_asserted == 0 ? "NO" : "read-error");
+	}
+	seq_printf(s, "tx_powerdown_enable:  %s\n",
+		   anapwd & ANAPWD_TX_PD_EN ? "yes" : "no");
+	seq_printf(s, "tx_powered_down:      %s\n",
+		   anapwd & ANAPWD_TX_PD ? "yes" : "no");
+	seq_printf(s, "tx_driver_disabled:  %s\n",
+		   anapwd & ANAPWD_TXDRVEN_DIS ? "yes" : "no");
+	seq_printf(s, "tx_serializer_pwd:   %s\n",
+		   anapwd & ANAPWD_TX_SER_PWD ? "yes" : "no");
+	seq_printf(s, "tx_burst_ser_pwd:    %s\n",
+		   anapwd & ANAPWD_TX_BENSER_PWD ? "yes" : "no");
+	seq_printf(s, "rogue_onu_test_mode: %s\n",
+		   misc & MISC_ROGUE_ONU_TX_TEST_MODE ? "YES" : "no");
+	seq_printf(s, "tx_software_mode:    %s\n",
+		   misc & MISC_TX_MODE_SW_SEL ? "yes" : "no");
+	seq_printf(s, "prbs_tx_enable_raw:  0x%08x\n", prbs);
+	seq_printf(s, "test_frame_enable:   0x%08x\n", test_frame);
+	seq_printf(s, "tx_bit_delay:        0x%x (manual=%s)\n",
+		   (u32)FIELD_GET(PHYSET5_TXBIT_DLY_SEL, set5),
+		   set5 & PHYSET5_TXBDELAY_SEL ? "yes" : "no");
 	seq_printf(s, "pll_enable:           %s\n",
 		   set3 & PHYSET3_PLL_EN ? "yes" : "no");
 	seq_printf(s, "phy_reset_asserted:   %s\n",
@@ -171,7 +259,7 @@ static int status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "tx_impedance_done:    %s\n",
 		   anasta1 & ANASTA1_TXIMP_DONE ? "yes" : "no");
 	seq_printf(s, "interrupt_enable:     0x%02x\n",
-		   xpon_read(XPON_INT_EN) & 0xff);
+		   xpon_read(diag, XPON_INT_EN) & 0xff);
 	seq_printf(s, "interrupt_status:     0x%02x\n", ints & 0xff);
 	seq_printf(s, "irq_phy_ready:        %s\n",
 		   ints & XPON_INT_PHYRDY ? "pending" : "no");
@@ -183,42 +271,73 @@ static int status_show(struct seq_file *s, void *unused)
 		   ints & XPON_INT_LOF ? "pending" : "no");
 	seq_printf(s, "irq_transceiver_los:  %s\n",
 		   ints & XPON_INT_TRANS_LOS ? "pending" : "no");
-	seq_puts(s, "writes_performed:     0\n");
+	seq_puts(s, "mmio_writes_performed: 0\n");
+	seq_puts(s, "counter_latch_or_clear: no\n");
+	seq_puts(s, "reset_or_mode_change:  no\n");
+	seq_puts(s, "polling_or_irq_handler: no\n");
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(status);
 
-static int __init xr500v_gpon_diag_init(void)
+static int xr500v_gpon_diag_probe(struct platform_device *pdev)
 {
-	diag.base = ioremap(phy_base, XR500V_XPON_PHY_SIZE);
-	if (!diag.base)
+	struct xr500v_gpon_diag *diag;
+	struct resource *res;
+
+	diag = devm_kzalloc(&pdev->dev, sizeof(*diag), GFP_KERNEL);
+	if (!diag)
 		return -ENOMEM;
 
-	diag.debugfs_dir = debugfs_create_dir("xr500v-gpon", NULL);
-	if (IS_ERR(diag.debugfs_dir)) {
-		iounmap(diag.base);
-		return PTR_ERR(diag.debugfs_dir);
-	}
+	diag->dev = &pdev->dev;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	diag->base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(diag->base))
+		return PTR_ERR(diag->base);
+	diag->phys_base = res->start;
+	diag->tx_disable_gpio = devm_gpiod_get_optional(&pdev->dev,
+							"tx-disable", GPIOD_ASIS);
+	if (IS_ERR(diag->tx_disable_gpio))
+		return dev_err_probe(&pdev->dev, PTR_ERR(diag->tx_disable_gpio),
+				     "cannot reserve TX_DISABLE GPIO as-is\n");
+	platform_set_drvdata(pdev, diag);
 
-	debugfs_create_file("status", 0444, diag.debugfs_dir, NULL,
+	diag->debugfs_dir = debugfs_create_dir("xr500v-gpon", NULL);
+	if (IS_ERR(diag->debugfs_dir))
+		return PTR_ERR(diag->debugfs_dir);
+
+	debugfs_create_file("status", 0444, diag->debugfs_dir, diag,
 			    &status_fops);
-	debugfs_create_file("regs", 0444, diag.debugfs_dir, NULL,
+	debugfs_create_file("regs", 0444, diag->debugfs_dir, diag,
 			    &regs_fops);
 
-	pr_info("xr500v-gpon-diag: read-only xPON PHY diagnostics at 0x%08lx\n",
-		phy_base);
+	dev_info(&pdev->dev,
+		 "read-only xPON PHY diagnostics at %pa; no MMIO writes\n",
+		 &diag->phys_base);
 	return 0;
 }
 
-static void __exit xr500v_gpon_diag_exit(void)
+static void xr500v_gpon_diag_remove(struct platform_device *pdev)
 {
-	debugfs_remove_recursive(diag.debugfs_dir);
-	iounmap(diag.base);
-	pr_info("xr500v-gpon-diag: unloaded\n");
+	struct xr500v_gpon_diag *diag = platform_get_drvdata(pdev);
+
+	debugfs_remove_recursive(diag->debugfs_dir);
 }
 
-module_init(xr500v_gpon_diag_init);
-module_exit(xr500v_gpon_diag_exit);
+static const struct of_device_id xr500v_gpon_diag_of_match[] = {
+	{ .compatible = "econet,en751221-xpon-phy-diag" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, xr500v_gpon_diag_of_match);
+
+static struct platform_driver xr500v_gpon_diag_driver = {
+	.probe = xr500v_gpon_diag_probe,
+	.remove = xr500v_gpon_diag_remove,
+	.driver = {
+		.name = "xr500v-gpon-diag",
+		.of_match_table = xr500v_gpon_diag_of_match,
+	},
+};
+module_platform_driver(xr500v_gpon_diag_driver);
 
 MODULE_DESCRIPTION("Read-only EN751221 xPON PHY diagnostics for Archer XR500v");
 MODULE_AUTHOR("Cris7015 XR500v OpenWrt project");
