@@ -34,6 +34,14 @@
 > low.  The module is intentionally absent from the shipping image, autoload
 > and DTB, and was not loaded on the router.  See
 > [`notes/2026-07-11-gpon-no-olt-phase4-rx-init-compile-only.md`](../notes/2026-07-11-gpon-no-olt-phase4-rx-init-compile-only.md).
+> Phase 5 ran that isolated stage on the lab router without fibre.  The sole
+> write changed `PHYSET3` from `0x4581e114` to `0x4581e110`, leaving TXEN low,
+> GPIO16 TX-disable asserted, and every TX generator and xPON interrupt off.
+> Module removal restored `0x4581e114`; the complete before/after register dumps
+> were identical, EN7570 recorded no writes, and PPPoE stayed operational.  The
+> router was finally restored to the stable phase-3 image, where the active
+> module is absent.  See
+> [`notes/2026-07-11-gpon-no-olt-phase5-esd-active-rollback.md`](../notes/2026-07-11-gpon-no-olt-phase5-esd-active-rollback.md).
 
 GPON is the one major subsystem of the Archer XR500v that does **not** work under the OpenWrt port. The key fact for this subsystem is that this is not for lack of source code: the OEM xPON/GPON driver for the EN751221 exists as full, readable C in the same 2.6.36 `tclinux_phoenix` OEM tree the [VoIP/FXS driver](06-voip-fxs-telephony.md) was reconstructed from — roughly 55,000 lines across `xpon` (~43,700 LOC) and `xpon_phy` (~11,700 LOC), including a ~210 KB MAC register header (`epon_mac_reg_c_header_en7521.h`) with ~1,574 register definitions for exactly this chip, and covering both EPON (MPCP) and GPON (OMCI) modes. GPON is unported because of scale and testability, not missing or blob code:
 

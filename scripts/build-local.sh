@@ -27,7 +27,8 @@ cp -r "$REPO"/package/* "$OWRT/package/"
 cp -r "$REPO"/target/*  "$OWRT/target/"
 # kmod source edits don't auto-rebuild; clean the kmods we tweak so they recompile
 make -C "$OWRT" package/kernel/econet-eth/clean package/kernel/econet-pcm/clean package/kernel/mt76/clean \
-  package/kernel/xr500v-en7570-diag/clean >/dev/null 2>&1 || true
+  package/kernel/xr500v-en7570-diag/clean package/kernel/xr500v-gpon-diag/clean \
+  package/kernel/xr500v-xpon-rx-init/clean >/dev/null 2>&1 || true
 
 # re-apply local feed patches (LuCI/etc. fixes not yet upstream). Idempotent —
 # git-apply --check skips ones already present — so this survives `feeds update`.
