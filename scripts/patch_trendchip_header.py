@@ -10,7 +10,7 @@ Stock XR500v kernel partition header (mtd3_kernel.bin) layout (BE 32-bit):
   @0x6c: <kernel entry point>           address bldr jumps to after decompress
   @0x70: <kernel size hint>             stock has 0x01300000
   @0x74: 00 00 02 00                    header size = 0x200
-  @0x78: <LZMA compressed size>
+  @0x78: <tplink payload size>          raw OpenWrt image uses file_size-0x200
   @0x7c: <rootfs offset>                stock has 0x00300000 (= kernel partition size)
   @0x80: <rootfs size>                  stock has 0x00bdc087
   @0x88: 00 00 00 00
@@ -56,7 +56,7 @@ def patch(data: bytearray, entry: int, kernel_size_hint: int,
     # 0x70 kernel size hint.
     data[0x70:0x74] = struct.pack(">I", kernel_size_hint)
     # 0x74 header size — keep tplink-v2 value (already 0x200).
-    # 0x78 LZMA compressed size — keep tplink-v2 value.
+    # 0x78 tplink payload-size field — keep tplink-v2 value.
     # 0x7c rootfs offset within concatenated kernel+rootfs image.
     data[0x7c:0x80] = struct.pack(">I", rootfs_offset)
     # 0x80 rootfs size.

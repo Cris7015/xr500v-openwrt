@@ -14,6 +14,33 @@
 		reg = <0x00000000 0x10000000>;
 	};
 
+	/* EN751221 PON-I2C source clock, matching the OEM and the upstream
+	 * econet-eth-mainline model. The existing tc3162 GPIO driver leaves
+	 * CHIP_SCUL 0x104 PON-I2C pinmux bit enabled on this board. */
+	pon_i2c_clock: pon-i2c-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <20000000>;
+	};
+
+	pon_i2c: i2c@1fbf8000 {
+		compatible = "mediatek,mt7621-i2c";
+		reg = <0x1fbf8000 0x100>;
+		clocks = <&pon_i2c_clock>;
+		clock-frequency = <100000>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+
+		/* Diagnostic-only binding: reads ID/variant and raw OEM status bits;
+		 * deliberately has no reset, init, latch-clear, laser, APD, ADC, or
+		 * DDMI paths. */
+		lddla@70 {
+			compatible = "airoha,en7570-diag";
+			reg = <0x70>;
+		};
+	};
+
 	/* build #63: reserved high region for the PPE FoE table, OEM-style
 	 * (OEM PpeFoeBase = ioremap(0x0dc00000)). no-map -> kernel never uses
 	 * it; the econet-eth driver accesses it uncached via KSEG1. Testing if

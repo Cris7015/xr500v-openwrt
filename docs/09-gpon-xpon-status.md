@@ -1,5 +1,27 @@
 ## Summary
 
+> **2026-07-10 update:** the upstream situation changed materially after this
+> page was written.  Merbanan's `econet-eth-mainline` branch now contains
+> compile-tested EN7512/EN7521 PON PHY, EN7570/71/72 LDDLA, and GPON/EPON MAC
+> drivers, including a PLOAM O1-O5 state machine.  The branch still lacks a
+> functioning WAN QDMA data path and OMCI stack; its GPON/EPON DT nodes remain
+> disabled and its xPON MAC IRQ is explicitly a placeholder.  A read-only live
+> probe on this XR500v confirmed the PON PHY CSR block at `0x1faf0000`, GPON mode,
+> inactive TX, and no RX sync.  See
+> [`notes/2026-07-10-gpon-no-olt-phase0.md`](../notes/2026-07-10-gpon-no-olt-phase0.md)
+> for the raw register snapshot, EN7570 calibration endian issue and the OEM
+> WAN-QDMA interrupt/callback model.  Phase 1 then enabled the standard
+> MT7621-compatible I2C block and passively identified the optical LDDLA at
+> address `0x70` as **EN7570, silicon ID `0x03`, variant `0x01`**.  That work
+> also found and fixed a real big-endian FIFO packing bug in `i2c-mt7621.c`.
+> See
+> [`notes/2026-07-10-gpon-no-olt-phase1-en7570.md`](../notes/2026-07-10-gpon-no-olt-phase1-en7570.md).
+> Phase 2 cross-checked the OEM status routine and added passive reads for raw
+> LOS, rogue-ONU, Tx-SD and Tx-fault bits.  The live unit reports Tx-fault set,
+> with rogue-ONU and Tx-SD clear.  Its uninitialised LOS bit is **not** evidence
+> of an optical signal.  See
+> [`notes/2026-07-10-gpon-no-olt-phase2-passive-status.md`](../notes/2026-07-10-gpon-no-olt-phase2-passive-status.md).
+
 GPON is the one major subsystem of the Archer XR500v that does **not** work under the OpenWrt port. The key fact for this subsystem is that this is not for lack of source code: the OEM xPON/GPON driver for the EN751221 exists as full, readable C in the same 2.6.36 `tclinux_phoenix` OEM tree the [VoIP/FXS driver](06-voip-fxs-telephony.md) was reconstructed from — roughly 55,000 lines across `xpon` (~43,700 LOC) and `xpon_phy` (~11,700 LOC), including a ~210 KB MAC register header (`epon_mac_reg_c_header_en7521.h`) with ~1,574 register definitions for exactly this chip, and covering both EPON (MPCP) and GPON (OMCI) modes. GPON is unported because of scale and testability, not missing or blob code:
 
 1. **Scale** — the optical stack is on the order of 25-30x the effort the VoIP bring-up took (MAC + PHY/SerDes + laser calibration + MPCP/OMCI + real-time upstream TDMA synchronization).
@@ -86,13 +108,26 @@ Notes on this:
 
 - `EN751221_XPON_MAC_RST` and `EN751221_XPON_PHY_RST` are the SoC reset lines for the xPON MAC and xPON PHY respectively, driven through the SCU clock/reset controller (`scuclk` at `0x1fb00000`). These macro definitions come from the **mainline kernel** `dt-bindings` for the EN751221 SCU (downloaded at build time), not from this overlay repo — the overlay only references them.
 - The PON MAC sharing the Ethernet/QDMA region is why these resets sit on the Ethernet node rather than on a separate PON node: the frame engine, the two QDMAs, and the PON MAC are one hardware complex. The PON-MAC interrupt is part of the same QDMA/Ethernet interrupt model (the OEM sources reference a `GPON_INT` source on the QDMA for this reason; this is awareness in the shared interrupt model, not a functioning PON path). The [econet-eth driver](04-ethernet-dsa.md) brings these resets out of assert as part of Ethernet init but does nothing PON-specific.
-- There is **no** xPON MAC node, **no** xPON PHY node, **no** laser/SerDes node, and **no** PON driver in the port. Nothing consumes the optical hardware. The `green:gpon` LED in the board DTS is a static placeholder.
+- There is now a diagnostic-only PON-I2C node at `0x1fbf8000` and a passive
+  EN7570 client at address `0x70`.  The client reads silicon ID/variant plus
+  the raw OEM LOS, rogue-ONU, Tx-SD and Tx-fault status bits.  It has no reset,
+  initialisation, calibration, latch-clear, laser, APD, ADC or DDMI write path.
+  Because the analogue block remains uninitialised, these states are not a
+  claim of optical link.  There is still **no** functional xPON MAC node, xPON
+  PHY/SerDes driver, PLOAM data path or OMCI stack.  The `green:gpon` LED
+  remains a static placeholder.
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 
 ## Status and outlook
 
-GPON is best described as out of reach for now, not "almost there." The source advantage is real and meaningful (the same advantage that made VoIP tractable), but it is outweighed by raw scale and by the hard physical requirement of an OLT plus an operator-side registration. Unlike every other subsystem documented on this wiki, no amount of bench iteration can validate a GPON port — it needs head-end equipment and ISP cooperation that a hobbyist RE effort does not have. The plumbing the port carries today (`XPON_MAC_RST`/`XPON_PHY_RST`, and the shared QDMA interrupt model that includes the PON MAC) is the correct foundation if anyone ever does attempt it, but the subsystem should be considered unported and, realistically, the least likely of the remaining gaps to be closed.
+GPON is still unported, but no-OLT bench work is useful for identifying and
+validating the individual hardware blocks.  It has now confirmed the xPON PHY
+CSR window and the EN7570 control interface without enabling TX.  What cannot
+be validated on the bench is the actual GPON outcome: ranging, burst timing,
+PLOAM O5, GEM traffic and OMCI require a head-end plus operator registration.
+The WAN-QDMA model and the new passive probes are a sound foundation, not yet a
+working optical WAN.
 
 ## Cross-references
 

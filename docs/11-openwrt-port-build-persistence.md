@@ -71,7 +71,7 @@ CONFIG_PACKAGE_wpad-basic-mbedtls=y          # WiFi auth
 CONFIG_PACKAGE_luci=y ...                     # web UI
 ```
 
-The kernel-diet lines (`KALLSYMS`/`DEBUG_INFO` off) are not optional: the compressed kernel must fit the on-flash `kernel1` partition, which is **3 MB (3072k)**. With debug symbols in, the LZMA kernel overflows and the `dd conv=sync` (which rounds up to the next 3072k multiple) silently produces an image the bootloader cannot decode. See **256 MB RAM & kernel diet** for the full story.
+The kernel-diet lines (`KALLSYMS`/`DEBUG_INFO` off) are not optional: the compressed kernel plus its 512-byte TP-Link/TrendChip header must fit the on-flash `kernel1` partition, which is **3 MB (3072k)**.  The actual compressed-kernel ceiling is therefore `0x300000 - 0x200 = 0x2ffe00`, not a full 3 MiB. With debug symbols in, the LZMA kernel overflows and the `dd conv=sync` (which rounds up to the next 3072k multiple) silently produces an image the bootloader cannot decode. `scripts/validate_xr500v_image.py` fails closed on this size, the required SquashFS offset `0x300200`, and the 512-byte header/gap relationship. See **256 MB RAM & kernel diet** for the full story.
 
 ## Build environment
 
@@ -139,7 +139,24 @@ ssh <build-host> 'cd ~/openwrt && \
 ~/openwrt/bin/targets/econet/en751221/openwrt-econet-en751221-tplink_archer-xr500v-squashfs-sysupgrade.bin
 ```
 
-### Flashing (slot B, from stock only)
+### Flashing / sysupgrade (slot B)
+
+Current images include board-specific `platform_check_image()` and
+`platform_do_upgrade()` support.  From a running XR500v OpenWrt build, use only
+the validated, TrendChip-patched image:
+
+```bash
+python3 scripts/validate_xr500v_image.py RAW.bin --kernel-bin \
+  build_dir/target-mips_24kc_musl/linux-econet_en751221/tplink_archer-xr500v-kernel.bin
+python3 scripts/patch_trendchip_header.py RAW.bin PATCHED.bin
+python3 scripts/validate_xr500v_image.py PATCHED.bin --kernel-bin \
+  build_dir/target-mips_24kc_musl/linux-econet_en751221/tplink_archer-xr500v-kernel.bin \
+  --require-trendchip
+scp PATCHED.bin root@192.168.68.222:/tmp/
+ssh root@192.168.68.222 'sysupgrade -T /tmp/PATCHED.bin && sysupgrade /tmp/PATCHED.bin'
+```
+
+The older stock-recovery route remains useful when OpenWrt cannot boot:
 
 The flash flow is intentionally conservative — it goes through the stock OEM telnet, never through running OpenWrt:
 
@@ -159,7 +176,9 @@ SRC=OUT.bin ROUTER_IP=<stock-ip> PC_IP=<pc-ip> bash <repo>/…/flash-iter111.sh
 
 Key rules (each learned during bring-up):
 
-- **Flash only from stock telnet `:2323`.** `mtd write` from running OpenWrt corrupts the NAND.
+- **Never manually run raw `mtd write` from normal OpenWrt.** Use the board's
+  sysupgrade path, which pivots to RAM and slices `kernel1`/`rootfs1` at the
+  verified offsets, or use stock telnet recovery.
 - **`writeflash` argument order is `file SIZE OFFSET /dev/mtd0`** — inverting size/offset clobbers misc + kernel1 + rootfs1.
 - **`bflag set 0` = stock OEM, `bflag set 1` = OpenWrt slot B.** The bootloader's `boot` command crashes; always power-cycle.
 - **COLD boot is mandatory** for the MT7603 (2.4 GHz) SCU clock — a warm reboot / `bflag` change does not re-apply it.

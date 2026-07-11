@@ -1,0 +1,17 @@
+From: XR500v OpenWrt project
+Subject: [PATCH] i2c: mt7621: allow selection on ECONET
+
+The EN751221 contains an MT7621-compatible I2C controller.
+
+Based on Benjamin Larsson's econet-eth-mainline work.
+--- a/drivers/i2c/busses/Kconfig
++++ b/drivers/i2c/busses/Kconfig
+@@ -905,7 +905,7 @@ config I2C_MV64XXX
+ 
+ config I2C_MT7621
+ 	tristate "MT7621/MT7628 I2C Controller"
+-	depends on (RALINK && (SOC_MT7620 || SOC_MT7621)) || ARCH_AIROHA || COMPILE_TEST
++	depends on (RALINK && (SOC_MT7620 || SOC_MT7621)) || ARCH_AIROHA || ECONET || COMPILE_TEST
+ 	help
+ 	  Say Y here to include support for I2C controller in the
+ 	  MediaTek MT7621/MT7628 SoCs.
