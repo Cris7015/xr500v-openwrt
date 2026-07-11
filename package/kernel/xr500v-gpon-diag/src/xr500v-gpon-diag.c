@@ -39,6 +39,10 @@
 #define   PHYSTA1_PHYRDY_STATE	0x6
 
 #define XPON_SETTING	0x0138
+#define   XPON_SETTING_BURST_INV	BIT(7)
+#define   XPON_SETTING_RX_SD_INV	BIT(6)
+#define   XPON_SETTING_TX_FAULT_INV BIT(5)
+#define   XPON_SETTING_TX_SD_INV	BIT(4)
 
 #define ANASTA1		0x013c
 #define   ANASTA1_RXPLLLOCK	BIT(13)
@@ -167,6 +171,7 @@ static int status_show(struct seq_file *s, void *unused)
 	u32 set5 = xpon_read(diag, PHYSET5);
 	u32 set10 = xpon_read(diag, PHYSET10);
 	u32 physta1 = xpon_read(diag, PHYSTA1);
+	u32 xpon_setting = xpon_read(diag, XPON_SETTING);
 	u32 anasta1 = xpon_read(diag, ANASTA1);
 	u32 anapwd = xpon_read(diag, ANAPWD);
 	u32 misc = xpon_read(diag, MISC);
@@ -206,6 +211,15 @@ static int status_show(struct seq_file *s, void *unused)
 		   (u32)FIELD_GET(PHYRX_FEC_STATUS, rx));
 	seq_printf(s, "loss_of_signal:       %s\n",
 		   sta & XPON_STA_LOS ? "yes" : "no");
+	seq_printf(s, "xpon_setting:         0x%08x\n", xpon_setting);
+	seq_printf(s, "burst_enable_inverted: %s\n",
+		   xpon_setting & XPON_SETTING_BURST_INV ? "yes" : "no");
+	seq_printf(s, "rx_sd_inverted:       %s\n",
+		   xpon_setting & XPON_SETTING_RX_SD_INV ? "yes" : "no");
+	seq_printf(s, "tx_fault_inverted:    %s\n",
+		   xpon_setting & XPON_SETTING_TX_FAULT_INV ? "yes" : "no");
+	seq_printf(s, "tx_sd_inverted:       %s\n",
+		   xpon_setting & XPON_SETTING_TX_SD_INV ? "yes" : "no");
 	seq_printf(s, "tx_enable:            %s\n",
 		   set3 & PHYSET3_TXEN ? "YES" : "no");
 	if (tx_disable_dir < 0) {
