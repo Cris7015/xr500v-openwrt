@@ -14,7 +14,14 @@
 #include <linux/seq_file.h>
 
 #define EN7570_SAFE_PROTECT	0x0100
+#define EN7570_LOS_CTRL1	0x011c
+#define EN7570_LOS_CTRL2	0x0120
+#define EN7570_LOS_CAL_TIMER	0x0124
+#define EN7570_LOS_CAL_TIMEOUT_CNT 0x0128
+#define EN7570_LOS_CAL_TIMEOUT	0x012c
 #define EN7570_LOS_DBG_RG	0x0130
+#define EN7570_ADC_PROBE_STATUS	0x0154
+#define EN7570_PROBE_CONTROL	0x0158
 #define EN7570_DUMMY		0x015c
 #define EN7570_ROGUE_ONU_DET_CTRL 0x0168
 #define EN7570_FT_ADC_CLK_CLR	0x0170
@@ -56,6 +63,19 @@ static int en7570_read(struct i2c_client *client, u16 reg, void *value,
 static int en7570_read8(struct i2c_client *client, u16 reg, u8 *value)
 {
 	return en7570_read(client, reg, value, 1);
+}
+
+static void en7570_seq_raw(struct seq_file *s, struct i2c_client *client,
+			    const char *name, u16 reg, int length)
+{
+	u8 data[4];
+	int ret;
+
+	ret = en7570_read(client, reg, data, length);
+	if (ret)
+		seq_printf(s, "%-23s read error %d\n", name, ret);
+	else
+		seq_printf(s, "%-23s %*ph\n", name, length, data);
 }
 
 static int status_show(struct seq_file *s, void *unused)
@@ -121,6 +141,20 @@ static int status_show(struct seq_file *s, void *unused)
 		seq_printf(s, "safe_protect_raw:     %*ph\n",
 			   (int)sizeof(safe_protect), safe_protect);
 	}
+	en7570_seq_raw(s, diag->client, "los_ctrl1_raw:",
+			EN7570_LOS_CTRL1, 4);
+	en7570_seq_raw(s, diag->client, "los_ctrl2_raw:",
+			EN7570_LOS_CTRL2, 4);
+	en7570_seq_raw(s, diag->client, "los_cal_timer_raw:",
+			EN7570_LOS_CAL_TIMER, 4);
+	en7570_seq_raw(s, diag->client, "los_timeout_cnt_raw:",
+			EN7570_LOS_CAL_TIMEOUT_CNT, 4);
+	en7570_seq_raw(s, diag->client, "los_timeout_raw:",
+			EN7570_LOS_CAL_TIMEOUT, 4);
+	en7570_seq_raw(s, diag->client, "adc_probe_raw_unlatched:",
+			EN7570_ADC_PROBE_STATUS, 4);
+	en7570_seq_raw(s, diag->client, "probe_control_raw:",
+			EN7570_PROBE_CONTROL, 4);
 	seq_puts(s, "status_interpretation: raw/uninitialized optical block\n");
 	seq_puts(s, "register_data_writes: 0\n");
 	seq_puts(s, "reset_or_init:        no\n");

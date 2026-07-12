@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=xr500v-en7570-diag
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -21,6 +21,8 @@ define KernelPackage/xr500v-en7570-diag/description
   OEM information function. It never writes register data, resets the chip,
   enables the laser, changes APD state, loads calibration, or starts ADC/DDMI
   conversions.
+  It also reports raw, unlatched LOS calibration and ADC/probe registers
+  without interpreting or modifying them.
 endef
 
 define Build/Prepare

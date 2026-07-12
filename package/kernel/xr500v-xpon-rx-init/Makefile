@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=xr500v-xpon-rx-init
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -17,11 +17,11 @@ define KernelPackage/xr500v-xpon-rx-init/description
   Staged RX/SerDes prototype for the Archer XR500v. It is
   deliberately absent from DEVICE_PACKAGES, has no autoload entry and has no
   matching node in the shipping DTS. If all explicit safety gates are
-  supplied, one mutually exclusive stage either clears the signal-detect
-  deglitch bit or applies the OEM EN7570 RX LOS/SD polarity. It always requires
-  TXEN low and preserves all unrelated register bits. It never accesses EN7570,
-  MAC, QDMA, counters,
-  interrupts, mode selection, PLL/reset, PRBS or test-frame controls.
+  supplied, one mutually exclusive stage clears the signal-detect deglitch
+  bit, applies the OEM EN7570 RX LOS/SD polarity, or enables only the passive
+  RX counters without latching or clearing them. It always requires TXEN low
+  and preserves all unrelated register bits. It never accesses EN7570, MAC,
+  QDMA, interrupts, mode selection, PLL/reset, PRBS or test-frame controls.
 endef
 
 define Build/Prepare

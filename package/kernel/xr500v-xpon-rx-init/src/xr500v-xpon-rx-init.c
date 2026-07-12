@@ -7,11 +7,11 @@
  * diagnostic node, opt in through both the DT property and module parameter,
  * and provide the active-high physical TX_DISABLE GPIO.
  *
- * The mutually exclusive stages either clear PHYSET3.ESD_PRO, matching the OEM
- * and Merbanan deglitch operation, or clear only XPON_SETTING.TRANS_RX_SD_INV,
- * matching the OEM EN7570 polarity.  Neither helper can set TXEN and both
- * reject a pre-existing TXEN state.  No EN7570 I2C, MAC, QDMA, counter,
- * interrupt, GPON/EPON mode, PLL or reset access exists.
+ * The mutually exclusive stages clear PHYSET3.ESD_PRO, clear only
+ * XPON_SETTING.TRANS_RX_SD_INV, or enable only the three RX observation
+ * counters.  No stage can set TXEN; each rejects a pre-existing TXEN state.
+ * There is no EN7570 I2C, MAC, QDMA, counter latch/clear, interrupt,
+ * GPON/EPON mode, PLL or reset access.
  */
 
 #include <linux/bitfield.h>
@@ -31,6 +31,9 @@
 #define PHYSET10		0x0124
 #define   PHYSET10_GPON_MODE	BIT(31)
 
+#define PHYSTA1			0x0130
+#define   PHYSTA1_PHY_CURR	GENMASK(20, 18)
+
 #define XPON_SETTING		0x0138
 #define   XPON_SETTING_TRANS_RX_SD_INV BIT(6)
 #define   XPON_SETTING_XR500V_RETAINED 0x0000014f
@@ -39,13 +42,33 @@
 #define MISC			0x01fc
 #define   MISC_ROGUE_ONU_TX_TEST_MODE BIT(28)
 
+#define PHYRX_STATUS		0x021c
+#define   PHYRX_FEC_STATUS	GENMASK(15, 8)
+#define   PHYRX_SYNC_STATUS	GENMASK(7, 0)
+#define   PHYRX_SYNC_VALUE	0x0a
+
+#define XP_ERRCNT_EN		0x0230
+#define   XP_ERRCNT_ENABLE_MASK	GENMASK(2, 0)
+#define ERR_BYTE_CNT		0x0238
+#define ERR_CODE_CNT		0x023c
+#define NOSOL_CODE_CNT		0x0240
+#define RX_CODE_CNT		0x0244
+#define FEC_SECONDS		0x0248
+#define BIP_CNT			0x024c
+#define FRAME_CNT_L		0x0250
+#define FRAME_CNT_H		0x0254
+#define LOF_CNT			0x0258
+
 #define BISTCTL_PRBS_TX_EN	0x04a4
 #define TEST_FRAME_EN		0x0510
+#define XPON_STA		0x05e0
+#define   XPON_STA_LOS		BIT(0)
 #define XPON_INT_EN		0x05f0
 
 enum xr500v_rx_stage {
 	XR500V_RX_STAGE_ESD,
 	XR500V_RX_STAGE_EN7570_POLARITY,
+	XR500V_RX_STAGE_COUNTERS,
 };
 
 struct xr500v_xpon_rx_init {
@@ -58,6 +81,8 @@ struct xr500v_xpon_rx_init {
 	u32 physet3_after;
 	u32 xpon_setting_before;
 	u32 xpon_setting_after;
+	u32 errcnt_en_before;
+	u32 errcnt_en_after;
 	unsigned int mmio_writes;
 	bool esd_was_set;
 	bool change_applied;
@@ -72,6 +97,11 @@ static bool arm_en7570_rx_polarity;
 module_param(arm_en7570_rx_polarity, bool, 0444);
 MODULE_PARM_DESC(arm_en7570_rx_polarity,
 	"Arm the EN7570 RX LOS/SD polarity stage (mutually exclusive; also requires DT opt-in)");
+
+static bool arm_rx_counters;
+module_param(arm_rx_counters, bool, 0444);
+MODULE_PARM_DESC(arm_rx_counters,
+	"Arm RX error/BIP/frame counters without latch or clear (mutually exclusive; also requires DT opt-in)");
 
 static bool rollback_on_remove = true;
 module_param(rollback_on_remove, bool, 0444);
@@ -127,10 +157,32 @@ rx_write_en7570_polarity(struct xr500v_xpon_rx_init *priv, bool inverted)
 	return 0;
 }
 
+/* Enable only the three RX observation counters; never latch or clear them. */
+static noinline int
+rx_write_counter_enable(struct xr500v_xpon_rx_init *priv, bool enable)
+{
+	u32 old;
+	u32 new;
+
+	if (rx_read(priv, PHYSET3) & PHYSET3_TXEN)
+		return -EPERM;
+
+	old = rx_read(priv, XP_ERRCNT_EN);
+	new = enable ? old | XP_ERRCNT_ENABLE_MASK :
+		       old & ~XP_ERRCNT_ENABLE_MASK;
+	iowrite32(new, priv->base + XP_ERRCNT_EN);
+	priv->mmio_writes++;
+
+	return 0;
+}
+
 static int rx_rollback(struct xr500v_xpon_rx_init *priv)
 {
 	if (priv->stage == XR500V_RX_STAGE_ESD)
 		return rx_write_esd_pro(priv, priv->esd_was_set);
+	if (priv->stage == XR500V_RX_STAGE_COUNTERS)
+		return rx_write_counter_enable(priv,
+			priv->errcnt_en_before & XP_ERRCNT_ENABLE_MASK);
 
 	return rx_write_en7570_polarity(priv,
 		priv->xpon_setting_before & XPON_SETTING_TRANS_RX_SD_INV);
@@ -141,12 +193,14 @@ static int rx_status_show(struct seq_file *s, void *unused)
 	struct xr500v_xpon_rx_init *priv = s->private;
 	u32 set3 = rx_read(priv, PHYSET3);
 	u32 misc = rx_read(priv, MISC);
+	u32 rx = rx_read(priv, PHYRX_STATUS);
 	int direction = gpiod_get_direction(priv->tx_disable);
 	int asserted = gpiod_get_value_cansleep(priv->tx_disable);
 
 	seq_printf(s, "stage:                %s\n",
 		   priv->stage == XR500V_RX_STAGE_ESD ? "esd-pro" :
-		   "en7570-rx-polarity");
+		   priv->stage == XR500V_RX_STAGE_EN7570_POLARITY ?
+		   "en7570-rx-polarity" : "rx-counters");
 	seq_printf(s, "physet3_before:       0x%08x\n", priv->physet3_before);
 	seq_printf(s, "physet3_after:        0x%08x\n", priv->physet3_after);
 	seq_printf(s, "physet3_current:      0x%08x\n", set3);
@@ -171,6 +225,30 @@ static int rx_status_show(struct seq_file *s, void *unused)
 		   asserted == 1 ? "yes" : asserted == 0 ? "NO" : "error");
 	seq_printf(s, "gpon_mode:            %s\n",
 		   rx_read(priv, PHYSET10) & PHYSET10_GPON_MODE ? "yes" : "NO");
+	seq_printf(s, "phy_fsm_state:        0x%x\n",
+		   (u32)FIELD_GET(PHYSTA1_PHY_CURR,
+				  rx_read(priv, PHYSTA1)));
+	seq_printf(s, "rx_sync:              %s (raw 0x%02x)\n",
+		   FIELD_GET(PHYRX_SYNC_STATUS, rx) == PHYRX_SYNC_VALUE ?
+		   "yes" : "no",
+		   (u32)FIELD_GET(PHYRX_SYNC_STATUS, rx));
+	seq_printf(s, "rx_fec_status:        0x%02x\n",
+		   (u32)FIELD_GET(PHYRX_FEC_STATUS, rx));
+	seq_printf(s, "loss_of_signal:       %s\n",
+		   rx_read(priv, XPON_STA) & XPON_STA_LOS ? "yes" : "no");
+	seq_printf(s, "rx_counter_enable_before: 0x%08x\n",
+		   priv->errcnt_en_before);
+	seq_printf(s, "rx_counter_enable_after:  0x%08x\n",
+		   priv->errcnt_en_after);
+	seq_printf(s, "rx_counter_enable_current:0x%08x\n",
+		   rx_read(priv, XP_ERRCNT_EN));
+	seq_printf(s, "rx_counter_raw:       err_byte=%u err_code=%u nosol=%u code=%u\n",
+		   rx_read(priv, ERR_BYTE_CNT), rx_read(priv, ERR_CODE_CNT),
+		   rx_read(priv, NOSOL_CODE_CNT), rx_read(priv, RX_CODE_CNT));
+	seq_printf(s, "rx_counter_raw2:      fec_sec=%u bip=%u frame=%llu lof=%u\n",
+		   rx_read(priv, FEC_SECONDS), rx_read(priv, BIP_CNT),
+		   ((u64)rx_read(priv, FRAME_CNT_H) << 32) |
+		   rx_read(priv, FRAME_CNT_L), rx_read(priv, LOF_CNT));
 	seq_printf(s, "rogue_onu_test_mode: %s\n",
 		   misc & MISC_ROGUE_ONU_TX_TEST_MODE ? "YES" : "no");
 	seq_printf(s, "prbs_tx_enable_raw:  0x%08x\n",
@@ -239,7 +317,7 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 	u32 set3;
 	int ret;
 
-	if (arm_rx_init == arm_en7570_rx_polarity)
+	if (arm_rx_init + arm_en7570_rx_polarity + arm_rx_counters != 1)
 		return dev_err_probe(&pdev->dev, -EPERM,
 				     "select exactly one armed RX stage\n");
 	if (!device_property_read_bool(&pdev->dev,
@@ -252,7 +330,8 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	priv->dev = &pdev->dev;
 	priv->stage = arm_rx_init ? XR500V_RX_STAGE_ESD :
-		XR500V_RX_STAGE_EN7570_POLARITY;
+		arm_en7570_rx_polarity ? XR500V_RX_STAGE_EN7570_POLARITY :
+		XR500V_RX_STAGE_COUNTERS;
 
 	/* Assert the physical, active-high TX_DISABLE gate before mapping PHY. */
 	priv->tx_disable = devm_gpiod_get(&pdev->dev, "tx-disable",
@@ -273,22 +352,34 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 	priv->physet3_before = set3;
 	priv->esd_was_set = !!(set3 & PHYSET3_ESD_PRO);
 	priv->xpon_setting_before = rx_read(priv, XPON_SETTING);
+	priv->errcnt_en_before = rx_read(priv, XP_ERRCNT_EN);
 	if (priv->stage == XR500V_RX_STAGE_EN7570_POLARITY &&
 	    priv->xpon_setting_before != XPON_SETTING_XR500V_RETAINED)
 		return dev_err_probe(&pdev->dev, -EPERM,
 			"unexpected retained XPON_SETTING: 0x%08x\n",
 			priv->xpon_setting_before);
+	if (priv->stage == XR500V_RX_STAGE_COUNTERS &&
+	    (priv->errcnt_en_before || rx_read(priv, ERR_BYTE_CNT) ||
+	     rx_read(priv, ERR_CODE_CNT) || rx_read(priv, NOSOL_CODE_CNT) ||
+	     rx_read(priv, RX_CODE_CNT) || rx_read(priv, FEC_SECONDS) ||
+	     rx_read(priv, BIP_CNT) || rx_read(priv, FRAME_CNT_L) ||
+	     rx_read(priv, FRAME_CNT_H) || rx_read(priv, LOF_CNT)))
+		return dev_err_probe(&pdev->dev, -EPERM,
+				     "RX counter baseline is not zero\n");
 
 	if (priv->stage == XR500V_RX_STAGE_ESD)
 		ret = rx_write_esd_pro(priv, false);
-	else
+	else if (priv->stage == XR500V_RX_STAGE_EN7570_POLARITY)
 		ret = rx_write_en7570_polarity(priv, false);
+	else
+		ret = rx_write_counter_enable(priv, true);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "cannot apply selected RX stage\n");
 	priv->change_applied = true;
 	priv->physet3_after = rx_read(priv, PHYSET3);
 	priv->xpon_setting_after = rx_read(priv, XPON_SETTING);
+	priv->errcnt_en_after = rx_read(priv, XP_ERRCNT_EN);
 
 	ret = rx_preflight(priv);
 	if (!ret && priv->stage == XR500V_RX_STAGE_ESD &&
@@ -299,6 +390,11 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 	    (priv->xpon_setting_after != XPON_SETTING_EN7570 ||
 	     ((priv->xpon_setting_before ^ priv->xpon_setting_after) &
 	      ~XPON_SETTING_TRANS_RX_SD_INV)))
+		ret = -EIO;
+	if (!ret && priv->stage == XR500V_RX_STAGE_COUNTERS &&
+	    (priv->errcnt_en_after != XP_ERRCNT_ENABLE_MASK ||
+	     ((priv->errcnt_en_before ^ priv->errcnt_en_after) &
+	      ~XP_ERRCNT_ENABLE_MASK)))
 		ret = -EIO;
 	if (ret) {
 		rx_rollback(priv);
@@ -317,7 +413,8 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "RX-only %s stage applied; TX_DISABLE asserted, TXEN low\n",
 		 priv->stage == XR500V_RX_STAGE_ESD ? "ESD_PRO" :
-		 "EN7570 polarity");
+		 priv->stage == XR500V_RX_STAGE_EN7570_POLARITY ?
+		 "EN7570 polarity" : "counter observation");
 	platform_set_drvdata(pdev, priv);
 	return 0;
 }
