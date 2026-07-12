@@ -111,14 +111,18 @@ The VoIP bring-up was a control-plane driver: a ~2K-LOC SLIC driver plus G.711 c
 
 The VoIP bring-up, for comparison, ran ~13 documented cycles before the first audible ring. GPON is a much deeper stack, and several of its pieces (laser calibration, upstream TDMA) cannot be iterated by register pokes the way the SLIC ZSI handshake was.
 
-### Wall 2 — it cannot be tested on a desk
+### Wall 2 — it cannot be fully tested on an isolated desk
 
-This is the decisive blocker. A GPON ONU is half of a point-to-multipoint optical link; the other half is the **OLT** (Optical Line Terminal) head-end in the ISP's network. The ONU only becomes useful once it has:
+This is the decisive blocker for end-to-end work. A GPON ONU is half of a point-to-multipoint optical link; the other half is the **OLT** (Optical Line Terminal) head-end in the ISP's network. The ONU only becomes useful once it has:
 
 1. An **OLT to negotiate with** — without a head-end there is nothing to range against, no grants, no link. The upstream framing is "build, lease, or borrow" an OLT.
 2. An **ISP registration** — GPON ONUs authenticate to the OLT, typically with an ONU/ONT **serial number + password** provisioned on the operator side. Bringing the optical WAN up means presenting credentials the operator has on file for a registered ONU.
 
-So even a perfectly ported driver could not be validated without an OLT plus operator cooperation. This is categorically different from every other subsystem on this device — LAN, WiFi, USB, and even VoIP were all testable in isolation on the bench. GPON is not.
+The lab now has intermittent access to the live Movistar fibre drop.  That is
+useful for receive-only A/B tests while physical TX-disable stays asserted,
+but it is not a controlled OLT and does not remove the need for operator
+credentials/cooperation before ranging, O5 or traffic tests.  GPON therefore
+still cannot be validated in isolation the way LAN, WiFi, USB or VoIP can.
 
 ## Upstream stance (cjdelisle / EcoNet EN751221 project)
 
@@ -167,9 +171,14 @@ Notes on this:
   RX-only init prototype, not an active PHY driver.
 - A separate compile-only RX-init package exists outside the device image.  It
   requires independent module-parameter and DT opt-ins plus asserted physical
-  TX-disable, and currently implements only the reversible
-  `PHYSET3.ESD_PRO` clear.  No experimental DT node or opt-in is present in the
-  shipping firmware.
+  TX-disable.  Its mutually exclusive stages cover the reversible
+  `PHYSET3.ESD_PRO` clear, EN7570 RX polarity, passive RX counters, and an
+  isolated EN7570 receive/LOS setup.  The latter uses this unit's factory
+  thresholds (`0x1c/0x10`) recovered read-only from `misc+0x20000`, snapshots
+  all three touched registers and verifies byte-exact rollback.  It has no APD,
+  laser, TGEN, Tx-SD, DDMI, reset, MAC or interrupt path.  No experimental DT
+  compatible or opt-in is present in the shipping firmware, so none of these
+  stages can bind there.
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 

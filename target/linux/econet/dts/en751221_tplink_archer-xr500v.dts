@@ -35,7 +35,7 @@
 		/* Diagnostic-only binding: reads ID/variant and raw OEM status bits;
 		 * deliberately has no reset, init, latch-clear, laser, APD, ADC, or
 		 * DDMI paths. */
-		lddla@70 {
+		en7570: lddla@70 {
 			compatible = "airoha,en7570-diag";
 			reg = <0x70>;
 		};
@@ -51,6 +51,12 @@
 		 * asserted high.  The diagnostic requests it GPIOD_ASIS and never
 		 * changes its direction or level. */
 		tx-disable-gpios = <&gpio 16 GPIO_ACTIVE_HIGH>;
+		/* Per-unit values recovered read-only from misc+0x20000.  These
+		 * properties are inert with the shipping diagnostic compatible and
+		 * are consumed only by the separately armed experimental RX stage. */
+		airoha,en7570 = <&en7570>;
+		airoha,los-high-threshold = <0x1c>;
+		airoha,los-low-threshold = <0x10>;
 		status = "okay";
 	};
 

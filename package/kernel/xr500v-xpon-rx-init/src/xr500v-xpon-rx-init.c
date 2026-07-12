@@ -8,15 +8,17 @@
  * and provide the active-high physical TX_DISABLE GPIO.
  *
  * The mutually exclusive stages clear PHYSET3.ESD_PRO, clear only
- * XPON_SETTING.TRANS_RX_SD_INV, or enable only the three RX observation
- * counters.  No stage can set TXEN; each rejects a pre-existing TXEN state.
- * There is no EN7570 I2C, MAC, QDMA, counter latch/clear, interrupt,
- * GPON/EPON mode, PLL or reset access.
+ * XPON_SETTING.TRANS_RX_SD_INV, enable only the three RX observation counters,
+ * or apply only the EN7570 LOS receive setup from mt7570_LOS_level_set().  No
+ * stage can set TXEN; each rejects a pre-existing TXEN state.  The EN7570 stage
+ * snapshots and rolls back every touched register and cannot access APD,
+ * laser, TGEN, Tx-SD, DDMI, MAC, QDMA, interrupts, PLL or reset controls.
  */
 
 #include <linux/bitfield.h>
 #include <linux/debugfs.h>
 #include <linux/gpio/consumer.h>
+#include <linux/i2c.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -65,16 +67,35 @@
 #define   XPON_STA_LOS		BIT(0)
 #define XPON_INT_EN		0x05f0
 
+#define EN7570_SVADC_PD		0x0024
+#define EN7570_LOS_CTRL1	0x011c
+#define EN7570_LOS_CTRL2	0x0120
+#define EN7570_FT_ADC_CLK_CLR	0x0170
+#define EN7570_EXPECTED_ID	0x03
+
+#define EN7570_LOS_CAL_TRIG	BIT(0)
+#define EN7570_LOS_STABLE_MASK	GENMASK(4, 0)
+#define EN7570_LOS_STABLE_VALUE	GENMASK(4, 0)
+#define EN7570_ADC_REV2_ENABLE	BIT(2)
+#define EN7570_ADC_REV1_ENABLE	BIT(6)
+#define EN7570_LOS_CONF_MASK	GENMASK(4, 0)
+#define EN7570_LOS_CONF_VALUE	GENMASK(4, 0)
+#define EN7570_LOS_COUNT_MASK	GENMASK(6, 0)
+#define EN7570_LOS_COUNT_VALUE	0x05
+#define EN7570_LOS_THRESHOLD_MASK GENMASK(6, 0)
+
 enum xr500v_rx_stage {
 	XR500V_RX_STAGE_ESD,
 	XR500V_RX_STAGE_EN7570_POLARITY,
 	XR500V_RX_STAGE_COUNTERS,
+	XR500V_RX_STAGE_EN7570_LOS,
 };
 
 struct xr500v_xpon_rx_init {
 	struct device *dev;
 	void __iomem *base;
 	struct gpio_desc *tx_disable;
+	struct i2c_client *en7570;
 	struct dentry *debugfs_dir;
 	enum xr500v_rx_stage stage;
 	u32 physet3_before;
@@ -84,6 +105,15 @@ struct xr500v_xpon_rx_init {
 	u32 errcnt_en_before;
 	u32 errcnt_en_after;
 	unsigned int mmio_writes;
+	unsigned int i2c_writes;
+	u8 los_ctrl1_before[4];
+	u8 los_ctrl1_after[4];
+	u8 svadc_pd_before[4];
+	u8 svadc_pd_after[4];
+	u8 los_ctrl2_before[4];
+	u8 los_ctrl2_after[4];
+	u8 los_high_threshold;
+	u8 los_low_threshold;
 	bool esd_was_set;
 	bool change_applied;
 };
@@ -103,6 +133,11 @@ module_param(arm_rx_counters, bool, 0444);
 MODULE_PARM_DESC(arm_rx_counters,
 	"Arm RX error/BIP/frame counters without latch or clear (mutually exclusive; also requires DT opt-in)");
 
+static bool arm_en7570_los_init;
+module_param(arm_en7570_los_init, bool, 0444);
+MODULE_PARM_DESC(arm_en7570_los_init,
+	"Arm isolated EN7570 RX/LOS analogue setup (mutually exclusive; also requires DT opt-in and per-unit thresholds)");
+
 static bool rollback_on_remove = true;
 module_param(rollback_on_remove, bool, 0444);
 MODULE_PARM_DESC(rollback_on_remove,
@@ -111,6 +146,182 @@ MODULE_PARM_DESC(rollback_on_remove,
 static u32 rx_read(struct xr500v_xpon_rx_init *priv, u32 reg)
 {
 	return ioread32(priv->base + reg);
+}
+
+static int en7570_read(struct i2c_client *client, u16 reg, void *value,
+			int length)
+{
+	u8 pointer[2] = { reg >> 8, reg & 0xff };
+	struct i2c_msg messages[2] = {
+		{
+			.addr = client->addr,
+			.len = sizeof(pointer),
+			.buf = pointer,
+		},
+		{
+			.addr = client->addr,
+			.flags = I2C_M_RD,
+			.len = length,
+			.buf = value,
+		},
+	};
+	int ret;
+
+	ret = i2c_transfer(client->adapter, messages, ARRAY_SIZE(messages));
+	if (ret < 0)
+		return ret;
+
+	return ret == ARRAY_SIZE(messages) ? 0 : -EIO;
+}
+
+static int en7570_write(struct xr500v_xpon_rx_init *priv, u16 reg,
+			 const u8 value[4])
+{
+	u8 data[6] = { reg >> 8, reg & 0xff };
+	struct i2c_msg message = {
+		.addr = priv->en7570->addr,
+		.len = sizeof(data),
+		.buf = data,
+	};
+	int ret;
+
+	if (gpiod_get_value_cansleep(priv->tx_disable) != 1 ||
+	    rx_read(priv, PHYSET3) & PHYSET3_TXEN)
+		return -EPERM;
+
+	memcpy(data + 2, value, 4);
+	ret = i2c_transfer(priv->en7570->adapter, &message, 1);
+	if (ret < 0)
+		return ret;
+	if (ret != 1)
+		return -EIO;
+
+	priv->i2c_writes++;
+	return 0;
+}
+
+static void en7570_put_client(void *data)
+{
+	struct i2c_client *client = data;
+
+	put_device(&client->dev);
+}
+
+static int en7570_rollback(struct xr500v_xpon_rx_init *priv)
+{
+	u8 value[4];
+	int ret = 0;
+	int err;
+
+	/* Restore the trigger-bearing register last. */
+	err = en7570_write(priv, EN7570_SVADC_PD, priv->svadc_pd_before);
+	if (err && !ret)
+		ret = err;
+	err = en7570_write(priv, EN7570_LOS_CTRL2, priv->los_ctrl2_before);
+	if (err && !ret)
+		ret = err;
+	err = en7570_write(priv, EN7570_LOS_CTRL1, priv->los_ctrl1_before);
+	if (err && !ret)
+		ret = err;
+	if (ret)
+		return ret;
+
+	err = en7570_read(priv->en7570, EN7570_SVADC_PD, value, sizeof(value));
+	if (err || memcmp(value, priv->svadc_pd_before, sizeof(value)))
+		return err ?: -EIO;
+	err = en7570_read(priv->en7570, EN7570_LOS_CTRL2, value, sizeof(value));
+	if (err || memcmp(value, priv->los_ctrl2_before, sizeof(value)))
+		return err ?: -EIO;
+	err = en7570_read(priv->en7570, EN7570_LOS_CTRL1, value, sizeof(value));
+	if (err || memcmp(value, priv->los_ctrl1_before, sizeof(value)))
+		return err ?: -EIO;
+
+	return 0;
+}
+
+static int en7570_verify_after(struct xr500v_xpon_rx_init *priv)
+{
+	u8 value[4];
+	int ret;
+
+	ret = en7570_read(priv->en7570, EN7570_SVADC_PD, value, sizeof(value));
+	if (ret || memcmp(value, priv->svadc_pd_after, sizeof(value)))
+		return ret ?: -EIO;
+	ret = en7570_read(priv->en7570, EN7570_LOS_CTRL2, value, sizeof(value));
+	if (ret || memcmp(value, priv->los_ctrl2_after, sizeof(value)))
+		return ret ?: -EIO;
+	ret = en7570_read(priv->en7570, EN7570_LOS_CTRL1, value, sizeof(value));
+	if (ret)
+		return ret;
+
+	/* The calibration trigger is allowed to self-clear. */
+	value[0] &= ~EN7570_LOS_CAL_TRIG;
+	priv->los_ctrl1_after[0] &= ~EN7570_LOS_CAL_TRIG;
+	return memcmp(value, priv->los_ctrl1_after, sizeof(value)) ? -EIO : 0;
+}
+
+static noinline int en7570_apply_los_init(struct xr500v_xpon_rx_init *priv)
+{
+	u8 value[4];
+	int ret;
+
+	memcpy(value, priv->los_ctrl1_before, sizeof(value));
+	value[0] |= EN7570_LOS_CAL_TRIG;
+	value[1] = (value[1] & ~EN7570_LOS_STABLE_MASK) |
+		EN7570_LOS_STABLE_VALUE;
+	ret = en7570_write(priv, EN7570_LOS_CTRL1, value);
+	if (ret)
+		goto rollback;
+
+	memcpy(value, priv->svadc_pd_before, sizeof(value));
+	value[3] |= EN7570_ADC_REV2_ENABLE;
+	ret = en7570_write(priv, EN7570_SVADC_PD, value);
+	if (ret)
+		goto rollback;
+	ret = en7570_read(priv->en7570, EN7570_SVADC_PD,
+			   value, sizeof(value));
+	if (ret)
+		goto rollback;
+	value[2] |= EN7570_ADC_REV1_ENABLE;
+	ret = en7570_write(priv, EN7570_SVADC_PD, value);
+	if (ret)
+		goto rollback;
+	memcpy(priv->svadc_pd_after, value, sizeof(value));
+
+	memcpy(value, priv->los_ctrl2_before, sizeof(value));
+	value[1] = (value[1] & ~EN7570_LOS_CONF_MASK) |
+		EN7570_LOS_CONF_VALUE;
+	value[0] = (value[0] & ~EN7570_LOS_COUNT_MASK) |
+		EN7570_LOS_COUNT_VALUE;
+	ret = en7570_write(priv, EN7570_LOS_CTRL2, value);
+	if (ret)
+		goto rollback;
+	memcpy(priv->los_ctrl2_after, value, sizeof(value));
+
+	/* Match the OEM threshold step: reread so a self-cleared trigger stays
+	 * clear, then touch only the two comparator-threshold bytes.
+	 */
+	ret = en7570_read(priv->en7570, EN7570_LOS_CTRL1,
+			   value, sizeof(value));
+	if (ret)
+		goto rollback;
+	value[2] = (value[2] & ~EN7570_LOS_THRESHOLD_MASK) |
+		priv->los_high_threshold;
+	value[3] = (value[3] & ~EN7570_LOS_THRESHOLD_MASK) |
+		priv->los_low_threshold;
+	ret = en7570_write(priv, EN7570_LOS_CTRL1, value);
+	if (ret)
+		goto rollback;
+	memcpy(priv->los_ctrl1_after, value, sizeof(value));
+
+	ret = en7570_verify_after(priv);
+	if (!ret)
+		return 0;
+
+rollback:
+	if (en7570_rollback(priv))
+		dev_err(priv->dev, "EN7570 rollback verification failed\n");
+	return ret;
 }
 
 /*
@@ -178,6 +389,8 @@ rx_write_counter_enable(struct xr500v_xpon_rx_init *priv, bool enable)
 
 static int rx_rollback(struct xr500v_xpon_rx_init *priv)
 {
+	if (priv->stage == XR500V_RX_STAGE_EN7570_LOS)
+		return en7570_rollback(priv);
 	if (priv->stage == XR500V_RX_STAGE_ESD)
 		return rx_write_esd_pro(priv, priv->esd_was_set);
 	if (priv->stage == XR500V_RX_STAGE_COUNTERS)
@@ -200,7 +413,9 @@ static int rx_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "stage:                %s\n",
 		   priv->stage == XR500V_RX_STAGE_ESD ? "esd-pro" :
 		   priv->stage == XR500V_RX_STAGE_EN7570_POLARITY ?
-		   "en7570-rx-polarity" : "rx-counters");
+		   "en7570-rx-polarity" :
+		   priv->stage == XR500V_RX_STAGE_COUNTERS ?
+		   "rx-counters" : "en7570-los-init");
 	seq_printf(s, "physet3_before:       0x%08x\n", priv->physet3_before);
 	seq_printf(s, "physet3_after:        0x%08x\n", priv->physet3_after);
 	seq_printf(s, "physet3_current:      0x%08x\n", set3);
@@ -258,7 +473,38 @@ static int rx_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "interrupt_enable:    0x%08x\n",
 		   rx_read(priv, XPON_INT_EN));
 	seq_printf(s, "mmio_writes:          %u\n", priv->mmio_writes);
-	seq_puts(s, "en7570_access:         no\n");
+	if (priv->stage == XR500V_RX_STAGE_EN7570_LOS) {
+		u8 ctrl1[4];
+		u8 svadc[4];
+		u8 ctrl2[4];
+		int r1 = en7570_read(priv->en7570, EN7570_LOS_CTRL1,
+				      ctrl1, sizeof(ctrl1));
+		int r2 = en7570_read(priv->en7570, EN7570_SVADC_PD,
+				      svadc, sizeof(svadc));
+		int r3 = en7570_read(priv->en7570, EN7570_LOS_CTRL2,
+				      ctrl2, sizeof(ctrl2));
+
+		seq_printf(s, "en7570_los_thresholds: high=0x%02x low=0x%02x\n",
+			   priv->los_high_threshold, priv->los_low_threshold);
+		seq_printf(s, "en7570_los_ctrl1_before: %4ph\n",
+			   priv->los_ctrl1_before);
+		seq_printf(s, "en7570_svadc_pd_before:   %4ph\n",
+			   priv->svadc_pd_before);
+		seq_printf(s, "en7570_los_ctrl2_before:  %4ph\n",
+			   priv->los_ctrl2_before);
+		if (!r1)
+			seq_printf(s, "en7570_los_ctrl1_current:%4ph\n", ctrl1);
+		if (!r2)
+			seq_printf(s, "en7570_svadc_pd_current:  %4ph\n", svadc);
+		if (!r3)
+			seq_printf(s, "en7570_los_ctrl2_current: %4ph\n", ctrl2);
+		seq_printf(s, "en7570_read_errors:     %d/%d/%d\n", r1, r2, r3);
+		seq_printf(s, "en7570_i2c_writes:      %u\n", priv->i2c_writes);
+		seq_puts(s, "en7570_access:         rx-los-only\n");
+	} else {
+		seq_puts(s, "en7570_access:         no\n");
+	}
+	seq_puts(s, "apd_laser_tgen_txsd:   no\n");
 	seq_puts(s, "pll_or_reset_access:  no\n");
 	return 0;
 }
@@ -314,10 +560,14 @@ static int rx_preflight(struct xr500v_xpon_rx_init *priv)
 static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 {
 	struct xr500v_xpon_rx_init *priv;
+	struct device_node *en7570_node;
+	u32 threshold;
+	u8 silicon_id = 0;
 	u32 set3;
 	int ret;
 
-	if (arm_rx_init + arm_en7570_rx_polarity + arm_rx_counters != 1)
+	if (arm_rx_init + arm_en7570_rx_polarity + arm_rx_counters +
+	    arm_en7570_los_init != 1)
 		return dev_err_probe(&pdev->dev, -EPERM,
 				     "select exactly one armed RX stage\n");
 	if (!device_property_read_bool(&pdev->dev,
@@ -331,7 +581,8 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 	priv->dev = &pdev->dev;
 	priv->stage = arm_rx_init ? XR500V_RX_STAGE_ESD :
 		arm_en7570_rx_polarity ? XR500V_RX_STAGE_EN7570_POLARITY :
-		XR500V_RX_STAGE_COUNTERS;
+		arm_rx_counters ? XR500V_RX_STAGE_COUNTERS :
+		XR500V_RX_STAGE_EN7570_LOS;
 
 	/* Assert the physical, active-high TX_DISABLE gate before mapping PHY. */
 	priv->tx_disable = devm_gpiod_get(&pdev->dev, "tx-disable",
@@ -347,6 +598,61 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 	ret = rx_preflight(priv);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "RX-only preflight failed\n");
+
+	if (priv->stage == XR500V_RX_STAGE_EN7570_LOS) {
+		en7570_node = of_parse_phandle(pdev->dev.of_node,
+					       "airoha,en7570", 0);
+		if (!en7570_node)
+			return dev_err_probe(&pdev->dev, -EINVAL,
+				"EN7570 phandle is absent\n");
+		priv->en7570 = of_find_i2c_device_by_node(en7570_node);
+		of_node_put(en7570_node);
+		if (!priv->en7570)
+			return dev_err_probe(&pdev->dev, -EPROBE_DEFER,
+				"EN7570 I2C client is not ready\n");
+		ret = devm_add_action_or_reset(&pdev->dev, en7570_put_client,
+					       priv->en7570);
+		if (ret)
+			return ret;
+		ret = device_property_read_u32(&pdev->dev,
+				"airoha,los-high-threshold", &threshold);
+		if (ret || threshold > EN7570_LOS_THRESHOLD_MASK)
+			return dev_err_probe(&pdev->dev, ret ?: -ERANGE,
+				"invalid per-unit LOS high threshold\n");
+		priv->los_high_threshold = threshold;
+		ret = device_property_read_u32(&pdev->dev,
+				"airoha,los-low-threshold", &threshold);
+		if (ret || threshold > EN7570_LOS_THRESHOLD_MASK)
+			return dev_err_probe(&pdev->dev, ret ?: -ERANGE,
+				"invalid per-unit LOS low threshold\n");
+		priv->los_low_threshold = threshold;
+		if (priv->los_high_threshold <= priv->los_low_threshold)
+			return dev_err_probe(&pdev->dev, -ERANGE,
+				"LOS threshold ordering is invalid\n");
+		ret = en7570_read(priv->en7570, EN7570_FT_ADC_CLK_CLR,
+				   &silicon_id, sizeof(silicon_id));
+		if (ret || silicon_id != EN7570_EXPECTED_ID)
+			return dev_err_probe(&pdev->dev, ret ?: -ENODEV,
+				"EN7570 identity check failed: 0x%02x\n",
+				silicon_id);
+		ret = en7570_read(priv->en7570, EN7570_LOS_CTRL1,
+				   priv->los_ctrl1_before,
+				   sizeof(priv->los_ctrl1_before));
+		if (!ret)
+			ret = en7570_read(priv->en7570, EN7570_SVADC_PD,
+					   priv->svadc_pd_before,
+					   sizeof(priv->svadc_pd_before));
+		if (!ret)
+			ret = en7570_read(priv->en7570, EN7570_LOS_CTRL2,
+					   priv->los_ctrl2_before,
+					   sizeof(priv->los_ctrl2_before));
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret,
+				"cannot snapshot EN7570 LOS registers\n");
+		if (priv->los_ctrl1_before[0] & EN7570_LOS_CAL_TRIG)
+			return dev_err_probe(&pdev->dev, -EBUSY,
+				"EN7570 LOS calibration trigger is already active\n");
+	}
 
 	set3 = rx_read(priv, PHYSET3);
 	priv->physet3_before = set3;
@@ -371,8 +677,10 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 		ret = rx_write_esd_pro(priv, false);
 	else if (priv->stage == XR500V_RX_STAGE_EN7570_POLARITY)
 		ret = rx_write_en7570_polarity(priv, false);
-	else
+	else if (priv->stage == XR500V_RX_STAGE_COUNTERS)
 		ret = rx_write_counter_enable(priv, true);
+	else
+		ret = en7570_apply_los_init(priv);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "cannot apply selected RX stage\n");
@@ -396,15 +704,19 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 	     ((priv->errcnt_en_before ^ priv->errcnt_en_after) &
 	      ~XP_ERRCNT_ENABLE_MASK)))
 		ret = -EIO;
+	if (!ret && priv->stage == XR500V_RX_STAGE_EN7570_LOS)
+		ret = en7570_verify_after(priv);
 	if (ret) {
-		rx_rollback(priv);
+		if (rx_rollback(priv))
+			dev_err(&pdev->dev, "RX rollback verification failed\n");
 		priv->change_applied = false;
 		return dev_err_probe(&pdev->dev, ret, "RX-only postflight failed\n");
 	}
 
 	priv->debugfs_dir = debugfs_create_dir("xr500v-xpon-rx-init", NULL);
 	if (IS_ERR(priv->debugfs_dir)) {
-		rx_rollback(priv);
+		if (rx_rollback(priv))
+			dev_err(&pdev->dev, "RX rollback verification failed\n");
 		priv->change_applied = false;
 		return PTR_ERR(priv->debugfs_dir);
 	}
@@ -414,7 +726,9 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 	dev_info(&pdev->dev, "RX-only %s stage applied; TX_DISABLE asserted, TXEN low\n",
 		 priv->stage == XR500V_RX_STAGE_ESD ? "ESD_PRO" :
 		 priv->stage == XR500V_RX_STAGE_EN7570_POLARITY ?
-		 "EN7570 polarity" : "counter observation");
+		 "EN7570 polarity" :
+		 priv->stage == XR500V_RX_STAGE_COUNTERS ?
+		 "counter observation" : "EN7570 LOS analogue");
 	platform_set_drvdata(pdev, priv);
 	return 0;
 }
@@ -424,8 +738,8 @@ static void xr500v_xpon_rx_init_remove(struct platform_device *pdev)
 	struct xr500v_xpon_rx_init *priv = platform_get_drvdata(pdev);
 
 	debugfs_remove_recursive(priv->debugfs_dir);
-	if (rollback_on_remove && priv->change_applied)
-		rx_rollback(priv);
+	if (rollback_on_remove && priv->change_applied && rx_rollback(priv))
+		dev_err(&pdev->dev, "RX rollback verification failed on remove\n");
 }
 
 static const struct of_device_id xr500v_xpon_rx_init_of_match[] = {
