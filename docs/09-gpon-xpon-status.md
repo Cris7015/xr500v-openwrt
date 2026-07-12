@@ -173,12 +173,14 @@ Notes on this:
   requires independent module-parameter and DT opt-ins plus asserted physical
   TX-disable.  Its mutually exclusive stages cover the reversible
   `PHYSET3.ESD_PRO` clear, EN7570 RX polarity, passive RX counters, and an
-  isolated EN7570 receive/LOS setup.  The latter uses this unit's factory
-  thresholds (`0x1c/0x10`) recovered read-only from `misc+0x20000`, snapshots
-  all three touched registers and verifies byte-exact rollback.  It has no APD,
-  laser, TGEN, Tx-SD, DDMI, reset, MAC or interrupt path.  No experimental DT
-  compatible or opt-in is present in the shipping firmware, so none of these
-  stages can bind there.
+  isolated EN7570 receive/LOS setup.  Hardware testing of the latter proved
+  that its calibration trigger changes autonomous state which visible-register
+  rollback and even a software reboot do not undo.  That stage is now
+  quarantined and always returns `-EOPNOTSUPP`; the earlier ESD, polarity and
+  counter stages remain guarded.  The factory thresholds (`0x1c/0x10`) remain
+  documented, and the passive diagnostic now reads `SVADC_PD`.  No active path
+  has APD, laser, TGEN, Tx-SD, DDMI, reset, MAC or interrupt access.  No
+  experimental DT compatible or opt-in is present in shipping firmware.
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 

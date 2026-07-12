@@ -14,6 +14,7 @@
 #include <linux/seq_file.h>
 
 #define EN7570_SAFE_PROTECT	0x0100
+#define EN7570_SVADC_PD		0x0024
 #define EN7570_LOS_CTRL1	0x011c
 #define EN7570_LOS_CTRL2	0x0120
 #define EN7570_LOS_CAL_TIMER	0x0124
@@ -143,6 +144,8 @@ static int status_show(struct seq_file *s, void *unused)
 	}
 	en7570_seq_raw(s, diag->client, "los_ctrl1_raw:",
 			EN7570_LOS_CTRL1, 4);
+	en7570_seq_raw(s, diag->client, "svadc_pd_raw:",
+			EN7570_SVADC_PD, 4);
 	en7570_seq_raw(s, diag->client, "los_ctrl2_raw:",
 			EN7570_LOS_CTRL2, 4);
 	en7570_seq_raw(s, diag->client, "los_cal_timer_raw:",

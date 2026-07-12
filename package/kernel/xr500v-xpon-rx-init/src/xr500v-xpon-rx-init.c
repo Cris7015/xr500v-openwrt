@@ -570,6 +570,9 @@ static int xr500v_xpon_rx_init_probe(struct platform_device *pdev)
 	    arm_en7570_los_init != 1)
 		return dev_err_probe(&pdev->dev, -EPERM,
 				     "select exactly one armed RX stage\n");
+	if (arm_en7570_los_init)
+		return dev_err_probe(&pdev->dev, -EOPNOTSUPP,
+			"EN7570 LOS stage quarantined: calibration side effects cannot be rolled back\n");
 	if (!device_property_read_bool(&pdev->dev,
 				       "econet,allow-rx-only-init"))
 		return dev_err_probe(&pdev->dev, -EPERM,

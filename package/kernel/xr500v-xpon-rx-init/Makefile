@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=xr500v-xpon-rx-init
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -19,8 +19,9 @@ define KernelPackage/xr500v-xpon-rx-init/description
   matching node in the shipping DTS. If all explicit safety gates are
   supplied, one mutually exclusive stage clears the signal-detect deglitch
   bit, applies the OEM EN7570 RX LOS/SD polarity, enables only the passive RX
-  counters without latching or clearing them, or applies the isolated OEM
-  EN7570 LOS analogue setup with per-unit thresholds and exact rollback. It
+  counters without latching or clearing them. The former EN7570 LOS analogue
+  stage is quarantined after hardware testing proved its calibration trigger
+  has non-transactional side effects that register rollback cannot undo. It
   always requires TXEN low and preserves all unrelated register bits. It never
   accesses MAC, QDMA, interrupts, mode selection, PLL/reset, APD, laser, TGEN,
   Tx-SD, DDMI, PRBS or test-frame controls.

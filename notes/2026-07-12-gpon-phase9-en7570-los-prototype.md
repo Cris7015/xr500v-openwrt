@@ -2,6 +2,12 @@
 
 Date: 2026-07-12
 
+> **Superseded safety result:** phase 10 proved that the LOS calibration trigger
+> changes autonomous EN7570 state which cannot be undone by restoring the
+> visible register bytes.  The stage is now quarantined and always returns
+> `-EOPNOTSUPP`.  See
+> `2026-07-12-gpon-phase10-en7570-los-nontransactional.md`.
+
 ## Result
 
 The XR500v's effective per-unit EN7570 calibration was recovered read-only
