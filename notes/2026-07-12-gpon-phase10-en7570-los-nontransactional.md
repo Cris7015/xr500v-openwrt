@@ -132,11 +132,26 @@ LOS_CTRL2=10 05 23 00
 LOS timeout=3e 00 00 00
 ```
 
-A physical power cycle is required to establish whether board power removal
-returns the EN7570 to the earlier LOS=0 / CTRL2 byte2=0 / timeout=0 baseline.
-No software reset will be attempted merely to recover this experiment because
-the OEM reset sits at the start of a larger optical init and has not yet been
-classified for TX safety.
+A physical power cycle was then performed.  It restored the complete expanded
+baseline:
+
+```text
+                         after failed probe   after physical power cycle
+LOS status               1                    0
+LOS_CTRL1                 06 08 3c 36          06 08 3c 36
+SVADC_PD                  00 00 01 00          00 00 01 00
+LOS_CTRL2                 10 05 23 00          10 05 00 00
+LOS timeout               3e 00 00 00          00 00 00 00
+ADC probe/control         zero                 zero
+```
+
+Two samples five seconds apart were stable except for the already-known
+free-running LOS debug byte.  This proves that `SVADC_PD=00 00 01 00` was the
+pre-existing baseline, not a residue of the attempted enable writes.  The
+non-transactional residues were specifically LOS status, `LOS_CTRL2.byte2` and
+the timeout value.  No software reset was attempted because the OEM reset sits
+at the start of a larger optical init and has not yet been classified for TX
+safety.
 
 ## Missing prerequisites in the isolated model
 
@@ -189,5 +204,5 @@ xPON TXEN:             clear
 GPIO16 TX-disable:     asserted
 TX generators/IRQ:     off
 fibre:                 disconnected / in use by the Movistar router
-EN7570 internal state: calibration side effect remains until physical power cycle
+EN7570 internal state: physical power cycle restored the original baseline
 ```
