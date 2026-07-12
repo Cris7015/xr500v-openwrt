@@ -50,6 +50,12 @@
 > which polarity is functionally correct, so the shipping image still retains
 > `0x14f`.  See
 > [`notes/2026-07-11-gpon-no-olt-phase6-en7570-rx-polarity.md`](../notes/2026-07-11-gpon-no-olt-phase6-en7570-rx-polarity.md).
+> Phase 7 expanded the persistent read-only map across GPON synchronisation and
+> FEC.  The live block already retains coherent PSYNC/superframe thresholds,
+> has its descrambler and FEC decoder enabled, and has all test/reset controls
+> clear; only receive counters are disabled.  Repeated snapshots were identical,
+> so no further write was justified without downstream light.  See
+> [`notes/2026-07-12-gpon-no-olt-phase7-rx-digital-baseline.md`](../notes/2026-07-12-gpon-no-olt-phase7-rx-digital-baseline.md).
 
 GPON is the one major subsystem of the Archer XR500v that does **not** work under the OpenWrt port. The key fact for this subsystem is that this is not for lack of source code: the OEM xPON/GPON driver for the EN751221 exists as full, readable C in the same 2.6.36 `tclinux_phoenix` OEM tree the [VoIP/FXS driver](06-voip-fxs-telephony.md) was reconstructed from — roughly 55,000 lines across `xpon` (~43,700 LOC) and `xpon_phy` (~11,700 LOC), including a ~210 KB MAC register header (`epon_mac_reg_c_header_en7521.h`) with ~1,574 register definitions for exactly this chip, and covering both EPON (MPCP) and GPON (OMCI) modes. GPON is unported because of scale and testability, not missing or blob code:
 

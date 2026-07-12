@@ -68,10 +68,32 @@
 #define   MISC_ROGUE_ONU_TX_TEST_MODE BIT(28)
 #define   MISC_TX_MODE_SW_SEL	BIT(27)
 
+#define GPON_PSYNC_CTL	0x020c
+#define   GPON_PSYNC_GSYNC_PROT	BIT(14)
+#define   GPON_PSYNC_INSYNC_MISMATCH GENMASK(13, 11)
+#define   GPON_PSYNC_PRESYNC_MISMATCH GENMASK(10, 8)
+#define   GPON_PSYNC_M2_LIMIT	GENMASK(5, 3)
+#define   GPON_PSYNC_M1_LIMIT	GENMASK(2, 0)
+
+#define GPON_INDENT_CTL	0x0210
+#define   GPON_INDENT_UNLOCK2HUNT BIT(20)
+#define   GPON_INDENT_AUTO_FEC_DEFAULT BIT(19)
+#define   GPON_INDENT_DESCRAMBLE_DISABLED BIT(18)
+#define   GPON_INDENT_SFRAME_PROTECT BIT(17)
+#define   GPON_INDENT_FRAME_FEC_DEFAULT BIT(16)
+#define   GPON_INDENT_UNLOCK_LIMIT GENMASK(15, 12)
+#define   GPON_INDENT_LOCK_LIMIT	GENMASK(11, 8)
+#define   GPON_INDENT_FEC_OFF_THRESHOLD GENMASK(5, 3)
+#define   GPON_INDENT_FEC_ON_THRESHOLD GENMASK(2, 0)
+
+#define RS_CTL		0x0214
+#define GPON_TEST_CTL	0x0218
 #define PHYRX_STATUS	0x021c
 #define   PHYRX_FEC_STATUS	GENMASK(15, 8)
 #define   PHYRX_SYNC_STATUS	GENMASK(7, 0)
 #define   PHYRX_SYNC_VALUE	0x0a
+#define PHYRX_MISC_TRIG	0x0220
+#define PHYRX_TEST_DBG_TRIG 0x0224
 
 #define XP_ERRCNT_EN	0x0230
 #define XP_ERRCNT_CTL	0x0234
@@ -79,6 +101,25 @@
 #define ERR_CODE_CNT	0x023c
 #define NOSOL_CODE_CNT	0x0240
 #define RX_CODE_CNT	0x0244
+#define FEC_SECONDS	0x0248
+#define BIP_CNT		0x024c
+#define FRAME_CNT_L	0x0250
+#define FRAME_CNT_H	0x0254
+#define LOF_CNT		0x0258
+#define FECDEC_TESTCTL	0x0260
+#define FECRS_TESTCTL	0x0264
+#define FECDEC_CTL	0x0268
+#define   FECDEC_CTL_ENABLE	BIT(0)
+#define FECDEC_SRAMCTL	0x0270
+#define DUMMY_REG_RX	0x0290
+#define RX_RESET	0x0294
+#define ROUND_TRIP_DELAY_CTRL 0x02cc
+#define ROUND_TRIP_CAL_MASK_CTRL 0x02d0
+#define ROUND_TRIP_DELAY_VALUE 0x02d4
+#define ROUND_TRIP_DELAY_STATIC 0x02d8
+#define PSYNC_DET_ALIGN_PHASE 0x02dc
+#define RX_TX_HEAD_TO_HEAD_DELAY 0x02e0
+#define MGMII_PHY_DELAY 0x03a0
 
 #define PHYTX_STATUS	0x040c
 #define TX_FRAME_COUNTER 0x0434
@@ -129,13 +170,37 @@ static const struct xpon_reg_desc xpon_regs[] = {
 	{ "ANAPWD",        ANAPWD },
 	{ "TDCSTA1",       TDCSTA1 },
 	{ "MISC",          MISC },
+	{ "GPON_PSYNC_CTL", GPON_PSYNC_CTL },
+	{ "GPON_INDENT_CTL", GPON_INDENT_CTL },
+	{ "RS_CTL",        RS_CTL },
+	{ "GPON_TEST_CTL", GPON_TEST_CTL },
 	{ "PHYRX_STATUS",  PHYRX_STATUS },
+	{ "PHYRX_MISC_TRIG", PHYRX_MISC_TRIG },
+	{ "PHYRX_TEST_DBG_TRIG", PHYRX_TEST_DBG_TRIG },
 	{ "XP_ERRCNT_EN",  XP_ERRCNT_EN },
 	{ "XP_ERRCNT_CTL", XP_ERRCNT_CTL },
 	{ "ERR_BYTE_CNT",  ERR_BYTE_CNT },
 	{ "ERR_CODE_CNT",  ERR_CODE_CNT },
 	{ "NOSOL_CODE_CNT", NOSOL_CODE_CNT },
 	{ "RX_CODE_CNT",   RX_CODE_CNT },
+	{ "FEC_SECONDS",   FEC_SECONDS },
+	{ "BIP_CNT",       BIP_CNT },
+	{ "FRAME_CNT_L",   FRAME_CNT_L },
+	{ "FRAME_CNT_H",   FRAME_CNT_H },
+	{ "LOF_CNT",       LOF_CNT },
+	{ "FECDEC_TESTCTL", FECDEC_TESTCTL },
+	{ "FECRS_TESTCTL", FECRS_TESTCTL },
+	{ "FECDEC_CTL",    FECDEC_CTL },
+	{ "FECDEC_SRAMCTL", FECDEC_SRAMCTL },
+	{ "DUMMY_REG_RX",  DUMMY_REG_RX },
+	{ "RX_RESET",      RX_RESET },
+	{ "ROUND_TRIP_DELAY_CTRL", ROUND_TRIP_DELAY_CTRL },
+	{ "ROUND_TRIP_CAL_MASK", ROUND_TRIP_CAL_MASK_CTRL },
+	{ "ROUND_TRIP_DELAY", ROUND_TRIP_DELAY_VALUE },
+	{ "ROUND_TRIP_STATIC", ROUND_TRIP_DELAY_STATIC },
+	{ "PSYNC_ALIGN_PHASE", PSYNC_DET_ALIGN_PHASE },
+	{ "RX_TX_HEAD_DELAY", RX_TX_HEAD_TO_HEAD_DELAY },
+	{ "MGMII_PHY_DELAY", MGMII_PHY_DELAY },
 	{ "PHYTX_STATUS",  PHYTX_STATUS },
 	{ "TX_FRAME_COUNTER", TX_FRAME_COUNTER },
 	{ "TX_BURST_COUNTER", TX_BURST_COUNTER },
@@ -175,7 +240,11 @@ static int status_show(struct seq_file *s, void *unused)
 	u32 anasta1 = xpon_read(diag, ANASTA1);
 	u32 anapwd = xpon_read(diag, ANAPWD);
 	u32 misc = xpon_read(diag, MISC);
+	u32 psync = xpon_read(diag, GPON_PSYNC_CTL);
+	u32 indent = xpon_read(diag, GPON_INDENT_CTL);
 	u32 rx = xpon_read(diag, PHYRX_STATUS);
+	u32 errcnt_en = xpon_read(diag, XP_ERRCNT_EN);
+	u32 fecdec = xpon_read(diag, FECDEC_CTL);
 	u32 sta = xpon_read(diag, XPON_STA);
 	u32 ints = xpon_read(diag, XPON_INT_STA);
 	u32 prbs = xpon_read(diag, BISTCTL_PRBS_TX_EN);
@@ -209,6 +278,30 @@ static int status_show(struct seq_file *s, void *unused)
 		   sync == PHYRX_SYNC_VALUE ? "yes" : "no", sync);
 	seq_printf(s, "rx_fec_status:        0x%02x\n",
 		   (u32)FIELD_GET(PHYRX_FEC_STATUS, rx));
+	seq_printf(s, "gpon_psync_ctl:       0x%08x\n", psync);
+	seq_printf(s, "gpon_sync_limits:     m1=%u m2=%u presync=%u insync=%u\n",
+		   (u32)FIELD_GET(GPON_PSYNC_M1_LIMIT, psync),
+		   (u32)FIELD_GET(GPON_PSYNC_M2_LIMIT, psync),
+		   (u32)FIELD_GET(GPON_PSYNC_PRESYNC_MISMATCH, psync),
+		   (u32)FIELD_GET(GPON_PSYNC_INSYNC_MISMATCH, psync));
+	seq_printf(s, "gpon_gsync_protect:   %s\n",
+		   psync & GPON_PSYNC_GSYNC_PROT ? "yes" : "no");
+	seq_printf(s, "gpon_indent_ctl:      0x%08x\n", indent);
+	seq_printf(s, "gpon_sframe_limits:   lock=%u unlock=%u\n",
+		   (u32)FIELD_GET(GPON_INDENT_LOCK_LIMIT, indent),
+		   (u32)FIELD_GET(GPON_INDENT_UNLOCK_LIMIT, indent));
+	seq_printf(s, "gpon_fec_thresholds:  on=%u off=%u default=%s\n",
+		   (u32)FIELD_GET(GPON_INDENT_FEC_ON_THRESHOLD, indent),
+		   (u32)FIELD_GET(GPON_INDENT_FEC_OFF_THRESHOLD, indent),
+		   indent & GPON_INDENT_FRAME_FEC_DEFAULT ? "on" : "off");
+	seq_printf(s, "gpon_descrambler:     %s\n",
+		   indent & GPON_INDENT_DESCRAMBLE_DISABLED ? "DISABLED" : "enabled");
+	seq_printf(s, "fec_decoder_enable:   %s (raw 0x%08x)\n",
+		   fecdec & FECDEC_CTL_ENABLE ? "yes" : "no", fecdec);
+	seq_printf(s, "rx_counter_enable:    err=%s bip=%s frame=%s (raw 0x%08x)\n",
+		   errcnt_en & BIT(0) ? "yes" : "no",
+		   errcnt_en & BIT(1) ? "yes" : "no",
+		   errcnt_en & BIT(2) ? "yes" : "no", errcnt_en);
 	seq_printf(s, "loss_of_signal:       %s\n",
 		   sta & XPON_STA_LOS ? "yes" : "no");
 	seq_printf(s, "xpon_setting:         0x%08x\n", xpon_setting);

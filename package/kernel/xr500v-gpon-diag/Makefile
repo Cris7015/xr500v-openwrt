@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=xr500v-gpon-diag
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -18,6 +18,7 @@ define KernelPackage/xr500v-gpon-diag/description
   Read-only platform diagnostics for the EN751221 xPON PHY register block
   used by the TP-Link Archer XR500v. The module never writes PHY, MAC, reset,
   counter, laser, APD, or interrupt registers, and registers no IRQ or poller.
+  It decodes the retained GPON synchronizer, FEC and transceiver polarity state.
 endef
 
 define Build/Prepare
