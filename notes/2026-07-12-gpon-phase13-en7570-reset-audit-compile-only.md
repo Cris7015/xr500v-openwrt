@@ -1,5 +1,10 @@
 # GPON bring-up — phase 13 guarded EN7570 reset audit (compile-only)
 
+> **Hardware result:** phase 14 executed this reset observer once.  The pulse
+> succeeded and self-cleared without changing any visible EN7570 register or TX
+> safety state.  See
+> `2026-07-13-gpon-phase14-en7570-reset-live.md`.
+
 Date: 2026-07-12
 
 ## Result
@@ -92,4 +97,3 @@ must be beside the router and ready to remove physical power.  Before building
 the temporary image, repeat the phase-12 stable snapshot hash and audit the
 DTB, SquashFS contents, module hash, kernel `0x2ffe00` ceiling, rootfs
 `0x300200` offset, 512-byte gap and TrendChip header.
-

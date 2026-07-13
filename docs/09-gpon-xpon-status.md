@@ -204,6 +204,14 @@ Notes on this:
   independent module/DT gates and all TX inhibits, self-pins before the sole
   OEM four-byte reset transfer, and performs no subsequent optical init.  It
   has no shipping DT match or autoload and has not been deployed to hardware.
+  The reset observer was subsequently executed once from the exact phase-12
+  baseline.  Its OEM four-byte trigger succeeded and self-cleared without
+  changing any of 28 visible EN7570 groups or the TX safety state.  A required
+  physical power cycle and a passive-image sysupgrade restored the normal DT;
+  the reset-only experiment must not be repeated.  It does not yet show whether
+  reset clears phase-10 autonomous LOS residue, because dirty state was not
+  recreated.  See
+  [`notes/2026-07-13-gpon-phase14-en7570-reset-live.md`](../notes/2026-07-13-gpon-phase14-en7570-reset-live.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 
