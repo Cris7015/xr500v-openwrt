@@ -224,7 +224,13 @@ The `-f` skips the "Bad trx header" validation (the proprietary header is not a 
 The patched `sysupgrade.bin` is split into the two partition payloads:
 
 - `k1.bin` = first 0x300000 (3 MB) of the patched image → `kernel1`.
-- `r1.bin` = from the squashfs magic `hsqs` to +0x1000000 (16 MB) → `rootfs1`. The `tplink-v2-header -R 0x400000` recipe places the squashfs at `0x200 + KERNEL_SIZE = 0x300200` for this device (KERNEL_SIZE = 3 MB), **not** at the originally hardcoded 0x400000 — the slicer locates `hsqs` dynamically to be safe.
+- `r1.bin` = from the validated SquashFS magic at exact file offset `0x300200`
+  to +0x1000000 (16 MB) → `rootfs1`.  The `tplink-v2-header -R 0x400000`
+  recipe places the filesystem at `0x200 + KERNEL_SIZE = 0x300200` for this
+  device (KERNEL_SIZE = 3 MB), **not** at the originally hardcoded `0x400000`.
+  The slicer uses the exact validated offset rather than searching for the
+  first `hsqs` byte sequence, which could theoretically occur inside the
+  compressed kernel.
 
 ### End-to-end procedure
 
@@ -238,6 +244,31 @@ The patched `sysupgrade.bin` is split into the two partition payloads:
 5. TFTP k1.bin/r1.bin to /tmp; mtd write kernel1; mtd writeflash rootfs1
 6. bflag set 1, power-cycle (no intercept) -> OpenWrt
 ```
+
+The helper is fail-closed around the destructive boundary.  It first runs the
+XR500v image validator (TrendChip magic, 3 MiB kernel layout and SquashFS at
+`0x300200`), requires exact local payload sizes, then records a dedicated TFTP
+session.  Both download return codes and both router-side sizes must match
+before a second telnet session can issue any MTD command.  The rootfs write is
+gated on `kernel1` returning `RC=0`, and the host requires `K_RC_0`, `R_RC_0`
+and a final completion marker before printing success.  Keep the complete
+transcript when diagnosing a failure; a timeout or a missing marker is a failed
+flash attempt even if the telnet pipeline itself exits zero.
+
+For a high-confidence lab verification, read the partitions back before
+changing `bflag`.  Stock exposes `kernel1` as `/dev/mtdblock6`; `rootfs1` can be
+read from the full-device block node at offset `0x1b00000`:
+
+```sh
+tftp -p -l /dev/mtdblock6 -r readback_kernel1.bin PC_IP
+dd if=/dev/mtdblock0 of=/tmp/readback_rootfs1.bin \
+   bs=4096 skip=6912 count=4096
+tftp -p -l /tmp/readback_rootfs1.bin -r readback_rootfs1.bin PC_IP
+```
+
+This requires a TFTP server which accepts WRQ/uploads.  Compare sizes and a
+cryptographic hash against the two payloads on the host; do not treat only the
+`hsqs` magic as a full-partition verification.
 
 ### Web install (stock web UI, no UART)
 
