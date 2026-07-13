@@ -242,6 +242,17 @@ Notes on this:
   boundary into a specifically justified RX analogue calibration prerequisite.
   See
   [`notes/2026-07-13-gpon-phase19-rssi-gain-los-live.md`](../notes/2026-07-13-gpon-phase19-rssi-gain-los-live.md).
+  Phase 20 adds a fourth, still compile-only and mutually exclusive observer
+  mode for the last bounded RX-only prerequisite before a separate APD safety
+  study.  It reproduces only the OEM transient RSSI Vref/V sampling, validates
+  the same-device ADC oracle, restores and directly reads back its three
+  control groups, then permits the audited static gain and LOS sequence only
+  if every transfer and TX gate succeeds.  Its maximum is 15 writes.  Directed
+  readbacks between calibration and LOS avoid erasing a possible transient
+  effect, while the previous static-gain mode retains its full intermediate
+  snapshot.  This mode has no APD, full ADC-bandgap calibration, ERC/MPD,
+  current, laser, xPON MMIO, MAC or QDMA path and has not been deployed.  See
+  [`notes/2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md`](../notes/2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 

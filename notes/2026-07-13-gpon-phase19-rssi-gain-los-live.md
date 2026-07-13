@@ -178,3 +178,10 @@ Any next active phase must first identify a bounded RX-only prerequisite from
 the OEM call graph and calibration inputs.  TX/APD/current/laser paths remain
 out of scope, and every non-transactional experiment still requires a physical
 power-cycle recovery plus restoration of the passive image.
+
+## Compile-only follow-up
+
+Phase 20 implements the bounded transient OEM RSSI-calibration prerequisite
+identified here, with strict restoration/readback and TX gates, but has not
+been deployed and therefore does not alter this live result.  See
+[`2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md`](2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md).
