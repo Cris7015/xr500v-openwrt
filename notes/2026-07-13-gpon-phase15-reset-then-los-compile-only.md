@@ -1,5 +1,10 @@
 # GPON bring-up — phase 15 reset-then-LOS observer (compile-only)
 
+> **Hardware result:** phase 16 executed this mode once.  Reset did not change
+> the clean baseline; LOS programming completed successfully and started the
+> same autonomous state as phase 10.  See
+> `2026-07-13-gpon-phase16-reset-then-los-live.md`.
+
 Date: 2026-07-13
 
 ## Purpose
@@ -42,4 +47,3 @@ router deployment: none
 The next action is the same full temporary-image audit used in phase 14,
 followed by one fibre-disconnected execution and mandatory physical power-cycle
 recovery.
-

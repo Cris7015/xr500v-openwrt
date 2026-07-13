@@ -212,6 +212,13 @@ Notes on this:
   reset clears phase-10 autonomous LOS residue, because dirty state was not
   recreated.  See
   [`notes/2026-07-13-gpon-phase14-en7570-reset-live.md`](../notes/2026-07-13-gpon-phase14-en7570-reset-live.md).
+  Phase 16 then executed a distinct reset-then-LOS observer.  Reset again left
+  all 28 visible groups unchanged; the five isolated LOS writes succeeded and
+  produced the same autonomous LOS/timeout state as phase 10 while every TX
+  barrier remained safe.  This proves phase 10 failed its rollback model, not
+  LOS programming, and closes the no-fibre reset dependency question.  The
+  next useful boundary is an initialized live-fibre RX-only A/B test.  See
+  [`notes/2026-07-13-gpon-phase16-reset-then-los-live.md`](../notes/2026-07-13-gpon-phase16-reset-then-los-live.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 
