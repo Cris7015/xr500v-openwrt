@@ -251,8 +251,19 @@ Notes on this:
   readbacks between calibration and LOS avoid erasing a possible transient
   effect, while the previous static-gain mode retains its full intermediate
   snapshot.  This mode has no APD, full ADC-bandgap calibration, ERC/MPD,
-  current, laser, xPON MMIO, MAC or QDMA path and has not been deployed.  See
+  current, laser, xPON MMIO, MAC or QDMA path.  See
   [`notes/2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md`](../notes/2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md).
+  Phase 21 executed that exact 15-write observer once.  Vref `0x020a`, V
+  `0x0285` and delta `0x007b` reproduced the same-device stock oracle, proving
+  that the transient RSSI calibration itself ran correctly.  Nevertheless,
+  connected, disconnected and reconnected fibre all produced 20/20 asserted
+  LOS samples with `LOS_DBG[3]=0x89` and timeout `0x3e`.  The passive image was
+  restored; a warm reboot again retained the external-chip state and the
+  required physical power cycle restored the exact cold baseline.  This
+  closes reset, transient RSSI calibration, static gain and LOS as sufficient
+  prerequisites.  Any APD experiment is a separate high-voltage safety phase
+  which must begin with a read-only rail/register/failure-mode audit.  See
+  [`notes/2026-07-13-gpon-phase21-rssi-calibration-gain-los-live.md`](../notes/2026-07-13-gpon-phase21-rssi-calibration-gain-los-live.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 

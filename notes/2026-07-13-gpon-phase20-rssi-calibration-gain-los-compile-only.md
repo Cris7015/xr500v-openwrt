@@ -153,3 +153,11 @@ currently remains on the passive safe image.
 Phase 18 introduced the static gain observer and phase 19 closed it live:
 [`phase 18`](2026-07-13-gpon-phase18-rssi-gain-los-compile-only.md) and
 [`phase 19`](2026-07-13-gpon-phase19-rssi-gain-los-live.md).
+
+## Live follow-up
+
+Phase 21 later executed this exact observer once.  The calibration reproduced
+the stock Vref/V oracle exactly, but connected, disconnected and reconnected
+fibre remained LOS-identical.  The passive image and cold baseline were fully
+restored.  See
+[`2026-07-13-gpon-phase21-rssi-calibration-gain-los-live.md`](2026-07-13-gpon-phase21-rssi-calibration-gain-los-live.md).

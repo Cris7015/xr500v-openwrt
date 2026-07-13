@@ -182,6 +182,10 @@ power-cycle recovery plus restoration of the passive image.
 ## Compile-only follow-up
 
 Phase 20 implements the bounded transient OEM RSSI-calibration prerequisite
-identified here, with strict restoration/readback and TX gates, but has not
-been deployed and therefore does not alter this live result.  See
-[`2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md`](2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md).
+identified here, with strict restoration/readback and TX gates.  Phase 21
+subsequently executed it once: the calibration reproduced the exact stock
+Vref/V oracle, but a connected/disconnected/reconnected series remained
+LOS-identical.  See
+[`2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md`](2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md)
+and
+[`2026-07-13-gpon-phase21-rssi-calibration-gain-los-live.md`](2026-07-13-gpon-phase21-rssi-calibration-gain-los-live.md).
