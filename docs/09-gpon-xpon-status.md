@@ -199,6 +199,11 @@ Notes on this:
   documented, and the passive diagnostic now reads `SVADC_PD`.  No active path
   has APD, laser, TGEN, Tx-SD, DDMI, reset, MAC or interrupt access.  No
   experimental DT compatible or opt-in is present in shipping firmware.
+  A still-separate compile-only reset-audit package now models the next
+  non-transactional boundary.  It requires an exact phase-12 EN7570 baseline,
+  independent module/DT gates and all TX inhibits, self-pins before the sole
+  OEM four-byte reset transfer, and performs no subsequent optical init.  It
+  has no shipping DT match or autoload and has not been deployed to hardware.
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 
