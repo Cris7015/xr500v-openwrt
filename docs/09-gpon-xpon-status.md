@@ -132,11 +132,13 @@ This is the decisive blocker for end-to-end work. A GPON ONU is half of a point-
 1. An **OLT to negotiate with** — without a head-end there is nothing to range against, no grants, no link. The upstream framing is "build, lease, or borrow" an OLT.
 2. An **ISP registration** — GPON ONUs authenticate to the OLT, typically with an ONU/ONT **serial number + password** provisioned on the operator side. Bringing the optical WAN up means presenting credentials the operator has on file for a registered ONU.
 
-The lab now has intermittent access to the live Movistar fibre drop.  That is
-useful for receive-only A/B tests while physical TX-disable stays asserted,
-but it is not a controlled OLT and does not remove the need for operator
-credentials/cooperation before ranging, O5 or traffic tests.  GPON therefore
-still cannot be validated in isolation the way LAN, WiFi, USB or VoIP can.
+The lab now has intermittent access to the live Movistar fibre drop.  It is
+not a controlled OLT, so GPON still cannot be validated in isolation the way
+LAN, WiFi, USB or VoIP can.  Phase 23 did establish that the stock firmware's
+existing ONU identity is accepted on that drop: stock reached O5, completed
+OMCI activity and established its PPPoE service.  This provides a real
+end-to-end oracle, but it does not authorise arbitrary OpenWrt transmission or
+replace the missing OpenWrt PLOAM, OMCI and WAN-QDMA integration.
 
 ## Upstream stance (cjdelisle / EcoNet EN751221 project)
 
@@ -279,18 +281,29 @@ Notes on this:
   receiver dependency, but live high-voltage testing remains gated on a stock
   transition/electrical safety oracle.  See
   [`notes/2026-07-13-gpon-phase22-apd-safety-audit-passive-map.md`](../notes/2026-07-13-gpon-phase22-apd-safety-audit-passive-map.md).
+  Phase 23 cold-booted stock on the authorised live fibre and established the
+  missing APD transition oracle.  A directed read found `b1 09 20 00`, then
+  90/90 samples held `b2 09 20 00`; all 91 OVP samples were zero and the
+  codes exactly match the factory temperature equation.  More importantly,
+  stock held `RX_SYNC=0xa` and `G_ACTIVATION=0x5` (O5), completed OMCI
+  activity and established PPPoE over the PON-backed `nas1_0`.  Thus the
+  fibre, ONU registration and stock data path are proven end to end.  No
+  OpenWrt APD write occurred; OVP zero is a software-latch oracle, not an
+  electrical rail measurement.  See
+  [`notes/2026-07-13-gpon-phase23-stock-apd-o5-oracle.md`](../notes/2026-07-13-gpon-phase23-stock-apd-o5-oracle.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 
 ## Status and outlook
 
 GPON is still unported, but no-OLT bench work is useful for identifying and
-validating the individual hardware blocks.  It has now confirmed the xPON PHY
-CSR window and the EN7570 control interface without enabling TX.  What cannot
-be validated on the bench is the actual GPON outcome: ranging, burst timing,
-PLOAM O5, GEM traffic and OMCI require a head-end plus operator registration.
-The WAN-QDMA model and the new passive probes are a sound foundation, not yet a
-working optical WAN.
+validating the individual hardware blocks.  It has confirmed the xPON PHY CSR
+window and the EN7570 control interface without enabling OpenWrt TX.  The live
+drop now supplies a stock end-to-end oracle: the OEM system reaches O5, runs
+OMCI and carries PPPoE service with its authorised identity.  Reproducing that
+outcome under OpenWrt still requires safe APD/PHY bring-up, PLOAM, burst timing,
+GEM/OMCI and WAN-QDMA integration.  The current probes are a sound foundation,
+not yet a working OpenWrt optical WAN.
 
 ## Cross-references
 
