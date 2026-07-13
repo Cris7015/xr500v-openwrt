@@ -236,3 +236,13 @@ digital TX gates; perform only the exact OEM-width APD sequence; read APD and
 OVP after every transfer; issue no retry or rollback; retain GPIO16 high; and
 require physical power removal afterward.  The first such run must be done
 with fibre disconnected and the operator ready to remove power.
+
+## Follow-up
+
+Phase 24 implemented and executed that observer exactly once.  On the
+fibre-disconnected unit it reproduced all three OEM transitions through
+`a2 09 20 00`, with exact readback, zero OVP and every guarded TX/current path
+unchanged.  The required physical cut restored the cold EN7570 state; the
+passive image was then restored and verified after a second cold boot.  This
+closes the A2-only boundary but does not yet test fibre reception.  See
+[`2026-07-13-gpon-phase24-apd-a2-live.md`](2026-07-13-gpon-phase24-apd-a2-live.md).

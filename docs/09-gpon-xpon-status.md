@@ -291,6 +291,19 @@ Notes on this:
   OpenWrt APD write occurred; OVP zero is a software-latch oracle, not an
   electrical rail measurement.  See
   [`notes/2026-07-13-gpon-phase23-stock-apd-o5-oracle.md`](../notes/2026-07-13-gpon-phase23-stock-apd-o5-oracle.md).
+  Phase 24 then executed a new APD-only observer exactly once with fibre
+  disconnected.  It reproduced the per-unit OEM bootstrap
+  `00 08 00 00 -> 00 08 20 00 -> 00 09 20 00 -> a2 09 20 00` with three
+  successful transfers and exact pre/post readback.  Nine ordered OVP reads
+  remained zero; all 16 analogue/TX/reset guards remained unchanged, while
+  GPIO16 stayed asserted, the Ibias/Imod control registers stayed zero and
+  all observed xPON TX/test/IRQ gates stayed inactive.  A required physical
+  power cut restored the cold EN7570 state, after which the passive image and
+  normal DT were restored and verified through another cold boot.
+  This validates only the isolated initial APD bootstrap: fibre reception,
+  physical rail voltage, the thermal worker and complete PHY bring-up remain
+  unproved.  See
+  [`notes/2026-07-13-gpon-phase24-apd-a2-live.md`](../notes/2026-07-13-gpon-phase24-apd-a2-live.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 
@@ -300,10 +313,13 @@ GPON is still unported, but no-OLT bench work is useful for identifying and
 validating the individual hardware blocks.  It has confirmed the xPON PHY CSR
 window and the EN7570 control interface without enabling OpenWrt TX.  The live
 drop now supplies a stock end-to-end oracle: the OEM system reaches O5, runs
-OMCI and carries PPPoE service with its authorised identity.  Reproducing that
-outcome under OpenWrt still requires safe APD/PHY bring-up, PLOAM, burst timing,
-GEM/OMCI and WAN-QDMA integration.  The current probes are a sound foundation,
-not yet a working OpenWrt optical WAN.
+OMCI and carries PPPoE service with its authorised identity.  OpenWrt has now
+also reproduced the minimum initial APD sequence in isolation while retaining
+all observed TX barriers, but it has not yet demonstrated optical reception.
+Reproducing the stock outcome still requires a complete, safe receiver/PHY
+bring-up, thermal APD policy, PLOAM, burst timing, GEM/OMCI and WAN-QDMA
+integration.  The current probes are a sound foundation, not yet a working
+OpenWrt optical WAN.
 
 ## Cross-references
 
