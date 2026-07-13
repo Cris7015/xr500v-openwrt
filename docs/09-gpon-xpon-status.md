@@ -304,6 +304,20 @@ Notes on this:
   physical rail voltage, the thermal worker and complete PHY bring-up remain
   unproved.  See
   [`notes/2026-07-13-gpon-phase24-apd-a2-live.md`](../notes/2026-07-13-gpon-phase24-apd-a2-live.md).
+  Phase 25 then loaded the combined observer once with the authorised fibre
+  connected.  The complete cold and post-reset gates passed, and its first
+  five fixed I2C writes all returned success.  The following first calibration
+  Vref sample was `0x020b`, outside the immutable `0x020a` oracle, so the
+  observer returned `-ERANGE` and stopped fail-closed.  The remaining 13 I2C
+  writes, RSSI gain/LOS, the RX-polarity MMIO write, all APD writes and all 21
+  RX samples were not attempted.  GPIO16 `TX_DISABLE` remained asserted,
+  while the observed xPON TX, rogue, PRBS, test-frame and interrupt gates
+  remained inactive.  An immediate 35-second physical power cut restored the
+  complete cold external state; the phase-14 passive image and normal DT were
+  then restored and verified after a second cold boot.  This validates the
+  strict abort path, not optical reception, APD operation or the cause of the
+  one-LSB Vref difference.  See
+  [`notes/2026-07-13-gpon-phase25-rx-apd-a2-live-safe-abort.md`](../notes/2026-07-13-gpon-phase25-rx-apd-a2-live-safe-abort.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 
@@ -319,7 +333,10 @@ all observed TX barriers, but it has not yet demonstrated optical reception.
 Reproducing the stock outcome still requires a complete, safe receiver/PHY
 bring-up, thermal APD policy, PLOAM, burst timing, GEM/OMCI and WAN-QDMA
 integration.  The current probes are a sound foundation, not yet a working
-OpenWrt optical WAN.
+OpenWrt optical WAN.  The first combined live-fibre observer stopped before
+LOS, polarity and APD because its deliberately exact Vref oracle differed by
+one ADC count; that preserved the safety boundary but left the combined RX
+question unanswered.
 
 ## Cross-references
 

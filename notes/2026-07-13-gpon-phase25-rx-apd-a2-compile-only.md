@@ -194,22 +194,31 @@ observer is absent from SquashFS, both image manifests, device packages and
 autoload directories.  It must be copied to `/tmp` only after a cold passive
 preflight.
 
-## Live protocol, not yet executed
+## Historical live protocol
 
-The fibre stays disconnected through image installation and the mandatory
-physical cold boot.  Before copying the module, the live DT and cold EN7570,
-GPIO and xPON safety state must be checked again.  Only after that passes may
-the authorised Movistar fibre be connected.
+Before execution, the fibre had to stay disconnected through image
+installation and the mandatory physical cold boot.  The live DT and cold
+EN7570, GPIO and xPON safety state had to pass again before the authorised
+Movistar fibre could be connected.
 
-The future one-shot invocation is:
+The historical one-shot invocation was:
 
 ```text
 insmod /tmp/phase25-rx-apd-a2.ko arm_en7570_rx_apd_a2=1
 ```
 
-Status and the kernel tail must be captured immediately.  The router must then
-be physically powered off for at least 30 seconds, regardless of success,
-failure, SSH loss or ambiguous output.  There must be no `rmmod`, software
-reboot, retry or rollback after the first write.  A cold-reset proof and final
-restoration to the known phase-14 passive image are required before this phase
-can be closed.
+The protocol required immediate status and kernel-tail capture, followed by a
+physical power-off interval of at least 30 seconds regardless of success,
+failure, SSH loss or ambiguous output.  It prohibited `rmmod`, software reboot,
+retry or rollback after the first write, and required both a cold-reset proof
+and restoration to the known phase-14 passive image.
+
+## Live follow-up
+
+This exact artifact was later loaded once with the authorised fibre connected.
+After five successful prefix writes, the first calibration Vref sample was
+`0x020b` rather than the required `0x020a`; the strict gate returned `-ERANGE`
+before gain, LOS, RX polarity, APD or sampling.  Physical cold recovery and
+the known passive image were fully restored.  This artifact is closed and
+must not be repeated.  See
+[`2026-07-13-gpon-phase25-rx-apd-a2-live-safe-abort.md`](2026-07-13-gpon-phase25-rx-apd-a2-live-safe-abort.md).
