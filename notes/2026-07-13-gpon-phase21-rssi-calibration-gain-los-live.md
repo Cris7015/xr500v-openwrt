@@ -182,3 +182,6 @@ stock APD enable sequence.  TX/current/laser paths remain out of scope.
 
 The implementation and compile audit are recorded in
 [`2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md`](2026-07-13-gpon-phase20-rssi-calibration-gain-los-compile-only.md).
+
+The subsequent read-only APD and full-register audit is recorded in
+[`2026-07-13-gpon-phase22-apd-safety-audit-passive-map.md`](2026-07-13-gpon-phase22-apd-safety-audit-passive-map.md).

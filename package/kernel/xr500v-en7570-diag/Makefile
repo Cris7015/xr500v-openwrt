@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=xr500v-en7570-diag
-PKG_RELEASE:=6
+PKG_RELEASE:=7
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -22,7 +22,9 @@ define KernelPackage/xr500v-en7570-diag/description
   enables the laser, changes APD state, loads calibration, or starts ADC/DDMI
   conversions.
   It also reports raw reset, Rx-front-end, LOS calibration, ADC/probe, and ERC
-  filter registers without interpreting or modifying them.
+  filter registers without interpreting or modifying them. A separate
+  debugfs file mirrors the OEM 193-word register dump from 0x000 through
+  0x300 using pointer-plus-read I2C transactions only.
 endef
 
 define Build/Prepare

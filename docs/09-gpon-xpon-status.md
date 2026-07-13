@@ -264,6 +264,21 @@ Notes on this:
   prerequisites.  Any APD experiment is a separate high-voltage safety phase
   which must begin with a read-only rail/register/failure-mode audit.  See
   [`notes/2026-07-13-gpon-phase21-rssi-calibration-gain-los-live.md`](../notes/2026-07-13-gpon-phase21-rssi-calibration-gain-los-live.md).
+  Phase 22 audited the separate APD/high-voltage boundary without issuing an
+  APD or other register-data write.  The exact factory matrix yields the OEM
+  initial code `0xa2`; the functional stock dump later contained
+  `b3 09 20 00`.  The OEM APD core is only soft-start, control-enable and one
+  DAC byte, but it has no OVP handling, validated clamp or software shutdown.
+  A current merbanan proposal also reverses this board's hot/cold slope words
+  and reads the wrong legacy step offset, so it must not be copied literally.
+  The passive EN7570 diagnostic now exposes all 193 aligned groups from
+  `0x000` through `0x300`.  Live comparison found 176 identical groups and 17
+  known differences: TX controls/state, receiver operations already tested,
+  and APD; it found no hidden stable RX prerequisite.  The router remained at
+  the exact cold APD/TX baseline.  APD is now a credible, narrowly modelled
+  receiver dependency, but live high-voltage testing remains gated on a stock
+  transition/electrical safety oracle.  See
+  [`notes/2026-07-13-gpon-phase22-apd-safety-audit-passive-map.md`](../notes/2026-07-13-gpon-phase22-apd-safety-audit-passive-map.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 

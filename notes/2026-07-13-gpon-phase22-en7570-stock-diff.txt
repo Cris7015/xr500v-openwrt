@@ -1,0 +1,26 @@
+# EN7570 OpenWrt passive vs functional stock
+# byte order: raw I2C
+# OpenWrt input SHA-256: 2899c200f8afff7e63e348c34931c244cdf50459c4564668e0ee411d99f13d50
+# stock input SHA-256: b1b5aa2a5b0a01bf5bcf996f99352f7a952ece05afe4c1accaba3b9183203f02
+live_groups=193
+stock_groups=193
+same=176
+different=17
+unknown=0
+0x004 openwrt=00020000 stock=00012001
+0x008 openwrt=99000020 stock=9a5f5c08
+0x00c openwrt=40000000 stock=33000000
+0x010 openwrt=00000000 stock=5c5f0000
+0x014 openwrt=00240000 stock=00240500
+0x024 openwrt=00000100 stock=00004104
+0x030 openwrt=00080000 stock=b3092000
+0x100 openwrt=ff8fff0f stock=ff0fff0f
+0x11c openwrt=06083c36 stock=061f1c10
+0x120 openwrt=10050000 stock=051f2200
+0x130 openwrt=017f0010 stock=2e186588
+0x138 openwrt=00000000 stock=37020000
+0x13c openwrt=30120010 stock=35124b82
+0x148 openwrt=00000000 stock=eb040000
+0x14c openwrt=30120010 stock=3512fc84
+0x154 openwrt=00000000 stock=79010000
+0x16c openwrt=3f2f0f00 stock=ffa75800

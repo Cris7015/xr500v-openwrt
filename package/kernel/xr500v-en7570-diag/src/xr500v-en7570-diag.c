@@ -44,6 +44,7 @@
 #define EN7570_ERC_FILTER_CTRL	0x016c
 #define EN7570_FT_ADC_CLK_CLR	0x0170
 #define EN7570_SW_RESET		0x0300
+#define EN7570_REGISTER_DUMP_LAST EN7570_SW_RESET
 #define EN7570_EXPECTED_ID	0x03
 
 struct xr500v_en7570_diag {
@@ -226,6 +227,45 @@ static const struct file_operations status_fops = {
 	.release = single_release,
 };
 
+/*
+ * Mirror the OEM mt7570_register_dump(193) range without its printk side
+ * effects.  Every transaction uses en7570_read(), whose first I2C message is
+ * only the 16-bit register pointer and whose second message is read-only.
+ */
+static int registers_show(struct seq_file *s, void *unused)
+{
+	struct xr500v_en7570_diag *diag = s->private;
+	u8 data[4];
+	u16 reg;
+	int ret;
+
+	seq_puts(s, "# EN7570 passive register dump: raw I2C byte order\n");
+	seq_puts(s, "# range 0x000..0x300, stride 4, register-data writes 0\n");
+
+	for (reg = 0; reg <= EN7570_REGISTER_DUMP_LAST; reg += 4) {
+		ret = en7570_read(diag->client, reg, data, sizeof(data));
+		if (ret)
+			seq_printf(s, "0x%03x: read error %d\n", reg, ret);
+		else
+			seq_printf(s, "0x%03x: %4ph\n", reg, data);
+	}
+
+	return 0;
+}
+
+static int registers_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, registers_show, inode->i_private);
+}
+
+static const struct file_operations registers_fops = {
+	.owner = THIS_MODULE,
+	.open = registers_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 static int xr500v_en7570_diag_probe(struct i2c_client *client)
 {
 	struct xr500v_en7570_diag *diag;
@@ -262,6 +302,8 @@ static int xr500v_en7570_diag_probe(struct i2c_client *client)
 
 	debugfs_create_file("status", 0444, diag->debugfs_dir, diag,
 			    &status_fops);
+	debugfs_create_file("registers", 0444, diag->debugfs_dir, diag,
+			    &registers_fops);
 
 	dev_info(&client->dev,
 		 "EN7570 identified: silicon ID 0x%02x, variant 0x%02x; passive mode\n",
