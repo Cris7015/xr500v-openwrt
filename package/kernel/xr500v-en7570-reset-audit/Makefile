@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=xr500v-en7570-reset-audit
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -17,9 +17,9 @@ define KernelPackage/xr500v-en7570-reset-audit/description
   Non-shipping, non-autoload EN7570 whole-device reset observation prototype.
   It requires independent module and DT opt-ins, an exact per-register phase-12
   baseline, asserted physical TX_DISABLE and inactive xPON TX/test/IRQ state.
-  It supports either the proven reset-only observation or a reset-then-LOS
-  receiver observation. Both are non-transactional, use only fixed-register
-  four-byte writes, perform no TX/APD/DDMI initialization or software rollback,
+  It supports reset-only, reset-then-LOS, or reset-RSSI-gain-then-LOS receiver
+  observations. All modes are non-transactional, use only fixed-register
+  four-byte writes, perform no TX/APD/DDMI/ADC calibration or software rollback,
   and keep TX_DISABLE asserted afterward.
 endef
 

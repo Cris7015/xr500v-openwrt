@@ -4,6 +4,9 @@
 > the clean baseline; LOS programming completed successfully and started the
 > same autonomous state as phase 10.  See
 > `2026-07-13-gpon-phase16-reset-then-los-live.md`.
+> Phase 17 subsequently proved that this state does not respond to downstream
+> light; the OEM comparison is in
+> `2026-07-13-gpon-phase17-live-fibre-oem-oracle.md`.
 
 Date: 2026-07-13
 

@@ -196,14 +196,14 @@ Notes on this:
   rollback and even a software reboot do not undo.  That stage is now
   quarantined and always returns `-EOPNOTSUPP`; the earlier ESD, polarity and
   counter stages remain guarded.  The factory thresholds (`0x1c/0x10`) remain
-  documented, and the passive diagnostic now reads `SVADC_PD`.  No active path
-  has APD, laser, TGEN, Tx-SD, DDMI, reset, MAC or interrupt access.  No
+  documented, and the passive diagnostic now reads `SVADC_PD`.  That RX-init
+  package has no APD, laser, TGEN, Tx-SD, DDMI, reset, MAC or interrupt path. No
   experimental DT compatible or opt-in is present in shipping firmware.
-  A still-separate compile-only reset-audit package now models the next
-  non-transactional boundary.  It requires an exact phase-12 EN7570 baseline,
-  independent module/DT gates and all TX inhibits, self-pins before the sole
-  OEM four-byte reset transfer, and performs no subsequent optical init.  It
-  has no shipping DT match or autoload and has not been deployed to hardware.
+  A still-separate reset-audit package models non-transactional EN7570
+  experiments.  It requires an exact phase-12 baseline, independent module/DT
+  gates and all TX inhibits, and self-pins before its first data write.  It has
+  no shipping DT match or autoload; its guarded modes have only been installed
+  manually in audited temporary images.
   The reset observer was subsequently executed once from the exact phase-12
   baseline.  Its OEM four-byte trigger succeeded and self-cleared without
   changing any of 28 visible EN7570 groups or the TX safety state.  A required
@@ -219,6 +219,18 @@ Notes on this:
   LOS programming, and closes the no-fibre reset dependency question.  The
   next useful boundary is an initialized live-fibre RX-only A/B test.  See
   [`notes/2026-07-13-gpon-phase16-reset-then-los-live.md`](../notes/2026-07-13-gpon-phase16-reset-then-los-live.md).
+  Phase 17 performed that A/B test: connected and disconnected fibre produced
+  the same EN7570 LOS state.  OEM stock then reached `RX_SYNC=0xa`, active
+  GPON/OMCI traffic and service on the same fibre, proving the physical path and
+  OLT are good.  A full stock EN7570 dump matched all three programmed LOS
+  blocks but exposed the strongest omitted stable receiver candidate,
+  `LA_PWD[18:16]=5`.  The compile-only observer now has a third guarded mode
+  which isolates exactly that one RSSI-gain RMW before the proven LOS sequence;
+  it still has no ADC/RSSI calibration, APD, current, TGEN, laser, MAC or QDMA
+  path.  See
+  [`notes/2026-07-13-gpon-phase17-live-fibre-oem-oracle.md`](../notes/2026-07-13-gpon-phase17-live-fibre-oem-oracle.md)
+  and
+  [`notes/2026-07-13-gpon-phase18-rssi-gain-los-compile-only.md`](../notes/2026-07-13-gpon-phase18-rssi-gain-los-compile-only.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 

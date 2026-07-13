@@ -5,9 +5,10 @@
  * This driver has no matching shipping DT node and no autoload entry. It
  * accepts only the exact phase-12 retained baseline, asserts physical
  * TX_DISABLE, verifies all xPON transmit paths are inactive, performs the OEM
- * four-byte SW_RESET RMW once, then exposes before/after snapshots. A separate
- * mutually-exclusive mode may subsequently apply only the OEM LOS receiver
- * sequence. It does no ADC, RSSI, APD, TGEN, current, interrupt or rollback.
+ * four-byte SW_RESET RMW once, then exposes before/after snapshots. Separate
+ * mutually-exclusive modes may subsequently apply either the OEM LOS receiver
+ * sequence alone or its single RSSI-gain prerequisite followed by LOS. It does
+ * no ADC/RSSI calibration, APD, TGEN, current, interrupt or rollback.
  */
 
 #include <linux/debugfs.h>
@@ -31,6 +32,7 @@
 
 #define EN7570_ID_REG		0x0170
 #define EN7570_EXPECTED_ID	0x03
+#define EN7570_LA_PWD		0x0014
 #define EN7570_SAFE_PROTECT	0x0100
 #define EN7570_LOS_CTRL1		0x011c
 #define EN7570_LOS_CTRL2		0x0120
@@ -44,6 +46,8 @@
 #define EN7570_LOS_THRESHOLD_MASK GENMASK(6, 0)
 #define EN7570_ADC_REV2_ENABLE	BIT(2)
 #define EN7570_ADC_REV1_ENABLE	BIT(6)
+#define EN7570_RSSI_GAIN_MASK	GENMASK(2, 0)
+#define EN7570_RSSI_GAIN_NORMAL	0x05
 
 struct en7570_audit_reg {
 	const char *name;
@@ -90,17 +94,24 @@ struct xr500v_reset_audit {
 	struct dentry *debugfs_dir;
 	u8 before[ARRAY_SIZE(audit_regs)][4];
 	u8 after[ARRAY_SIZE(audit_regs)][4];
+	u8 after_rssi[ARRAY_SIZE(audit_regs)][4];
 	u8 after_los[ARRAY_SIZE(audit_regs)][4];
 	u8 reset_write[4];
 	unsigned int i2c_write_attempts;
 	int reset_result;
 	int post_snapshot_result;
 	int postflight_result;
+	int rssi_result;
+	int rssi_snapshot_result;
+	int rssi_verify_result;
+	int rssi_postflight_result;
 	int los_result;
 	int los_snapshot_result;
 	int los_postflight_result;
 	bool module_pinned;
 	bool reset_then_los;
+	bool rssi_gain;
+	bool rssi_attempted;
 	bool los_attempted;
 	u8 los_high_threshold;
 	u8 los_low_threshold;
@@ -115,6 +126,11 @@ static bool arm_en7570_reset_then_los;
 module_param(arm_en7570_reset_then_los, bool, 0444);
 MODULE_PARM_DESC(arm_en7570_reset_then_los,
 	"Arm one-shot EN7570 reset followed by isolated OEM LOS receiver setup");
+
+static bool arm_en7570_reset_rssi_los;
+module_param(arm_en7570_reset_rssi_los, bool, 0444);
+MODULE_PARM_DESC(arm_en7570_reset_rssi_los,
+	"Arm one-shot EN7570 reset, OEM RSSI gain, then isolated LOS setup");
 
 static u32 xpon_read(struct xr500v_reset_audit *audit, u32 reg)
 {
@@ -166,8 +182,8 @@ static int en7570_reset_write(struct xr500v_reset_audit *audit,
 	return 0;
 }
 
-static int en7570_los_write(struct xr500v_reset_audit *audit, u16 reg,
-			     const u8 value[4])
+static int en7570_rx_write(struct xr500v_reset_audit *audit, u16 reg,
+			    const u8 value[4])
 {
 	u8 data[6] = { reg >> 8, reg & 0xff };
 	struct i2c_msg message = {
@@ -177,7 +193,7 @@ static int en7570_los_write(struct xr500v_reset_audit *audit, u16 reg,
 	};
 	int ret;
 
-	if (reg != EN7570_LOS_CTRL1 && reg != 0x0024 &&
+	if (reg != EN7570_LA_PWD && reg != EN7570_LOS_CTRL1 && reg != 0x0024 &&
 	    reg != EN7570_LOS_CTRL2)
 		return -EINVAL;
 	if (gpiod_get_direction(audit->tx_disable) != 0 ||
@@ -204,47 +220,62 @@ static u8 *audit_value(u8 values[][4], u16 reg)
 	return NULL;
 }
 
-static int audit_apply_los(struct xr500v_reset_audit *audit)
+static int audit_apply_rssi_gain(struct xr500v_reset_audit *audit)
+{
+	u8 value[4];
+	u8 *source;
+
+	source = audit_value(audit->after, EN7570_LA_PWD);
+	if (!source)
+		return -EINVAL;
+	memcpy(value, source, sizeof(value));
+	value[2] = (value[2] & ~EN7570_RSSI_GAIN_MASK) |
+		EN7570_RSSI_GAIN_NORMAL;
+	return en7570_rx_write(audit, EN7570_LA_PWD, value);
+}
+
+static int audit_apply_los(struct xr500v_reset_audit *audit,
+			   u8 source_values[][4])
 {
 	u8 value[4];
 	u8 *source;
 	int ret;
 
-	source = audit_value(audit->after, EN7570_LOS_CTRL1);
+	source = audit_value(source_values, EN7570_LOS_CTRL1);
 	if (!source)
 		return -EINVAL;
 	memcpy(value, source, sizeof(value));
 	value[0] |= EN7570_LOS_CAL_TRIG;
 	value[1] = (value[1] & ~EN7570_LOS_STABLE_MASK) |
 		EN7570_LOS_STABLE_MASK;
-	ret = en7570_los_write(audit, EN7570_LOS_CTRL1, value);
+	ret = en7570_rx_write(audit, EN7570_LOS_CTRL1, value);
 	if (ret)
 		return ret;
 
-	source = audit_value(audit->after, 0x0024);
+	source = audit_value(source_values, 0x0024);
 	if (!source)
 		return -EINVAL;
 	memcpy(value, source, sizeof(value));
 	value[3] |= EN7570_ADC_REV2_ENABLE;
-	ret = en7570_los_write(audit, 0x0024, value);
+	ret = en7570_rx_write(audit, 0x0024, value);
 	if (ret)
 		return ret;
 	ret = en7570_read(audit->en7570, 0x0024, value, sizeof(value));
 	if (ret)
 		return ret;
 	value[2] |= EN7570_ADC_REV1_ENABLE;
-	ret = en7570_los_write(audit, 0x0024, value);
+	ret = en7570_rx_write(audit, 0x0024, value);
 	if (ret)
 		return ret;
 
-	source = audit_value(audit->after, EN7570_LOS_CTRL2);
+	source = audit_value(source_values, EN7570_LOS_CTRL2);
 	if (!source)
 		return -EINVAL;
 	memcpy(value, source, sizeof(value));
 	value[1] = (value[1] & ~EN7570_LOS_CONF_MASK) |
 		EN7570_LOS_CONF_MASK;
 	value[0] = (value[0] & ~EN7570_LOS_COUNT_MASK) | 0x05;
-	ret = en7570_los_write(audit, EN7570_LOS_CTRL2, value);
+	ret = en7570_rx_write(audit, EN7570_LOS_CTRL2, value);
 	if (ret)
 		return ret;
 
@@ -256,7 +287,7 @@ static int audit_apply_los(struct xr500v_reset_audit *audit)
 		audit->los_high_threshold;
 	value[3] = (value[3] & ~EN7570_LOS_THRESHOLD_MASK) |
 		audit->los_low_threshold;
-	return en7570_los_write(audit, EN7570_LOS_CTRL1, value);
+	return en7570_rx_write(audit, EN7570_LOS_CTRL1, value);
 }
 
 static int audit_snapshot(struct xr500v_reset_audit *audit, u8 values[][4])
@@ -294,6 +325,31 @@ static int audit_baseline(struct xr500v_reset_audit *audit)
 	return 0;
 }
 
+static int audit_verify_rssi_gain(struct xr500v_reset_audit *audit)
+{
+	u8 expected[4];
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(audit_regs); i++) {
+		int length = audit_regs[i].reg == EN7570_SAFE_PROTECT ||
+			audit_regs[i].reg == EN7570_ROGUE_TX ? 2 : 4;
+
+		memcpy(expected, audit->after[i], sizeof(expected));
+		if (audit_regs[i].reg == EN7570_LA_PWD)
+			expected[2] = (expected[2] & ~EN7570_RSSI_GAIN_MASK) |
+				EN7570_RSSI_GAIN_NORMAL;
+		if (memcmp(audit->after_rssi[i], expected, length)) {
+			dev_err(audit->dev,
+				"RSSI isolation mismatch %s@0x%04x: %4ph != %4ph\n",
+				audit_regs[i].name, audit_regs[i].reg,
+				audit->after_rssi[i], expected);
+			return -EIO;
+		}
+	}
+
+	return 0;
+}
+
 static int audit_preflight(struct xr500v_reset_audit *audit)
 {
 	if (gpiod_get_direction(audit->tx_disable) != 0 ||
@@ -316,6 +372,7 @@ static int audit_status_show(struct seq_file *s, void *unused)
 	int i;
 
 	seq_printf(s, "operation:             %s\n",
+		   audit->rssi_gain ? "EN7570 reset then RSSI gain then LOS" :
 		   audit->reset_then_los ? "EN7570 reset then isolated LOS" :
 		   "EN7570 OEM four-byte SW_RESET RMW");
 	seq_printf(s, "reset_payload:         %4ph\n", audit->reset_write);
@@ -324,6 +381,17 @@ static int audit_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "post_snapshot_result:  %d\n",
 		   audit->post_snapshot_result);
 	seq_printf(s, "postflight_result:     %d\n", audit->postflight_result);
+	if (audit->rssi_gain) {
+		seq_printf(s, "rssi_attempted:        %s\n",
+			   audit->rssi_attempted ? "yes" : "no");
+		seq_printf(s, "rssi_result:           %d\n", audit->rssi_result);
+		seq_printf(s, "rssi_snapshot_result:  %d\n",
+			   audit->rssi_snapshot_result);
+		seq_printf(s, "rssi_verify_result:    %d\n",
+			   audit->rssi_verify_result);
+		seq_printf(s, "rssi_postflight_result: %d\n",
+			   audit->rssi_postflight_result);
+	}
 	seq_printf(s, "los_attempted:         %s\n",
 		   audit->los_attempted ? "yes" : "no");
 	seq_printf(s, "los_result:            %d\n", audit->los_result);
@@ -344,13 +412,19 @@ static int audit_status_show(struct seq_file *s, void *unused)
 		seq_printf(s, "%-18s 0x%04x before=%4ph after=%4ph\n",
 			   audit_regs[i].name, audit_regs[i].reg,
 			   audit->before[i], audit->after[i]);
+		if (audit->rssi_gain)
+			seq_printf(s, "%-18s        after_rssi=%4ph\n",
+				   "", audit->after_rssi[i]);
 		if (audit->reset_then_los)
 			seq_printf(s, "%-18s        after_los=%4ph\n",
 				   "", audit->after_los[i]);
 	}
 	seq_printf(s, "los_init:              %s\n",
 		   audit->los_attempted ? "isolated OEM sequence" : "no");
-	seq_puts(s, "adc_rssi_ddmi_init:    no\n");
+	seq_printf(s, "rssi_gain_init:        %s\n",
+		   audit->rssi_attempted ? "isolated OEM RMW" : "no");
+	seq_puts(s, "adc_rssi_calibration:  no\n");
+	seq_puts(s, "ddmi_worker_init:      no\n");
 	seq_puts(s, "apd_tgen_current_init: no\n");
 	seq_puts(s, "software_rollback:     impossible/not attempted\n");
 	return 0;
@@ -372,7 +446,8 @@ static int xr500v_reset_audit_probe(struct platform_device *pdev)
 	u8 id;
 	int ret;
 
-	if (arm_en7570_reset_audit + arm_en7570_reset_then_los != 1)
+	if (arm_en7570_reset_audit + arm_en7570_reset_then_los +
+	    arm_en7570_reset_rssi_los != 1)
 		return dev_err_probe(&pdev->dev, -EPERM,
 				     "select exactly one reset audit mode\n");
 	if (!device_property_read_bool(&pdev->dev,
@@ -384,7 +459,9 @@ static int xr500v_reset_audit_probe(struct platform_device *pdev)
 	if (!audit)
 		return -ENOMEM;
 	audit->dev = &pdev->dev;
-	audit->reset_then_los = arm_en7570_reset_then_los;
+	audit->reset_then_los = arm_en7570_reset_then_los ||
+		arm_en7570_reset_rssi_los;
+	audit->rssi_gain = arm_en7570_reset_rssi_los;
 	if (audit->reset_then_los) {
 		ret = device_property_read_u32(&pdev->dev,
 				"airoha,los-high-threshold", &threshold);
@@ -462,6 +539,12 @@ static int xr500v_reset_audit_probe(struct platform_device *pdev)
 			audit->postflight_result);
 
 	if (audit->reset_then_los) {
+		u8 (*los_source)[4] = audit->after;
+
+		audit->rssi_result = -ECANCELED;
+		audit->rssi_snapshot_result = -ECANCELED;
+		audit->rssi_verify_result = -ECANCELED;
+		audit->rssi_postflight_result = -ECANCELED;
 		audit->los_result = -ECANCELED;
 		audit->los_snapshot_result = -ECANCELED;
 		audit->los_postflight_result = -ECANCELED;
@@ -469,21 +552,54 @@ static int xr500v_reset_audit_probe(struct platform_device *pdev)
 		    !audit->postflight_result) {
 			/* Exceed the 1-2 ms bandgap settling delay used upstream. */
 			usleep_range(10000, 12000);
-			audit->los_attempted = true;
-			audit->los_result = audit_apply_los(audit);
-			if (audit->los_result)
-				dev_err(&pdev->dev, "LOS sequence result: %d\n",
-					audit->los_result);
-			usleep_range(20000, 25000);
-			audit->los_snapshot_result =
-				audit_snapshot(audit, audit->after_los);
-			audit->los_postflight_result = audit_preflight(audit);
-			if (audit->los_snapshot_result)
-				dev_err(&pdev->dev, "LOS snapshot result: %d\n",
-					audit->los_snapshot_result);
-			if (audit->los_postflight_result)
-				dev_err(&pdev->dev, "LOS TX postflight result: %d\n",
-					audit->los_postflight_result);
+			if (audit->rssi_gain) {
+				audit->rssi_attempted = true;
+				audit->rssi_result = audit_apply_rssi_gain(audit);
+				if (audit->rssi_result)
+					dev_err(&pdev->dev,
+						"RSSI gain result: %d\n",
+						audit->rssi_result);
+				audit->rssi_snapshot_result =
+					audit_snapshot(audit, audit->after_rssi);
+				if (!audit->rssi_snapshot_result)
+					audit->rssi_verify_result =
+						audit_verify_rssi_gain(audit);
+				audit->rssi_postflight_result = audit_preflight(audit);
+				if (audit->rssi_snapshot_result)
+					dev_err(&pdev->dev,
+						"RSSI snapshot result: %d\n",
+						audit->rssi_snapshot_result);
+				if (audit->rssi_postflight_result)
+					dev_err(&pdev->dev,
+						"RSSI TX postflight result: %d\n",
+						audit->rssi_postflight_result);
+				los_source = audit->after_rssi;
+			}
+			if (!audit->rssi_gain ||
+			    (!audit->rssi_result && !audit->rssi_snapshot_result &&
+			     !audit->rssi_verify_result &&
+			     !audit->rssi_postflight_result)) {
+				audit->los_attempted = true;
+				audit->los_result =
+					audit_apply_los(audit, los_source);
+				if (audit->los_result)
+					dev_err(&pdev->dev,
+						"LOS sequence result: %d\n",
+						audit->los_result);
+				usleep_range(20000, 25000);
+				audit->los_snapshot_result =
+					audit_snapshot(audit, audit->after_los);
+				audit->los_postflight_result =
+					audit_preflight(audit);
+				if (audit->los_snapshot_result)
+					dev_err(&pdev->dev,
+						"LOS snapshot result: %d\n",
+						audit->los_snapshot_result);
+				if (audit->los_postflight_result)
+					dev_err(&pdev->dev,
+						"LOS TX postflight result: %d\n",
+						audit->los_postflight_result);
+			}
 		}
 	}
 
@@ -499,6 +615,7 @@ static int xr500v_reset_audit_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, audit);
 	dev_warn(&pdev->dev,
 		 "EN7570 %s observed; TX_DISABLE held; physical power cycle is the recovery boundary\n",
+		 audit->rssi_gain ? "reset-RSSI-LOS" :
 		 audit->reset_then_los ? "reset-then-LOS" : "reset");
 	return 0;
 }
@@ -528,6 +645,6 @@ static struct platform_driver xr500v_reset_audit_driver = {
 };
 module_platform_driver(xr500v_reset_audit_driver);
 
-MODULE_DESCRIPTION("Guarded XR500v EN7570 reset and reset-then-LOS audit");
+MODULE_DESCRIPTION("Guarded XR500v EN7570 reset/RSSI-gain/LOS audit");
 MODULE_AUTHOR("Cris7015 XR500v OpenWrt project");
 MODULE_LICENSE("GPL");
