@@ -14,8 +14,12 @@
 #include <linux/seq_file.h>
 
 #define EN7570_TIAMUX		0x0000
+#define EN7570_MPDH		0x0004
+#define EN7570_T1DELAY		0x0008
 #define EN7570_LA_PWD		0x0014
 #define EN7570_BGCKEN		0x001c
+#define EN7570_PI_TGEN		0x0020
+#define EN7570_APD_DAC_CODE	0x0030
 #define EN7570_SAFE_PROTECT	0x0100
 #define EN7570_SVADC_PD		0x0024
 #define EN7570_LOS_CTRL1	0x011c
@@ -24,9 +28,18 @@
 #define EN7570_LOS_CAL_TIMEOUT_CNT 0x0128
 #define EN7570_LOS_CAL_TIMEOUT	0x012c
 #define EN7570_LOS_DBG_RG	0x0130
+#define EN7570_P0_PWR_CTRL_CS1	0x0134
+#define EN7570_P0_PWR_CTRL_CS2	0x0138
+#define EN7570_P0_PWR_CTRL_CS3	0x013c
+#define EN7570_P0_PWR_CTRL_LCH	0x0140
+#define EN7570_P1_PWR_CTRL_CS1	0x0144
+#define EN7570_P1_PWR_CTRL_CS2	0x0148
+#define EN7570_P1_PWR_CTRL_CS3	0x014c
+#define EN7570_P1_PWR_CTRL_LCH	0x0150
 #define EN7570_ADC_PROBE_STATUS	0x0154
 #define EN7570_PROBE_CONTROL	0x0158
 #define EN7570_DUMMY		0x015c
+#define EN7570_APD_OVP_LATCH	0x0164
 #define EN7570_ROGUE_ONU_DET_CTRL 0x0168
 #define EN7570_ERC_FILTER_CTRL	0x016c
 #define EN7570_FT_ADC_CLK_CLR	0x0170
@@ -148,8 +161,12 @@ static int status_show(struct seq_file *s, void *unused)
 			   (int)sizeof(safe_protect), safe_protect);
 	}
 	en7570_seq_raw(s, diag->client, "tiamux_raw:", EN7570_TIAMUX, 4);
+	en7570_seq_raw(s, diag->client, "mpd_targets_raw:", EN7570_MPDH, 4);
+	en7570_seq_raw(s, diag->client, "t1delay_raw:", EN7570_T1DELAY, 4);
 	en7570_seq_raw(s, diag->client, "la_pwd_raw:", EN7570_LA_PWD, 4);
 	en7570_seq_raw(s, diag->client, "bgcken_raw:", EN7570_BGCKEN, 4);
+	en7570_seq_raw(s, diag->client, "pi_tgen_raw:", EN7570_PI_TGEN, 4);
+	en7570_seq_raw(s, diag->client, "apd_dac_raw:", EN7570_APD_DAC_CODE, 4);
 	en7570_seq_raw(s, diag->client, "los_ctrl1_raw:",
 			EN7570_LOS_CTRL1, 4);
 	en7570_seq_raw(s, diag->client, "svadc_pd_raw:",
@@ -162,10 +179,28 @@ static int status_show(struct seq_file *s, void *unused)
 			EN7570_LOS_CAL_TIMEOUT_CNT, 4);
 	en7570_seq_raw(s, diag->client, "los_timeout_raw:",
 			EN7570_LOS_CAL_TIMEOUT, 4);
+	en7570_seq_raw(s, diag->client, "p0_ctrl_cs1_raw:",
+			EN7570_P0_PWR_CTRL_CS1, 4);
+	en7570_seq_raw(s, diag->client, "p0_ctrl_cs2_raw:",
+			EN7570_P0_PWR_CTRL_CS2, 4);
+	en7570_seq_raw(s, diag->client, "p0_ctrl_cs3_raw:",
+			EN7570_P0_PWR_CTRL_CS3, 4);
+	en7570_seq_raw(s, diag->client, "p0_ctrl_latch_raw:",
+			EN7570_P0_PWR_CTRL_LCH, 4);
+	en7570_seq_raw(s, diag->client, "p1_ctrl_cs1_raw:",
+			EN7570_P1_PWR_CTRL_CS1, 4);
+	en7570_seq_raw(s, diag->client, "p1_ctrl_cs2_raw:",
+			EN7570_P1_PWR_CTRL_CS2, 4);
+	en7570_seq_raw(s, diag->client, "p1_ctrl_cs3_raw:",
+			EN7570_P1_PWR_CTRL_CS3, 4);
+	en7570_seq_raw(s, diag->client, "p1_ctrl_latch_raw:",
+			EN7570_P1_PWR_CTRL_LCH, 4);
 	en7570_seq_raw(s, diag->client, "adc_probe_raw_unlatched:",
 			EN7570_ADC_PROBE_STATUS, 4);
 	en7570_seq_raw(s, diag->client, "probe_control_raw:",
 			EN7570_PROBE_CONTROL, 4);
+	en7570_seq_raw(s, diag->client, "apd_ovp_latch_raw:",
+			EN7570_APD_OVP_LATCH, 4);
 	en7570_seq_raw(s, diag->client, "erc_filter_raw:",
 			EN7570_ERC_FILTER_CTRL, 4);
 	en7570_seq_raw(s, diag->client, "sw_reset_raw:", EN7570_SW_RESET, 4);

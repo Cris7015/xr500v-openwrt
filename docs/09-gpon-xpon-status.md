@@ -173,6 +173,9 @@ Notes on this:
   the raw OEM LOS, rogue-ONU, Tx-SD and Tx-fault status bits, plus passive
   reset/RX-front-end/ADC/LOS/ERC context.  It has no reset, initialisation,
   calibration, latch-clear, laser, APD, ADC or DDMI write path.
+  Its current passive map also inventories MPD targets, burst/TGEN controls,
+  P0/P1 current-loop controls and APD state so a future whole-device-reset
+  experiment can require a known fail-closed precondition.
   Because the analogue block remains uninitialised, these states are not a
   claim of optical link.  There is still **no** functional xPON MAC node, xPON
   PHY/SerDes driver, PLOAM data path or OMCI stack.  The `green:gpon` LED
