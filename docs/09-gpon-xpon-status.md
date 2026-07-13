@@ -231,6 +231,17 @@ Notes on this:
   [`notes/2026-07-13-gpon-phase17-live-fibre-oem-oracle.md`](../notes/2026-07-13-gpon-phase17-live-fibre-oem-oracle.md)
   and
   [`notes/2026-07-13-gpon-phase18-rssi-gain-los-compile-only.md`](../notes/2026-07-13-gpon-phase18-rssi-gain-los-compile-only.md).
+  Phase 19 executed that exact seven-write observer once with live fibre.  The
+  RSSI RMW was perfectly isolated and all TX gates passed, but the LOS block
+  still entered `LOS_DBG[3]=0x89` with timeout `0x3e`.  Connected,
+  disconnected and reconnected 20-sample series were identical in those state
+  fields.  A warm reboot retained the external EN7570 state; only the required
+  physical power cycle restored the cold baseline.  The router was finally
+  returned to the passive DT with no experimental module or opt-in.  This
+  closes static RSSI gain as the missing dependency and moves the next
+  boundary into a specifically justified RX analogue calibration prerequisite.
+  See
+  [`notes/2026-07-13-gpon-phase19-rssi-gain-los-live.md`](../notes/2026-07-13-gpon-phase19-rssi-gain-los-live.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 

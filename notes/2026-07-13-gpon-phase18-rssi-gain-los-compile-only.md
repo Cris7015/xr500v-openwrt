@@ -69,3 +69,19 @@ valid TrendChip header, no module in rootfs/autoload, and the exact experimental
 compatible/DT opt-in.  Because OEM stock has initialized the external EN7570,
 the next OpenWrt boot must be a physical power cycle rather than the warm
 Bootbase jump before the phase-12 baseline can be required safely.
+
+## Live result
+
+Phase 19 subsequently executed this exact module and mode once on a cold
+OpenWrt boot with live Movistar fibre.  All seven writes, snapshots, isolation
+checks and TX gates succeeded, including the sole RSSI delta
+`LA_PWD 00 24 00 00 -> 00 24 05 00`.  Nevertheless the LOS block entered the
+same state as phase 16: `LOS_DBG[3]=0x89`, timeout `0x3e` and LOS asserted.
+Connected, disconnected and reconnected 20-sample series were identical in
+those state fields.  The isolated RSSI-gain RMW is therefore not the missing
+receiver prerequisite.  A passive-image sysupgrade plus physical power cycle
+restored the cold baseline and all TX barriers.
+
+See
+[`2026-07-13-gpon-phase19-rssi-gain-los-live.md`](2026-07-13-gpon-phase19-rssi-gain-los-live.md)
+for the flash readback, complete status and same-boot A/B/A evidence.
