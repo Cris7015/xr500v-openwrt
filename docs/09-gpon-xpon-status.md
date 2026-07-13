@@ -63,6 +63,20 @@
 > optical signal is not yet visible to the digital PHY.  The next boundary is a
 > strictly RX-only, rollback-capable subset of EN7570 LOS analogue setup.  See
 > [`notes/2026-07-12-gpon-phase8-live-fibre-rx-boundary.md`](../notes/2026-07-12-gpon-phase8-live-fibre-rx-boundary.md).
+> Phase 9 implemented that isolated LOS prototype, but phase 10's first
+> fibre-disconnected run proved the EN7570 calibration trigger is
+> non-transactional: visible controls rolled back, while LOS state, an
+> autonomous status byte and its timeout survived even a software reboot.
+> Only a physical power cycle restored baseline, so the stage is now hard
+> quarantined.  Phase 11 then separated the OEM init sequence by dependency:
+> ADC/RSSI calibration feeds DDMI and ERC/MPD belongs to TX; neither is a LOS
+> data dependency.  The likely missing boundary is the EN7570 whole-device
+> reset state, which remains too broad for a live test.  Pointer-only reads
+> established its retained TIAMUX, LA_PWD, bandgap, ERC and reset baseline.
+> See
+> [`notes/2026-07-12-gpon-phase10-en7570-los-nontransactional.md`](../notes/2026-07-12-gpon-phase10-en7570-los-nontransactional.md)
+> and
+> [`notes/2026-07-12-gpon-phase11-en7570-dependency-audit.md`](../notes/2026-07-12-gpon-phase11-en7570-dependency-audit.md).
 
 GPON is the one major subsystem of the Archer XR500v that does **not** work under the OpenWrt port. The key fact for this subsystem is that this is not for lack of source code: the OEM xPON/GPON driver for the EN751221 exists as full, readable C in the same 2.6.36 `tclinux_phoenix` OEM tree the [VoIP/FXS driver](06-voip-fxs-telephony.md) was reconstructed from — roughly 55,000 lines across `xpon` (~43,700 LOC) and `xpon_phy` (~11,700 LOC), including a ~210 KB MAC register header (`epon_mac_reg_c_header_en7521.h`) with ~1,574 register definitions for exactly this chip, and covering both EPON (MPCP) and GPON (OMCI) modes. GPON is unported because of scale and testability, not missing or blob code:
 
@@ -156,8 +170,9 @@ Notes on this:
 - The PON MAC sharing the Ethernet/QDMA region is why these resets sit on the Ethernet node rather than on a separate PON node: the frame engine, the two QDMAs, and the PON MAC are one hardware complex. The PON-MAC interrupt is part of the same QDMA/Ethernet interrupt model (the OEM sources reference a `GPON_INT` source on the QDMA for this reason; this is awareness in the shared interrupt model, not a functioning PON path). The [econet-eth driver](04-ethernet-dsa.md) brings these resets out of assert as part of Ethernet init but does nothing PON-specific.
 - There is now a diagnostic-only PON-I2C node at `0x1fbf8000` and a passive
   EN7570 client at address `0x70`.  The client reads silicon ID/variant plus
-  the raw OEM LOS, rogue-ONU, Tx-SD and Tx-fault status bits.  It has no reset,
-  initialisation, calibration, latch-clear, laser, APD, ADC or DDMI write path.
+  the raw OEM LOS, rogue-ONU, Tx-SD and Tx-fault status bits, plus passive
+  reset/RX-front-end/ADC/LOS/ERC context.  It has no reset, initialisation,
+  calibration, latch-clear, laser, APD, ADC or DDMI write path.
   Because the analogue block remains uninitialised, these states are not a
   claim of optical link.  There is still **no** functional xPON MAC node, xPON
   PHY/SerDes driver, PLOAM data path or OMCI stack.  The `green:gpon` LED
