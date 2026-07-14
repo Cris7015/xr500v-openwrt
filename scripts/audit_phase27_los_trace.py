@@ -164,6 +164,13 @@ def main() -> int:
 
     require(define_int(source, "FIXED_WRITE_COUNT") == 15, "write budget is not 15")
     require(define_int(source, "TRACE_SAMPLE_COUNT") == 12, "sample budget is not 12")
+    require(define_int(source, "EN7570_ID") == 0x0170, "silicon ID register changed")
+    require(define_int(source, "EN7570_VARIANT") == 0x015C, "silicon variant register changed")
+    require(define_int(source, "EN7570_EXPECTED_ID") == 0x03, "silicon ID guard changed")
+    require(
+        define_int(source, "EN7570_EXPECTED_VARIANT") == 0x01,
+        "XR500v EN7570 variant guard changed",
+    )
     require(parse_fixed_writes(source) == EXPECTED_WRITES, "fixed write table differs from oracle")
     require(
         parse_schedule(source) == list(zip(EXPECTED_TARGETS_MS, EXPECTED_LEVELS)),
@@ -177,6 +184,40 @@ def main() -> int:
     require(source.count("ret = __i2c_transfer") == 2, "unexpected raw I2C transfer call count")
     require("&message, 1" in source, "fixed write transfer call is absent")
     require("messages," in source, "pointer-read transfer call is absent")
+
+    identity_pos = source.find("en7570_read(observer, EN7570_ID")
+    variant_pos = source.find("en7570_read(observer, EN7570_VARIANT")
+    cold_pos = source.find("full_snapshot_capture(observer, &observer->cold)")
+    first_write_pos = source.find("ret = los_trace_run(observer);")
+    require(
+        0 <= identity_pos < variant_pos < cold_pos < first_write_pos,
+        "exact EN7570 ID/variant gate does not precede the cold map and first write",
+    )
+    identity_gate = source[identity_pos:cold_pos]
+    require(
+        re.search(
+            r"en7570_read\(observer, EN7570_ID,.*?"
+            r"if \(ret \|\| observer->silicon_id != EN7570_EXPECTED_ID\)",
+            identity_gate,
+            re.S,
+        )
+        is not None,
+        "probe does not enforce the exact EN7570 silicon ID",
+    )
+    require(
+        re.search(
+            r"en7570_read\(observer, EN7570_VARIANT,.*?"
+            r"if \(ret \|\| observer->silicon_variant != EN7570_EXPECTED_VARIANT\)",
+            identity_gate,
+            re.S,
+        )
+        is not None,
+        "probe does not enforce the exact XR500v EN7570 variant",
+    )
+    require(
+        'seq_printf(s, "silicon_variant:       0x%02x\\n"' in source,
+        "status does not publish the exact silicon variant",
+    )
 
     forbidden = [
         "iowrite",
@@ -208,6 +249,16 @@ def main() -> int:
         re.S,
     )
     require(fast_gate is not None, "fast TX gate is absent")
+    require(
+        re.search(
+            r"if \(observer->silicon_id != EN7570_EXPECTED_ID \|\|\s*"
+            r"observer->silicon_variant != EN7570_EXPECTED_VARIANT\)\s*"
+            r"return -ENODEV;",
+            fast_gate.group(0),
+        )
+        is not None,
+        "per-write fast gate does not enforce exact cached EN7570 ID/variant 03/01",
+    )
     fast_gate_reads = re.findall(
         r"en7570_read4\(observer,\s*(EN7570_[A-Z0-9_]+)",
         fast_gate.group(0),
@@ -353,6 +404,7 @@ def main() -> int:
     print("critical checkpoints validate APD/OVP/SAFE/currents; full adds 16 TX guards")
     print("evidence channel precedes writes; verdict precedes outcome classification")
     print("one-shot, pinning, zero retries, bus lock and physical recovery guards present")
+    print("exact EN7570 identity 03/01 is read before the cold map and guarded before every write")
     return 0
 
 

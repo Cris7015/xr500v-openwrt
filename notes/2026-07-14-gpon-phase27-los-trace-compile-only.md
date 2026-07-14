@@ -4,6 +4,15 @@ Date: 2026-07-14
 
 Status: **compiled and audited; never loaded; router not modified by this phase**
 
+> **Same-day hardening amendment:** the later EN757x source cross-check proved
+> that ID `0x03` is shared by EN7570 and EN7571.  The final phase-27 build now
+> also reads `0x015c`, requires this XR500v's exact variant `0x01` before the
+> cold map, publishes it in the evidence and checks the cached identity in
+> every per-write fast gate.  The write table and timing sequence are
+> unchanged.  The final hashes below reflect that rebuild; live staging and
+> installation state are recorded separately in
+> [`2026-07-14-gpon-phase27-live-preparation-no-fibre.md`](2026-07-14-gpon-phase27-live-preparation-no-fibre.md).
+
 ## Result
 
 Phase 27 is a one-shot, deliberately non-shipping observer for characterising
@@ -16,6 +25,7 @@ reached safely in phase 26.  It then performs a finite read-only trace.  It has:
 - zero xPON MMIO writes;
 - zero GPIO writes or direction changes;
 - zero retries, rollback writes, workers, timers or arbitrary payload paths;
+- an exact EN7570 `ID/variant = 0x03/0x01` read-only gate before any write;
 - 12 timestamped samples followed by one terminal 29-register snapshot;
 - GPIO and xPON barriers revalidated in every sample, critical EN7570 barriers
   at 50 ms and later, and all 16 static TX guards at 100 ms and later;
@@ -162,8 +172,10 @@ and interrupt-enable paths to remain clear while GPON mode and the retained
 xPON setting remain exact.  Those physical/digital barriers are inexpensive
 MMIO/GPIO reads and therefore remain in the dense 0/5/10/20 ms samples.
 
-The fast gate immediately before each of the 15 fixed writes remains
-byte-identical to phase 26: OVP, SAFE, Ibias and Imod plus the GPIO/xPON gates.
+The fast gate immediately before each of the 15 fixed writes retains the phase
+26 OVP, SAFE, Ibias, Imod and GPIO/xPON checks, and additionally rejects a
+cached identity other than exact `0x03/0x01` without adding another I2C
+transfer to the timing-sensitive prefix.
 Cold and post-reset full maps independently prove the unchanged APD DAC.  There
 are no writes at all after the LOS trigger, so the early dense reads do not
 open a new actuation path.
@@ -226,7 +238,7 @@ source are byte-identical after the final build.
 
 ```text
 driver source SHA-256:
-1627957ca3394bc51c5a51f7800b06454a5b478aa4bd53f805fb217cbba20bc7
+4330f03079aab27cda17151701ef4781df714d0eeac7fa1f43020aecca86ecec
 
 package Makefile SHA-256:
 4b055ceb9476a1c9b9a4659a68415de1af0253c6310664c25857c8fc5ff2180a
@@ -235,18 +247,18 @@ source Makefile SHA-256:
 235405d858bbfa4a42f8c42cc3318c705784a97ba1736b49a4661567d00e52ca
 
 static audit SHA-256:
-b44f14fed805183372afa1248009ed475d4acdacf33f213aebea2c6912724ec8
+a66265c6125ffd3fb32c81283859cfdfb5d847303768ee9d671294002c9f5d67
 
 unstripped KO SHA-256:
-393eb580384b7075ba02a1c8b1c887768447ebf15df8f0f16bb4881fbb57b2a5
-unstripped KO size: 416644 bytes
+31ab9ee5892baabe7e80ee1105da538dbaa5b3a4da199edf09079e5c90d43e11
+unstripped KO size: 417092 bytes
 
 installable KO SHA-256:
-8c32d3092af9a35f2b2867b3012035a4a2844b2e408167291b01cee70031cde6
-installable KO size: 27968 bytes
+4f4d568f6d1b25491efe4fa2ebcf4377834bccb39bdf8478b43f83b2f764b152
+installable KO size: 28268 bytes
 
 APK SHA-256:
-e137aa8f9b2b93786ec66e8ce0c4ad19be204b4fe1f3a9a234edb85cd94c47f8
+d9b0384545d84db08172fc2b44cbb1dffa5eb2edf79837fbaadf62ce0b175bfa
 ```
 
 `modinfo` reports kernel `6.12.80`, MIPS32r2 SMP/preempt, dependency only on
@@ -266,7 +278,13 @@ RSSI oracle pairs: 020a/0284 020a/0285 020b/0285 020b/0286
 dense=4 reads; critical=12 reads; full=28 reads; LOS_CTRL2 always first
 critical checkpoints validate APD/OVP/SAFE/currents; full adds 16 TX guards
 evidence channel precedes writes; verdict precedes outcome classification
+exact EN7570 identity 03/01 is read before the cold map and guarded before every write
 ```
+
+Three auditor contract tests in `tests/test_audit_phase27_los_trace.py`,
+including mutations, prove the auditor rejects removal of the probe ID check
+or either half of the cached per-write identity pair.  This prevents the
+static PASS message from overclaiming a weakened `03/01` guard.
 
 Strict checkpatch reports zero errors and zero warnings; 15 inherited
 alignment-only style checks remain.  `git diff --check` is clean.  Independent
@@ -292,10 +310,10 @@ patched image SHA-256:
 raw image SHA-256:
 19843292f86f0cb5249d65cb2dab99a360bed722a5934e27badca06ffd6676af
 
-compressed kernel SHA-256:
+decompressed kernel SHA-256:
 5f5f8dd25b874d0ce78b77e87ba51d1ba81eec12d795a2e4fc5abefe2455c5a1
-compressed kernel size: 2948049 bytes
-safe kernel headroom:   197167 bytes
+decompressed kernel size: 2948049 bytes
+safe kernel headroom:     197167 bytes
 
 standalone DTB SHA-256:
 cb97e9e7719ec6dfdcfe19f4d387fa353612c6fe043aa1d8f455ec38f95b9775

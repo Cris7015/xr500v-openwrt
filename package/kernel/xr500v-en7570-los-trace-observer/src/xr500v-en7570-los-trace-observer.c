@@ -66,10 +66,12 @@
 #define EN7570_ADC_PROBE		0x0154
 #define EN7570_PROBE_CONTROL	0x0158
 #define EN7570_ADC_LATCH		0x0159
+#define EN7570_VARIANT		0x015c
 #define EN7570_APD_OVP_LATCH	0x0164
 #define EN7570_ID		0x0170
 #define EN7570_SW_RESET		0x0300
 #define EN7570_EXPECTED_ID	0x03
+#define EN7570_EXPECTED_VARIANT	0x01
 
 #define EN7570_I2C_ADDRESS	0x70
 #define XR500V_PON_I2C_BASE	0x1fbf8000
@@ -297,6 +299,7 @@ struct xr500v_los_trace_observer {
 	u64 write_done_ns[FIXED_WRITE_COUNT];
 	u64 prefix_end_ns;
 	u8 silicon_id;
+	u8 silicon_variant;
 	u8 factory_digest[SHA256_DIGEST_SIZE];
 	u8 rssi_latch_initial;
 	u8 rssi_latch_second;
@@ -419,6 +422,9 @@ static int fast_tx_gate(struct xr500v_los_trace_observer *observer)
 
 	if (!observer->i2c_bus_locked || !observer->module_pinned)
 		return -EPERM;
+	if (observer->silicon_id != EN7570_EXPECTED_ID ||
+	    observer->silicon_variant != EN7570_EXPECTED_VARIANT)
+		return -ENODEV;
 	ret = gpio_xpon_gate(observer);
 	if (ret)
 		return ret;
@@ -1219,6 +1225,7 @@ static int los_trace_status_show(struct seq_file *s, void *unused)
 	seq_puts(s, "operation:             fixed OEM EN7570 reset/RSSI/gain/LOS prefix + terminal timestamped trace\n");
 	seq_puts(s, "trace_policy:          dense@0/5/10/20 critical@50 full@100/250/500/1000/2000/5000/10000 ms\n");
 	seq_printf(s, "silicon_id:            0x%02x\n", observer->silicon_id);
+	seq_printf(s, "silicon_variant:       0x%02x\n", observer->silicon_variant);
 	seq_printf(s, "factory_length:        0x%zx\n", observer->factory_length);
 	seq_printf(s, "factory_sha256:        %*phN\n", SHA256_DIGEST_SIZE,
 		   observer->factory_digest);
@@ -1515,6 +1522,16 @@ static int xr500v_los_trace_observer_probe(struct platform_device *pdev)
 		ret = ret ?: -ENODEV;
 		dev_err(&pdev->dev, "EN7570 identity mismatch: 0x%02x (%d)\n",
 			observer->silicon_id, ret);
+		goto out_unlock;
+	}
+	ret = en7570_read(observer, EN7570_VARIANT,
+			  &observer->silicon_variant,
+			  sizeof(observer->silicon_variant));
+	if (ret || observer->silicon_variant != EN7570_EXPECTED_VARIANT) {
+		ret = ret ?: -ENODEV;
+		dev_err(&pdev->dev,
+			"EN7570 variant mismatch: 0x%02x, expected 0x%02x (%d)\n",
+			observer->silicon_variant, EN7570_EXPECTED_VARIANT, ret);
 		goto out_unlock;
 	}
 

@@ -1,5 +1,17 @@
 ## Summary
 
+> **2026-07-14 EN757x source update:** the archived
+> [`Sirherobrine23/airoha_xpon_en757x`](https://github.com/Sirherobrine23/airoha_xpon_en757x)
+> remains useful corroborating material.  Its first modern Linux patch is not a
+> functioning data path: `ndo_start_xmit()` only dumps and frees the skb, with
+> no RX/QDMA, operational PLOAM or OMCI integration.  Its `mt7570_reg.h` is
+> byte-identical to the XR500v GPL copy, while its EN757x identification rule
+> corroborates this unit's exact `ID=0x03, variant=0x01` as EN7570.  Phase 27
+> was consequently hardened to require both bytes before every possible write;
+> ID `0x03` alone is shared with EN7571 and is no longer accepted.  See
+> [`notes/2026-07-14-en757x-repository-crosscheck.md`](../notes/2026-07-14-en757x-repository-crosscheck.md)
+> for that source comparison.
+>
 > **2026-07-10 update:** the upstream situation changed materially after this
 > page was written.  Merbanan's `econet-eth-mainline` branch now contains
 > compile-tested EN7512/EN7521 PON PHY, EN7570/71/72 LDDLA, and GPON/EPON MAC
