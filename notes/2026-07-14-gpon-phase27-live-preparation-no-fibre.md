@@ -3,7 +3,7 @@
 Date: 2026-07-14
 
 Status: **phase-27 image installed; physical cold/disconnected-fibre preflight
-passed; observer never loaded; verified module staged but disarmed**
+passed; observer never loaded; final module verified on the build host**
 
 ## Scope and safety boundary
 
@@ -11,6 +11,13 @@ The router had been physically off for several hours and booted the passive
 phase-14 diagnostic image with the fibre disconnected.  That genuinely cold
 state was used for a final read-only baseline.  No experimental module was
 present or loaded and both passive diagnostics reported zero writes.
+
+After the staging session, the user reported another physical power-off.  The
+verified `/tmp/phase27-los-trace.ko` copy described below was therefore lost
+with tmpfs and is no longer assumed to be present on the router.  This changes
+no persistent state and is the safe outcome: before a future fibre-connected
+one-shot, the final host artifact must be copied and hash-checked again only
+after a new cold passive preflight.
 
 This preparation did **not** execute the phase-27 sequence.  The phase-27
 module is deliberately absent from the image and has no autoload entry.  A
