@@ -51,13 +51,15 @@ if [ -f "$IMG" ]; then
   PATCHED="${IMG%.bin}-patched.bin"
   echo "==> [3/3] validate layout, trendchip-patch, validate patched image"
   python3 "$REPO/scripts/validate_xr500v_image.py" "$IMG" --kernel-bin "$KERNEL_BIN"
-  python3 "$REPO/scripts/patch_trendchip_header.py" "$IMG" "$PATCHED"
+  python3 "$REPO/scripts/patch_trendchip_header.py" "$IMG" "$PATCHED" \
+    --entry 0x80020000
   python3 "$REPO/scripts/validate_xr500v_image.py" "$PATCHED" \
     --kernel-bin "$KERNEL_BIN" --require-trendchip
   echo
   echo "  RAW    : $IMG"
   echo "  FLASH  : $PATCHED   <- use THIS (validated TrendChip header)"
-  echo "  -> flash: ./scripts/flash-from-wsl.sh  (router in stock telnet :2323)"
+  echo "  -> OpenWrt: scp to /tmp, run sysupgrade -T, then sysupgrade (do not use raw mtd)"
+  echo "  -> recovery: ./scripts/flash-from-wsl.sh  (router in stock telnet :2323)"
 else
   echo "==> (no sysupgrade image generated — probably a partial package build)"
 fi

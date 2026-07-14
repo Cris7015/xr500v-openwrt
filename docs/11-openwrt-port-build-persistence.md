@@ -148,7 +148,7 @@ the validated, TrendChip-patched image:
 ```bash
 python3 scripts/validate_xr500v_image.py RAW.bin --kernel-bin \
   build_dir/target-mips_24kc_musl/linux-econet_en751221/tplink_archer-xr500v-kernel.bin
-python3 scripts/patch_trendchip_header.py RAW.bin PATCHED.bin
+python3 scripts/patch_trendchip_header.py RAW.bin PATCHED.bin --entry 0x80020000
 python3 scripts/validate_xr500v_image.py PATCHED.bin --kernel-bin \
   build_dir/target-mips_24kc_musl/linux-econet_en751221/tplink_archer-xr500v-kernel.bin \
   --require-trendchip
@@ -156,18 +156,21 @@ scp PATCHED.bin root@192.168.68.222:/tmp/
 ssh root@192.168.68.222 'sysupgrade -T /tmp/PATCHED.bin && sysupgrade /tmp/PATCHED.bin'
 ```
 
-The older stock-recovery route remains useful when OpenWrt cannot boot:
-
-The flash flow is intentionally conservative — it goes through the stock OEM telnet, never through running OpenWrt:
+The older stock-recovery route remains useful when OpenWrt cannot boot.  It is
+an alternative to the board-specific sysupgrade path above, not a requirement
+for routine upgrades:
 
 ```bash
-# a. patch the proprietary TrendChip / tplink-v2 header (else the bootloader crashes
-#    decoding the image). Verify the ELF entry each build; the patcher's --entry default
-#    can drift.
-python3 ~/xr500v-openwrt/scripts/patch_trendchip_header.py IN.bin OUT.bin
+# a. patch and fully validate the proprietary TrendChip / tplink-v2 header.
+#    0x80020000 is the LZMA wrapper entry; never substitute the inner ELF entry.
+python3 ~/xr500v-openwrt/scripts/patch_trendchip_header.py \
+  IN.bin OUT.bin --entry 0x80020000
+python3 ~/xr500v-openwrt/scripts/validate_xr500v_image.py \
+  OUT.bin --require-trendchip
 
-# b. slice kernel1 + rootfs1, TFTP them in, mtd-write — from STOCK telnet :2323
-SRC=OUT.bin ROUTER_IP=<stock-ip> PC_IP=<pc-ip> bash <repo>/…/flash-iter111.sh
+# b. slice/pad kernel1 + rootfs1, TFTP them and mtd-write from STOCK telnet :2323
+IMAGE_NAME="$PWD/OUT.bin" ROUTER_IP=<stock-ip> PC_IP=<pc-ip> \
+  bash ~/xr500v-openwrt/scripts/flash-from-wsl.sh
 #   verify K_RC_0 and R_RC_0
 
 # c. select slot B and COLD power-cycle
@@ -226,12 +229,11 @@ After this one-time step the preinit hook finds `/dev/ubi0_0` on every boot, the
 
 ### Reflashing without losing the overlay
 
-To update kernel/squashfs while preserving the UBI volume, write **only** the 3 MB squashfs region from stock telnet (preserving everything at/after the UBI offset):
-
-```sh
-# from stock telnet :2323 — writes only 3 MB at NAND offset 0x1b00000
-mtd writeflash /tmp/r1.bin 3145728 28311552 /dev/mtd0
-```
+Normal `sysupgrade` updates only `kernel1` and `rootfs1`, leaving the separate
+`openwrt_ubi` partition untouched.  For stock recovery, use
+`scripts/flash-from-wsl.sh`: it extracts the SquashFS at `0x300200`, pads
+`r1.bin` to the full **16 MiB** `rootfs1` partition and verifies both payload
+sizes before issuing OEM `writeflash`.  Never truncate the rootfs to 3 MiB.
 
 Two reasons to minimize reflashing:
 
@@ -270,7 +272,13 @@ The driver asserts `resource_size(reg) >= sizeof(struct en751221_regs)`. While t
 
 ### Header / entry point
 
-`scripts/patch_trendchip_header.py` writes the TrendChip fields the bootloader reads after decompression (magic, kernel entry, rootfs offset, sub-magic). Two recurring issues: (1) without running it, the bootloader can't decode the image and crashes; (2) its `--entry` default is effectively hardcoded — verify the ELF entry of each build, or the bootloader crashes on a wrong `CP0_EPC`.
+`scripts/patch_trendchip_header.py` writes the TrendChip fields the bootloader
+reads after decompression (magic, wrapper entry, rootfs offset/size and
+sub-magic). The entry is always `0x80020000`, the LZMA wrapper load address;
+the inner ELF entry printed by `readelf` is **not** valid in this header.
+`validate_xr500v_image.py` now decompresses the image stream, enforces the
+kernel budget, verifies the 512-byte zero gap and SquashFS length, and checks
+the complete TrendChip contract before flashing.
 
 ### Network bring-up
 

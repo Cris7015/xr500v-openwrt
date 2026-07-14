@@ -267,4 +267,7 @@ For roughly 137 iterations the project (and the upstream econet effort) attacked
 - **Architecture:** MIPS 34Kc, **big-endian** — every memory/EEPROM read is BE; cross-compile with `mips-openwrt-linux-musl-`.
 - **Read a physical register (OpenWrt):** `echo "0xADDR" > /sys/kernel/debug/tc3162_poke` (result in `dmesg`); add a value to write.
 - **Boot select:** bootloader `bflag` — `0` = stock OEM (slot A), `1` = OpenWrt (slot B). The `boot` command is unreliable; power-cycle instead. A **cold boot** is required for the MT7603 (2.4 GHz) PCIe reset to take effect.
-- **Recovery:** UART → interrupt bldr → `bflag set 0` → power-cycle returns to intact stock firmware. Flash only from the stock telnet shell on port `:2323` (writing NAND from a running OpenWrt corrupts it).
+- **Upgrade / recovery:** on current OpenWrt builds use the board-specific
+  `sysupgrade` path and a TrendChip-patched image; never use raw `mtd write`
+  manually. UART → interrupt bldr → `bflag set 0` → power-cycle returns to
+  intact stock firmware, where telnet `:2323` remains the recovery flash path.

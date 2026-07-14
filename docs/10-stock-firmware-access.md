@@ -204,7 +204,11 @@ fw[0x40:0x50] = hashlib.md5(bytes(fw)).digest()                    # then store 
 
 With that header, the OEM updater accepts a custom (OpenWrt) image and flashes it. This was confirmed working on the owner's device with an OpenWrt build. It removes the dependency on the telnet `:2323` flashing path for the common case — though that path remains the recommended recovery channel.
 
-> Caveat — which channel to flash from: writing **slot B from running OpenWrt** corrupts the NAND (the mainline `en75_bmt` driver lacks the OEM bad-block table, so writes silently mis-map). Production-quality slot-B flashing must be done from the **stock** telnet `:2323` shell or via the verified web-upload above, not from a live OpenWrt session. See [Boot, partitions & flashing](03-boot-partitions-flashing.md) for the full flashing and recovery procedure and the `bflag` slot-selection mechanism.
+> Current channel guidance: the old warning about all OpenWrt-side writes
+> predates working OEM-BMT management. Current images support the validated,
+> board-specific `sysupgrade` path; raw manual `mtd write` is still forbidden.
+> Stock telnet `:2323` and the verified web upload remain recovery/first-install
+> channels. See [Boot, partitions & flashing](03-boot-partitions-flashing.md).
 
 ## 7. Reverse-engineering workflow (for similar HGW/TC3162 devices)
 

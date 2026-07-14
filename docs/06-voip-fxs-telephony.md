@@ -219,7 +219,10 @@ The front-panel **phone LEDs are SoC GPIOs** on the TC3162 GPIO block (`gpio-tc3
 - **The SLIC state only resets on a cold boot.** Live `rmmod`/`insmod` does not reset the SLIC (it's a separate chip), and `HWRESET` is forbidden, so its codec/line state can accumulate cruft across many reloads. When in doubt, power-cycle (see [03-boot-partitions-flashing.md](03-boot-partitions-flashing.md) — `boot` crashes, always cold-boot).
 - **The SLIC/PCM kernel modules ship in the firmware image; only the baresip userspace lives on the overlay.** `kmod-econet-pcm` is in `DEVICE_PACKAGES`, so the two kernel modules (`pcm-en751221.ko` + `econet-slic.ko`) are built into the squashfs root. baresip and the call-manager are deployed on the persistent UBIFS overlay (`/root/bsdeploy`, `/root/xr500v-callmgr`), launched from `/root/voip-start.sh` via `rc.local` — so the userspace can be updated without reflashing (lower brick risk).
 - One gotcha: the package installs `/etc/modules-boot.d/35-econet-pcm`, which loads the modules in **pre-init, before the overlay mounts**. If newer `.ko` builds are staged on the overlay, the start script *swaps* them (`rmmod` the squashfs pair, `insmod` the overlay ones) before bring-up. A cleaner alternative is to whiteout that preload symlink in the overlay.
-- **Flashing rule:** if updating the in-image modules, flash slot B only from the stock telnet (`:2323`), and `patch_trendchip_header.py --entry 0x80020000` (see [03-boot-partitions-flashing.md](03-boot-partitions-flashing.md)).
+- **Flashing rule:** if updating the in-image modules, patch the image with
+  `patch_trendchip_header.py --entry 0x80020000`, then use the board-specific
+  OpenWrt `sysupgrade -T` / `sysupgrade` path. Stock telnet `:2323` remains the
+  recovery alternative (see [03-boot-partitions-flashing.md](03-boot-partitions-flashing.md)).
 
 ## Source layout
 

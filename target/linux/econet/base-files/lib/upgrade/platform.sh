@@ -18,20 +18,45 @@
 
 platform_check_image() {
 	local board=$(board_name)
+	local image="$1"
+	local image_size rootfs_payload gap_nonzero
+
+	image_hex() {
+		dd if="$image" bs=1 skip="$1" count="$2" 2>/dev/null |
+			hexdump -v -e '1/1 "%02x"'
+	}
 
 	case "$board" in
 	tplink,archer-xr500v)
+		image_size=$(wc -c < "$image") || return 1
+		rootfs_payload=$((image_size - 0x300200))
+		if [ "$rootfs_payload" -lt 96 ] || [ "$rootfs_payload" -gt $((0x1000000)) ]; then
+			echo "Invalid image: rootfs payload does not fit the 16 MiB rootfs1 partition"
+			return 1
+		fi
 		# The squashfs must sit at 0x300200 (4-byte word index 786560).
-		if [ "$(dd if="$1" bs=4 skip=786560 count=1 2>/dev/null)" != "hsqs" ]; then
+		if [ "$(image_hex $((0x300200)) 4)" != "68737173" ]; then
 			echo "Invalid image: no squashfs at 0x300200 — not an Archer XR500v sysupgrade.bin"
 			return 1
 		fi
-		# kernel1 must carry the TrendChip header (0x4c3d2e1f at 0x60), or the
-		# bootloader cannot find the rootfs (-> kernel_rootfs_ptr FFFFFFFF, an
-		# Undefined Exception). This requires the trendchip-patched image
-		# (the *-patched.bin), not the raw sysupgrade.bin.
-		if [ "$(dd if="$1" bs=1 skip=96 count=4 2>/dev/null)" != "$(printf '\114\075\056\037')" ]; then
-			echo "Image is missing the TrendChip header — flash the -patched.bin, not the raw sysupgrade.bin"
+		gap_nonzero=$(dd if="$image" bs=1 skip=$((0x300000)) count=$((0x200)) 2>/dev/null |
+			tr -d '\000' | wc -c)
+		if [ "$gap_nonzero" -ne 0 ]; then
+			echo "Invalid image: required 512-byte gap at 0x300000 is not all zero"
+			return 1
+		fi
+		# Validate the complete immutable TrendChip wrapper contract. The entry
+		# is the LZMA wrapper load address, never the inner ELF entry.
+		if [ "$(image_hex $((0x60)) 8)" != "4c3d2e1faa55aa55" ] ||
+		   [ "$(image_hex $((0x68)) 4)" != "80020000" ] ||
+		   [ "$(image_hex $((0x6c)) 4)" != "80020000" ] ||
+		   [ "$(image_hex $((0x70)) 4)" != "01300000" ] ||
+		   [ "$(image_hex $((0x74)) 4)" != "00000200" ] ||
+		   [ "$(image_hex $((0x7c)) 4)" != "00300000" ] ||
+		   [ "$(image_hex $((0x80)) 4)" != "01000000" ] ||
+		   [ "$(image_hex $((0x88)) 4)" != "00000000" ] ||
+		   [ "$(image_hex $((0x8c)) 4)" != "55aa0101" ]; then
+			echo "Invalid image: incomplete/unsafe TrendChip header — use the validated -patched.bin"
 			return 1
 		fi
 		return 0

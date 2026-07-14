@@ -30,20 +30,24 @@ require_log_line() {
     fi
 }
 
-# Use the newest TrendChip-patched local image (a raw image crashes bldr).
-IMAGE_NAME=
-shopt -s nullglob
-for candidate in \
-    "$OWRT"/bin/targets/econet/en751221/*xr500v*sysupgrade-patched.bin; do
-    if [[ -z "$IMAGE_NAME" || "$candidate" -nt "$IMAGE_NAME" ]]; then
-        IMAGE_NAME="$candidate"
-    fi
-done
-shopt -u nullglob
+# IMAGE_NAME may select one exact audited artifact. Otherwise use the newest
+# TrendChip-patched local image (a raw image crashes bldr).
+IMAGE_NAME="${IMAGE_NAME:-}"
+if [[ -z "$IMAGE_NAME" ]]; then
+    shopt -s nullglob
+    for candidate in \
+        "$OWRT"/bin/targets/econet/en751221/*xr500v*sysupgrade-patched.bin; do
+        if [[ -z "$IMAGE_NAME" || "$candidate" -nt "$IMAGE_NAME" ]]; then
+            IMAGE_NAME="$candidate"
+        fi
+    done
+    shopt -u nullglob
+fi
 
 if [[ -z "$IMAGE_NAME" ]]; then
     die "no patched XR500v image found in $OWRT/bin/targets/ (run build-local.sh first)"
 fi
+[[ -f "$IMAGE_NAME" ]] || die "selected IMAGE_NAME does not exist: $IMAGE_NAME"
 
 LOCAL_NAME=$(basename "$IMAGE_NAME")
 echo "[+] Local patched image: $LOCAL_NAME"

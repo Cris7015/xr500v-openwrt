@@ -1,6 +1,6 @@
 ## Summary
 
-The Archer XR500v boots via a proprietary TrendChip/EcoNet-derived bootloader (the `bldr>` prompt) that selects one of two firmware slots through a single byte-flag, `bflag`: `0` boots the stock OEM TCLinux image (slot A), `1` boots OpenWrt (slot B). The kernel partition for each slot is not a plain Linux image but is wrapped in a 512-byte proprietary header that the bootloader parses after LZMA decompression; producing a bootable OpenWrt image requires post-processing the OpenWrt `sysupgrade.bin` with `scripts/patch_trendchip_header.py` so those header fields (magic, kernel entry, rootfs offset/size, sub-magic) are valid — without it the bootloader dereferences garbage and crashes. The NAND is laid out in fixed partitions inherited from the OEM firmware, and OpenWrt adds a dedicated 64 MB UBI partition in the previously-unused free area between 0x3000000 and 0x7000000 without disturbing any OEM partition. A firm rule, learned during development, is that slot B must only be flashed from the **stock firmware** over a telnet shell on port 2323 — writing it from a running OpenWrt corrupts the NAND because the mainline BMT/BBT handling diverges from the OEM's.
+The Archer XR500v boots via a proprietary TrendChip/EcoNet-derived bootloader (the `bldr>` prompt) that selects one of two firmware slots through a single byte-flag, `bflag`: `0` boots the stock OEM TCLinux image (slot A), `1` boots OpenWrt (slot B). The kernel partition for each slot is not a plain Linux image but is wrapped in a 512-byte proprietary header that the bootloader parses after LZMA decompression; producing a bootable OpenWrt image requires post-processing the OpenWrt `sysupgrade.bin` with `scripts/patch_trendchip_header.py` so those header fields (magic, kernel entry, rootfs offset/size, sub-magic) are valid — without it the bootloader dereferences garbage and crashes. The NAND is laid out in fixed partitions inherited from the OEM firmware, and OpenWrt adds a dedicated 64 MB UBI partition in the previously-unused free area between 0x3000000 and 0x7000000 without disturbing any OEM partition. Routine upgrades now use the board-specific, BMT-aware OpenWrt `sysupgrade` path; a manual `mtd write` from the live root remains unsupported. Stock telnet/web flashing is retained as the recovery and first-install path.
 
 This page is the canonical reference for the boot path, the full partition map with offsets, the header format and the patcher, the flashing procedure with its exact argument order, the repartition work, the UART pinout, the bootloader command set, and the brick taxonomy / recovery procedure. The device is recoverable from almost any software mistake (soft brick) via UART, the bootloader prompt, a local TFTP server and full NAND backups; only damaging the `boot` partition or the SoC itself is a true (hard) brick. See [02-hardware-chip-inventory.md](02-hardware-chip-inventory.md) for the SoC/chip inventory and [11-openwrt-port-build-persistence.md](11-openwrt-port-build-persistence.md) for the DTS and driver details.
 
@@ -181,11 +181,34 @@ The header patch is a manual step: `make target/linux/install` / `make world` re
 
 ## Flashing slot B
 
-### The one hard rule: flash from stock only
+### Normal upgrade: board-specific OpenWrt sysupgrade
 
-Slot B (`kernel1` + `rootfs1`) must be written from the **stock OEM firmware** via its telnet shell on port **2323**, using the OEM `mtd` tools. **Do not** flash from a running OpenWrt with `mtd write`, even though the command exits 0 and an immediate re-read appears to verify.
+From a running XR500v OpenWrt, copy the **TrendChip-patched** image to RAM,
+validate it, and let sysupgrade perform the write after pivoting away from the
+live root:
 
-Cause: the mainline `en75_bmt` driver, without the factory BBT correctly populated, skips bad blocks via per-boot OOB scanning, which makes the logical→physical mapping inconsistent under concurrent writes. The write *claims* success but the data is corrupt on later read. Symptoms of an OpenWrt-side write (seen twice in development): repeated `Skipping bad block at 0x002a0000 [e]` at identical offsets, `Failed to get erase block status` at the end of the loop, and on the next boot `decompression error -- System halted` or `SQUASHFS error: xz decompression failed`. A stock-side write shows a single clean `[e][w]` per block and consistent re-reads.
+```sh
+scp openwrt-...-sysupgrade-patched.bin root@192.168.68.222:/tmp/xr500v.bin
+ssh root@192.168.68.222 'sysupgrade -T /tmp/xr500v.bin && sysupgrade /tmp/xr500v.bin'
+```
+
+`platform_check_image()` enforces the complete fixed TrendChip header,
+wrapper load/entry, partition bounds, all-zero 512-byte gap and SquashFS at
+`0x300200`. `platform_do_upgrade()` writes only the first 3 MiB to `kernel1`
+and the SquashFS slice beginning at `0x300200` to `rootfs1`, through the
+running kernel's BMT-aware NAND path. The separate `openwrt_ubi` overlay is
+preserved unless `sysupgrade -n` is explicitly used.
+Do **not** substitute hand-written `mtd write` commands: they bypass the image
+checks, fixed slicing and controlled RAM-pivot upgrade flow.
+
+The earlier “OpenWrt writes always corrupt NAND” rule predates working OEM-BMT
+management in `en75_bmt`. It remains useful historical context for old images,
+but is no longer the procedure for current builds.
+
+### Stock OEM recovery / first-install path
+
+When OpenWrt cannot boot, slot B can still be written from the **stock OEM
+firmware** via its telnet shell on port **2323**, using the OEM `mtd` tools.
 
 To get into the stock telnet shell, boot stock (`bflag 0`) and start telnetd (this does not persist across reboot):
 

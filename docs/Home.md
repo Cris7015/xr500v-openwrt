@@ -125,9 +125,10 @@ NDA material. The work followed roughly this path:
   observe → patch, over 150+ iterations. The hard problems (LAN RX through the cascaded
   switch, 2.4 GHz enumeration, the from-scratch SLIC voice path) were solved by matching
   the OEM driver's exact sequences rather than guessing.
-- **Safety** — flashing slot B is done only from the stock OEM telnet; writing NAND from a
-  running OpenWrt corrupts the OOB. UART + TFTP recovery keeps most failure modes
-  soft-brick rather than hard-brick.
+- **Safety** — current builds use the board-specific BMT-aware `sysupgrade`
+  path with a validated TrendChip-patched image; never issue raw `mtd write`
+  commands manually. Stock OEM telnet/web and UART + TFTP remain the recovery
+  paths that keep most failure modes soft-brick rather than hard-brick.
 
 A running iteration log lives in the repo under `notes/` and `docs/notes/`.
 

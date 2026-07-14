@@ -50,7 +50,11 @@ make defconfig && make -j$(nproc)
 - **WiFi 2.4 GHz (MT7603)** — a *second* PCIe radio, separate from the 5 GHz MT7662. Two walls: enumeration needed the OEM global PCIe reset replicated at boot (the `mt7512_pcie_reset` sequence), and the `mt7603e` driver hung on the MCU EEPROM upload until a synthetic EEPROM was inlined in the DTS (`mediatek,eeprom-data` on the `wifi@0,0` node). 5 GHz (MT7662) runs on `mt76x2e`.
 - **Tagger** — econet-eth carries its own `mtk-tag.ko` (from `gsw/tag-mtk.c`), *not* the kernel's `tag_mtk`. `mtk_conduit_find_user` is device-agnostic.
 - **Operational gotcha** — the DSA conduit `eth0` must NOT be a member of `br-lan` (its bridge rx_handler bypasses the DSA tagger). `br-lan` = `lan1..lan4` (+ WiFi).
-- **Flash** — only from stock OEM telnet `:2323` (mtd write from a running OpenWrt corrupts the NAND). TrendChip header patch required.
+- **Flash** — from a running XR500v OpenWrt use the board-specific `sysupgrade`
+  path with the validated TrendChip-patched image; it pivots to RAM and writes
+  the `kernel1`/`rootfs1` slices through the BMT-aware NAND driver.  Never run a
+  raw `mtd write` manually.  Stock OEM telnet `:2323` remains the recovery path
+  when OpenWrt cannot boot.
 - **Persistent network** — the DSA bridge comes up correctly only on a **clean boot**, not with `network restart`.
 
 ## econet-eth driver patches (`package/kernel/econet-eth/patches/`)
