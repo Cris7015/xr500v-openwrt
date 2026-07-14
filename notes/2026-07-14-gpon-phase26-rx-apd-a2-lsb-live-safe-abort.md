@@ -88,9 +88,9 @@ and the module was not removed.
 ## Exact execution boundary
 
 The reset write succeeded and self-cleared.  The complete post-reset snapshot
-matched the exact cold EN7570 map and every GPIO/xPON guard.  Both directed RSSI
-ADC reads and their latches then passed the four-pair phase-26 oracle, followed
-by gain and LOS programming:
+matched the exact cold EN7570 map and every GPIO/xPON guard.  The two directed
+RSSI ADC reads formed one of the four accepted phase-26 value pairs; the two
+latch readbacks independently matched `00`.  Gain and LOS programming followed:
 
 | Attempt | Register | Fixed payload | Result |
 |---:|---:|---|---:|
@@ -149,10 +149,11 @@ attempt(s), 0 sample(s); TX_DISABLE retained; physical power removal required
 
 ## What `LOS_CTRL2.byte2` does and does not prove
 
-The OEM `mt7570_LOS_init()` code read-modify-writes only the documented LOS SD
-count and confidence fields in bytes 0 and 1 of `LOS_CTRL2`.  It does not
-program or interpret byte 2.  The public OEM headers available in this tree do
-not name byte-2 bit 0.  The OEM's displayed LOS value instead comes from
+The OEM `mt7570_LOS_init()` code reads all four bytes of `LOS_CTRL2`, deliberately
+changes only the documented LOS SD count and confidence fields in bytes 0 and
+1, and writes all four bytes back.  It does not deliberately set or interpret
+byte 2.  The public OEM headers available in this tree do not name byte-2 bit
+0.  The OEM's displayed LOS value instead comes from
 `LOS_DBG_RG` at `0x0130`, byte 3 bit 0, so this `0x0120` bit is not the
 documented LOS indicator.  The evidence supports treating it as an autonomous
 result of the LOS block, not writable configuration; the exact analogue or
