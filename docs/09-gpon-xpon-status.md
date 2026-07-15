@@ -330,6 +330,36 @@ Notes on this:
   strict abort path, not optical reception, APD operation or the cause of the
   one-LSB Vref difference.  See
   [`notes/2026-07-13-gpon-phase25-rx-apd-a2-live-safe-abort.md`](../notes/2026-07-13-gpon-phase25-rx-apd-a2-live-safe-abort.md).
+  Phase 26 widened only that one-count Vref/RSSI oracle.  Its live-fibre run
+  completed the exact 15-write receiver/LOS prefix, then observed
+  `LOS_CTRL2 = 05 1f 23 00`.  The immutable phase-26 oracle still required
+  byte 2 to be `0x22`, so it aborted before RX-polarity MMIO, APD writes or
+  sampling.  All TX barriers remained asserted and a mandatory physical cut
+  restored the complete cold state.  This proved the prefix itself can be
+  reached safely but also showed that the undocumented byte 2 cannot be used
+  as a fixed precondition.  See
+  [`notes/2026-07-14-gpon-phase26-rx-apd-a2-lsb-live-safe-abort.md`](../notes/2026-07-14-gpon-phase26-rx-apd-a2-lsb-live-safe-abort.md).
+  Phase 27 consequently treats that byte only as a timed observation.  Its
+  image is installed and its standalone module is compiled and audited, but
+  the one-shot has never been invoked.  A later power-off discarded the tmpfs
+  module copy.  The next live window must start with fibre disconnected and a
+  real cold preflight, copy and verify the module again, connect fibre, execute
+  exactly once, capture evidence, and physically remove power for at least 35
+  seconds.  See
+  [`notes/2026-07-14-gpon-phase27-live-preparation-no-fibre.md`](../notes/2026-07-14-gpon-phase27-live-preparation-no-fibre.md).
+
+  A newer EN7523/EN7571 implementation by Matheus Sampaio Queiroga now
+  provides a second active reference.  Its Askey log reaches digital PHY lock,
+  exposes `pon0`/`omci0`, enables the GPON MAC IRQ and receives real downstream
+  PLOAM while remaining in O2.  The log was generated from commit `c1bfa842`,
+  where `be32_to_cpu()` incorrectly changed the already numeric FIFO word
+  `ff012000` into the logged `002001ff`.  The current `4ed3e5fb` revision
+  removes that conversion, so it should decode the same message as broadcast
+  `Upstream_Overhead` (`0xff/0x01`) and advance to O3; that correction still
+  needs a newer live log.  Its PLOAM state machine is directly reusable, while
+  its EN7571 PHY sequence, dedicated IRQ and Airoha GDM2 datapath are not.
+  See
+  [`notes/2026-07-15-matheus-en7523-xpon-crosscheck.md`](../notes/2026-07-15-matheus-en7523-xpon-crosscheck.md).
 
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 
@@ -345,10 +375,15 @@ all observed TX barriers, but it has not yet demonstrated optical reception.
 Reproducing the stock outcome still requires a complete, safe receiver/PHY
 bring-up, thermal APD policy, PLOAM, burst timing, GEM/OMCI and WAN-QDMA
 integration.  The current probes are a sound foundation, not yet a working
-OpenWrt optical WAN.  The first combined live-fibre observer stopped before
-LOS, polarity and APD because its deliberately exact Vref oracle differed by
-one ADC count; that preserved the safety boundary but left the combined RX
-question unanswered.
+OpenWrt optical WAN.  The first combined live-fibre observer stopped on the
+one-count Vref boundary; phase 26 then reached the complete receiver/LOS prefix
+but stopped on the undocumented `LOS_CTRL2.byte2` outcome.  Phase 27 is ready
+to measure that transition without treating it as permission for a write.  In
+parallel, the hardware-independent O1-O7 PLOAM core from the newer EN7523 work
+now compiles and passes its O1-O6, FIFO-word-order and OEM deduplication
+vectors on the real Linux 6.12/MIPS router.  The local cross-check also fixed
+the draft's one-byte-short `Ranging_Time` deduplication mask.  No XR500v
+MAC/IRQ/data-path adapter has been loaded.
 
 ## Cross-references
 

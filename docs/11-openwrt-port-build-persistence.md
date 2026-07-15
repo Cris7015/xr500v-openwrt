@@ -71,7 +71,16 @@ CONFIG_PACKAGE_wpad-basic-mbedtls=y          # WiFi auth
 CONFIG_PACKAGE_luci=y ...                     # web UI
 ```
 
-The kernel-diet lines (`KALLSYMS`/`DEBUG_INFO` off) are not optional: the compressed kernel plus its 512-byte TP-Link/TrendChip header must fit the on-flash `kernel1` partition, which is **3 MB (3072k)**.  The actual compressed-kernel ceiling is therefore `0x300000 - 0x200 = 0x2ffe00`, not a full 3 MiB. With debug symbols in, the LZMA kernel overflows and the `dd conv=sync` (which rounds up to the next 3072k multiple) silently produces an image the bootloader cannot decode. `scripts/validate_xr500v_image.py` fails closed on this size, the required SquashFS offset `0x300200`, and the 512-byte header/gap relationship. See **256 MB RAM & kernel diet** for the full story.
+The kernel-diet lines (`KALLSYMS`/`DEBUG_INFO` off) are not optional.  The
+TrendChip loader permits at most `0x300000 - 0x200 = 0x2ffe00` bytes for the
+**decompressed kernel payload**; this is not the size of the outer on-flash
+LZMA stream, which must separately fit the same header-adjusted partition.
+With debug data enabled the decompressed kernel crosses that
+boundary and the bootloader cannot complete the load.  Independently, the
+image must retain the 512-byte header, a completely zero 512-byte gap at
+`0x300000..0x3001ff`, and SquashFS at `0x300200`.
+`scripts/validate_xr500v_image.py` decompresses LZMA and fails closed on all of
+those relationships. See **256 MB RAM & kernel diet** for the full story.
 
 ## Build environment
 

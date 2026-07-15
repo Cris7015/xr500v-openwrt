@@ -286,8 +286,10 @@ SquashFS or wrong TrendChip rootfs size is rejected.
 
 ## Stop point
 
-The standalone module is staged in tmpfs but must not be loaded while fibre is
-unavailable.  The future live action remains exactly one manual invocation,
-immediate evidence capture, and physical power removal for at least 35
-seconds; no retry, `rmmod`, software reboot or rollback is permitted after an
-attempt.
+The standalone module is **not** staged on the router: the later physical
+power-off discarded the verified tmpfs copy.  The host artifact remains
+available and must be copied and hash-checked again only after a new cold,
+fibre-disconnected passive preflight.  The future live action remains exactly
+one manual invocation, immediate evidence capture, and physical power removal
+for at least 35 seconds; no retry, `rmmod`, software reboot or rollback is
+permitted after an attempt.

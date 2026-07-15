@@ -38,7 +38,7 @@ make defconfig && make -j$(nproc)
 ```
 
 **Pinned base:** `cjdelisle/openwrt` @ `f3605b31fb` (branch `plan-b-nazox1`).
-**`config.seed`** captures what lives in `.config` (gitignored): USB packages (`kmod-usb3`, `usb-storage`, `usb-xhci-mtk`, `fs-vfat`, `fs-exfat`) + kernel diet (`KALLSYMS`/`DEBUG_INFO` off, required so the compressed kernel fits in the `kernel1` partition of 3 MB).
+**`config.seed`** captures what lives in `.config` (gitignored): USB packages (`kmod-usb3`, `usb-storage`, `usb-xhci-mtk`, `fs-vfat`, `fs-exfat`) + kernel diet (`KALLSYMS`/`DEBUG_INFO` off, required so the bootloader's decompressed kernel payload stays within its `0x2ffe00` limit).
 
 > **⚠️ Build hygiene:** run `make package/kernel/econet-eth/clean` before a fresh build, and do not leave backup directories (`*-bak`, `*-disabled`, `*.iter*`) under `package/`. OpenWrt scans the entire `package/` tree and builds any such stale copies in parallel, which can overwrite the intended driver in the rootfs.
 
@@ -46,7 +46,7 @@ make defconfig && make -j$(nproc)
 - **Nested DSA topology** — `target/linux/econet/dts/en751221.dtsi`: on-die `switch@1fb58000` with a child `mdio { switch@1f (mediatek,mcm) }`. MCM user PHYs at MDIO **1–4** (port0/PHY0 has no RJ45 jack).
 - **Inverted port mapping** (enclosure ≠ Linux): physical LAN1→`lan1` (MCM port4), LAN2→`lan2` (port3), LAN3→`lan3` (port2), LAN4→`lan4` (port1). Corrected in `en751221_tplink_archer-xr500v.dts`.
 - **USB** — node `usb@1fb90000` (mt8173-xhci). The USB3 port has no T-PHY wired → `STS1_U3_MAC_RST` never exits reset → `host_enable` timeout `-145`. Fix: `mediatek,u3p-dis-msk = <0x1>` (disables U3; USB2 port remains active). The `xhci-mtk` driver does NOT consume `phys`.
-- **256 MB** — `memory@0 reg = <0x0 0x10000000>` in the board dts. Requires disabling INITRAMFS + kernel diet (otherwise the compressed kernel does not fit in `kernel1`=3 MB; `dd conv=sync` rounds up to the nearest 3072k multiple).
+- **256 MB** — `memory@0 reg = <0x0 0x10000000>` in the board dts. Requires disabling INITRAMFS + kernel diet: the TrendChip loader rejects a decompressed kernel payload larger than `0x2ffe00`. The outer on-flash LZMA stream must separately fit the same header-adjusted partition limit.
 - **WiFi 2.4 GHz (MT7603)** — a *second* PCIe radio, separate from the 5 GHz MT7662. Two walls: enumeration needed the OEM global PCIe reset replicated at boot (the `mt7512_pcie_reset` sequence), and the `mt7603e` driver hung on the MCU EEPROM upload until a synthetic EEPROM was inlined in the DTS (`mediatek,eeprom-data` on the `wifi@0,0` node). 5 GHz (MT7662) runs on `mt76x2e`.
 - **Tagger** — econet-eth carries its own `mtk-tag.ko` (from `gsw/tag-mtk.c`), *not* the kernel's `tag_mtk`. `mtk_conduit_find_user` is device-agnostic.
 - **Operational gotcha** — the DSA conduit `eth0` must NOT be a member of `br-lan` (its bridge rx_handler bypasses the DSA tagger). `br-lan` = `lan1..lan4` (+ WiFi).
