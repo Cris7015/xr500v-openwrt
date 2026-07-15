@@ -2,8 +2,9 @@
 
 Date: 2026-07-14
 
-Status: **phase-27 image installed; physical cold/disconnected-fibre preflight
-passed; observer never loaded; final module verified on the build host**
+Status: **historical preparation record; the one-shot was executed once on
+2026-07-15 and must not be repeated; see
+`2026-07-15-gpon-phase27-live-run-partial-evidence.md`**
 
 ## Scope and safety boundary
 
@@ -14,16 +15,17 @@ present or loaded and both passive diagnostics reported zero writes.
 
 After the staging session, the user reported another physical power-off.  The
 verified `/tmp/phase27-los-trace.ko` copy described below was therefore lost
-with tmpfs and is no longer assumed to be present on the router.  This changes
-no persistent state and is the safe outcome: before a future fibre-connected
-one-shot, the final host artifact must be copied and hash-checked again only
-after a new cold passive preflight.
+with tmpfs and was no longer assumed to be present on the router.  At this
+preparation checkpoint, that meant the host artifact would first need another
+cold passive preflight and remote hash check.  That later happened before the
+single invocation recorded in the 2026-07-15 run note; it is not permission
+for another invocation.
 
 This preparation did **not** execute the phase-27 sequence.  The phase-27
-module is deliberately absent from the image and has no autoload entry.  A
-future invocation remains a separate, explicit, one-shot action that requires
+module is deliberately absent from the image and has no autoload entry.  The
+then-future invocation was a separate, explicit, one-shot action requiring
 live fibre, an operator next to the power cord and a mandatory physical power
-cut afterwards.
+cut afterwards.  It has now been consumed.
 
 ## Final artifact re-audit
 
@@ -193,7 +195,7 @@ phase-27 debugfs status remains absent.
 
 ## Read-only evidence capturer
 
-`scripts/phase27_capture_status.py` was added for the future one-shot.  It has
+`scripts/phase27_capture_status.py` was added for the then-future one-shot.  It has
 two modes:
 
 ```text
@@ -205,13 +207,18 @@ phase27_capture_status.py capture --host root@192.168.68.222 --output-dir DIR
 `logread` over SSH.  It contains no module load, driver bind/override, reboot,
 poweroff, MMIO, GPIO or I2C action.  Raw output is written before validation,
 then accompanied by `validation.json`, `manifest.json` and `SHA256SUMS`.
+The output path may be new or an existing empty directory; files and non-empty
+directories are rejected without overwriting them.  An exclusive durable
+`.capture.claim` file atomically assigns every accepted directory to one
+capturer before SSH, preventing concurrent `os.replace()` calls.
 The status is atomically written and `fsync`ed first; the tool then prints the
 physical-cut instruction before attempting the supplementary log reads.  A
 timeout, missing status, SSH execution failure or malformed report remains
 fail-closed: the manifest still orders a physical cut and never suggests a
-retry.  Even a local write/fsync failure prints the physical-cut instruction
-before propagating the storage error; a manifest is then written whenever the
-local filesystem still permits it.
+retry once the output directory is accepted.  Every local path/write/fsync
+failure still prints the physical-cut instruction before propagating the
+error.  A rejected occupied path deliberately receives no manifest because
+prior evidence must not be modified.
 
 The validator independently checks the frozen 15-write table, contiguous
 attempt prefix, MIPS `-ECANCELED` value (`-158`), timestamps, all three exact
@@ -228,11 +235,11 @@ evidence capture; its `classification` remains `aborted-needs-powercut`.
 This avoids making a valid one-shot abort look retryable.  Only malformed or
 unsafe evidence returns a failing validator exit status.
 
-Twenty-two offline contract tests pass:
+Twenty-three offline contract tests pass:
 
 ```text
-capture script sha256  ccb40e4a81305ccafca5b099d61090d5efa02a72df65ea5788dfa7181e5dceb5
-test suite sha256      68012b6f23a62ac320a37a2f1f4e1e60650f6cf72267a0e199812951522b738c
+capture script sha256  d8b0134d4225fdea9a57a1cad11d4620c99f341d1ed903ce52f13a255ebeed33
+test suite sha256      4bfb270a56ca9f85eb884abaaa77fe05b1b65ae5f6a1fa177f3cf5166d82e02e
 ```
 
 ```text
@@ -260,11 +267,14 @@ synchronous sample chronology                PASS
 real ECANCELED snapshot result                PASS
 nonzero rejected RSSI read forces ERANGE      PASS
 exact EN7570 variant 0x01 required             PASS
+atomic capture-directory single owner          PASS
 ```
 
-An independent adversarial review of the final capturer and fixtures found no
-remaining issue after these regressions; it confirmed that remote commands are
-read-only and that every ambiguous failure retains the physical-cut boundary.
+An independent post-run review found a concurrent empty-directory claim race
+and stale instructions that could imply phase 27 remained runnable.  The
+exclusive durable claim, concurrency regression and consumed-one-shot wording
+now close both issues.  Remote capture commands remain read-only and every
+ambiguous failure retains the physical-cut boundary.
 
 The canonical flashing documentation was also reconciled with the now-tested
 board-specific BMT-aware sysupgrade implementation.  Routine upgrades use
@@ -286,10 +296,10 @@ SquashFS or wrong TrendChip rootfs size is rejected.
 
 ## Stop point
 
-The standalone module is **not** staged on the router: the later physical
-power-off discarded the verified tmpfs copy.  The host artifact remains
-available and must be copied and hash-checked again only after a new cold,
-fibre-disconnected passive preflight.  The future live action remains exactly
-one manual invocation, immediate evidence capture, and physical power removal
-for at least 35 seconds; no retry, `rmmod`, software reboot or rollback is
-permitted after an attempt.
+This preparation stop point has been consumed.  Phase 27 ran exactly once on
+2026-07-15, followed by the mandatory physical cut and a successful cold
+recovery.  Do not restage or invoke this observer again.  The terminal kernel
+summary was retained but the detailed debugfs report was lost to a local
+capture-directory error; the exact evidence boundary and capture-tool fix are
+recorded in
+[`2026-07-15-gpon-phase27-live-run-partial-evidence.md`](2026-07-15-gpon-phase27-live-run-partial-evidence.md).

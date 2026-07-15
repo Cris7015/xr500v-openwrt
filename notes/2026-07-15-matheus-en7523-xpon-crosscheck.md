@@ -150,8 +150,9 @@ recovery action was required for this software-only test.
 
 ## Next boundary
 
-1. Complete the already prepared phase-27 EN7570 LOS trace in its separate
-   controlled live-fibre/power-cut window.
+1. Treat phase 27 as a consumed one-shot with terminal-only evidence; do not
+   repeat it.  Its exact boundary is recorded in
+   `2026-07-15-gpon-phase27-live-run-partial-evidence.md`.
 2. Build an EN751221-specific, initially passive GPON MAC adapter with
    explicit `soc_data` for FIFO word order and shared QDMA interrupt demux.
 3. Connect the proven PLOAM state machine only after the EN7570/digital PHY

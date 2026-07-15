@@ -339,14 +339,16 @@ Notes on this:
   reached safely but also showed that the undocumented byte 2 cannot be used
   as a fixed precondition.  See
   [`notes/2026-07-14-gpon-phase26-rx-apd-a2-lsb-live-safe-abort.md`](../notes/2026-07-14-gpon-phase26-rx-apd-a2-lsb-live-safe-abort.md).
-  Phase 27 consequently treats that byte only as a timed observation.  Its
-  image is installed and its standalone module is compiled and audited, but
-  the one-shot has never been invoked.  A later power-off discarded the tmpfs
-  module copy.  The next live window must start with fibre disconnected and a
-  real cold preflight, copy and verify the module again, connect fibre, execute
-  exactly once, capture evidence, and physically remove power for at least 35
-  seconds.  See
-  [`notes/2026-07-14-gpon-phase27-live-preparation-no-fibre.md`](../notes/2026-07-14-gpon-phase27-live-preparation-no-fibre.md).
+  Phase 27 consequently treated that byte only as a timed observation.  Its
+  one-shot ran once on 2026-07-15 and the kernel reported result 0 after all
+  15 fixed I2C writes and all 12 guarded samples, with zero MMIO/APD writes
+  and TX_DISABLE retained.  A local capture-directory error occurred before
+  the debugfs status read, so the byte-2 series and scientific classification
+  were not retained.  The mandatory physical cut and disconnected-fibre cold
+  recovery both passed exactly.  This proves the guarded electrical sequence
+  completed under all programmed guards in this single run, but it does not
+  prove the LOS transition value and the sequence must not be repeated.  See
+  [`notes/2026-07-15-gpon-phase27-live-run-partial-evidence.md`](../notes/2026-07-15-gpon-phase27-live-run-partial-evidence.md).
 
   A newer EN7523/EN7571 implementation by Matheus Sampaio Queiroga now
   provides a second active reference.  Its Askey log reaches digital PHY lock,
@@ -377,9 +379,10 @@ bring-up, thermal APD policy, PLOAM, burst timing, GEM/OMCI and WAN-QDMA
 integration.  The current probes are a sound foundation, not yet a working
 OpenWrt optical WAN.  The first combined live-fibre observer stopped on the
 one-count Vref boundary; phase 26 then reached the complete receiver/LOS prefix
-but stopped on the undocumented `LOS_CTRL2.byte2` outcome.  Phase 27 is ready
-to measure that transition without treating it as permission for a write.  In
-parallel, the hardware-independent O1-O7 PLOAM core from the newer EN7523 work
+but stopped on the undocumented `LOS_CTRL2.byte2` outcome.  Phase 27 later
+completed its whole guarded write/sample sequence and cold recovery, but its
+detailed byte-2 report was not retained; no repeat is permitted.  In parallel,
+the hardware-independent O1-O7 PLOAM core from the newer EN7523 work
 now compiles and passes its O1-O6, FIFO-word-order and OEM deduplication
 vectors on the real Linux 6.12/MIPS router.  The local cross-check also fixed
 the draft's one-byte-short `Ranging_Time` deduplication mask.  No XR500v

@@ -1197,9 +1197,34 @@ def _print_powercut_instruction() -> None:
     )
 
 
+def _prepare_output_directory(output: Path) -> None:
+    try:
+        output.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        if not output.is_dir() or any(output.iterdir()):
+            raise FileExistsError(
+                f"capture output already exists and is not an empty directory: {output}"
+            )
+
+    # Atomically claim even a pre-existing empty directory.  The claim is
+    # deliberately retained as evidence: a crashed or concurrent capturer
+    # must never make this path appear reusable and allow os.replace() to
+    # overwrite another process's files.
+    claim = output / ".capture.claim"
+    with claim.open("xb") as handle:
+        handle.write(b"xr500v-phase27-capture-claim-v1\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    directory_fd = os.open(output, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _capture_impl(args: argparse.Namespace, announce_powercut: Callable[[], None]) -> int:
     output = Path(args.output_dir).expanduser().resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    _prepare_output_directory(output)
     commands = {
         "metadata": (
             "uname -a; cat /proc/sys/kernel/random/boot_id; cat /proc/uptime; "
@@ -1302,7 +1327,11 @@ def main() -> int:
     validate_parser.add_argument("--json", dest="json_path", type=Path)
     capture_parser = subparsers.add_parser("capture", help="read and preserve status/logs over read-only SSH")
     capture_parser.add_argument("--host", default="root@192.168.68.222")
-    capture_parser.add_argument("--output-dir", required=True)
+    capture_parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="new or existing empty directory; non-empty paths are rejected",
+    )
     capture_parser.add_argument("--timeout", type=int, default=20)
     args = parser.parse_args()
 

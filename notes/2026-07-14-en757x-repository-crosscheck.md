@@ -92,19 +92,23 @@ bitfield should be copied into this EN751221/EN7570 board.  In particular, the
 XR500v kernel is big-endian MIPS; future QDMA and PON descriptors must use
 explicit masks and endian conversions rather than vendor C bitfields.
 
-The current XR500v work is still below the PADO boundary.  The passive cold
-state has no optical sync, and phase 27 is designed to characterize the final
-EN7570 LOS transition while TX is physically disabled.  With no fibre
-available, the safe stop remains:
+The current XR500v work is still below the PADO boundary.  Phase 27 later ran
+once with TX physically disabled: its terminal message proves all 15 guarded
+writes and 12 samples completed, but a local capture error lost the detailed
+LOS transition series.  The mandatory physical cut restored the passive cold
+state.  This one-shot is consumed and must not be repeated.  The safe stop is:
 
 - passive EN7570 and xPON PHY diagnostics only;
 - the phase-27 writer now requires exact `0x0170/0x015c = 0x03/0x01` before
   the cold map and before its first possible write, so an EN7571 cannot pass;
-- phase-27 module staged but not loaded;
+- phase-27 module and tmpfs artifact absent after verified cold recovery;
 - no speculative PON-MAC status reads until read-to-clear behavior and clock
   dependencies have been audited from the exact EN751221 source;
 - no active laser, APD or QDMA operation.
 
-After the phase-27 optical boundary is resolved, the clean implementation path
-is still modular: passive PON-MAC counters, minimum PLOAM through O5, a raw
-OMCI channel, one verified GEM/T-CONT, then a big-endian WAN-QDMA data path.
+The detailed phase-27 optical boundary is not resolved and cannot be inferred
+from its terminal summary.  The clean implementation path remains modular:
+passive PON-MAC counters, minimum PLOAM through O5, a raw OMCI channel, one
+verified GEM/T-CONT, then a big-endian WAN-QDMA data path.  See
+`2026-07-15-gpon-phase27-live-run-partial-evidence.md` for the retained
+evidence boundary.

@@ -8,7 +8,9 @@ import io
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -581,9 +583,38 @@ class Phase27CaptureStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as existing:
             args = SimpleNamespace(host="root@192.0.2.1", output_dir=existing, timeout=1)
             stderr = io.StringIO()
-            with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
-                with self.assertRaises(FileExistsError):
-                    CAPTURE.capture(args)
+            with mock.patch.object(CAPTURE, "_run_ssh_captured", return_value=failed):
+                with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+                    rc = CAPTURE.capture(args)
+            self.assertEqual(rc, 1)
+            self.assertTrue((Path(existing) / "manifest.json").is_file())
+            self.assertTrue((Path(existing) / "status.raw").is_file())
+            self.assertEqual(
+                (Path(existing) / ".capture.claim").read_text(encoding="ascii"),
+                "xr500v-phase27-capture-claim-v1\n",
+            )
+            self.assertIn("CORTAR CORRIENTE FISICAMENTE AHORA", stderr.getvalue())
+        with tempfile.TemporaryDirectory() as existing:
+            (Path(existing) / "occupied").write_text("do not overwrite\n", encoding="utf-8")
+            args = SimpleNamespace(host="root@192.0.2.1", output_dir=existing, timeout=1)
+            stderr = io.StringIO()
+            with mock.patch.object(CAPTURE, "_run_ssh_captured") as run_ssh:
+                with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+                    with self.assertRaises(FileExistsError):
+                        CAPTURE.capture(args)
+            run_ssh.assert_not_called()
+            self.assertIn("CORTAR CORRIENTE FISICAMENTE AHORA", stderr.getvalue())
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "capture"
+            output.write_text("existing evidence\n", encoding="utf-8")
+            args = SimpleNamespace(host="root@192.0.2.1", output_dir=str(output), timeout=1)
+            stderr = io.StringIO()
+            with mock.patch.object(CAPTURE, "_run_ssh_captured") as run_ssh:
+                with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+                    with self.assertRaises(FileExistsError):
+                        CAPTURE.capture(args)
+            run_ssh.assert_not_called()
+            self.assertEqual(output.read_text(encoding="utf-8"), "existing evidence\n")
             self.assertIn("CORTAR CORRIENTE FISICAMENTE AHORA", stderr.getvalue())
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "capture"
@@ -594,6 +625,7 @@ class Phase27CaptureStatusTests(unittest.TestCase):
                     with self.assertRaises(KeyboardInterrupt):
                         CAPTURE.capture(args)
             self.assertIn("CORTAR CORRIENTE FISICAMENTE AHORA", stderr.getvalue())
+
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "capture"
             args = SimpleNamespace(host="root@192.0.2.1", output_dir=str(output), timeout=1)
@@ -618,6 +650,29 @@ class Phase27CaptureStatusTests(unittest.TestCase):
                         with self.assertRaises(OSError):
                             CAPTURE.capture(args)
             self.assertIn("CORTAR CORRIENTE FISICAMENTE AHORA", stderr.getvalue())
+
+    def test_output_directory_has_one_atomic_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "capture"
+            output.mkdir()
+            barrier = threading.Barrier(2)
+
+            def claim() -> str:
+                barrier.wait()
+                try:
+                    CAPTURE._prepare_output_directory(output)
+                except FileExistsError:
+                    return "rejected"
+                return "claimed"
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(lambda _: claim(), range(2)))
+
+            self.assertCountEqual(results, ["claimed", "rejected"])
+            self.assertEqual(
+                (output / ".capture.claim").read_text(encoding="ascii"),
+                "xr500v-phase27-capture-claim-v1\n",
+            )
 
     def test_missing_powercut_boundary_is_rejected(self) -> None:
         raw = make_status().replace("physical_powercut_required: yes", "physical_powercut_required: no")
