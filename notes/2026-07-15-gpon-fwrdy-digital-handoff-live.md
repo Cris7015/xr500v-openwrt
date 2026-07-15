@@ -141,6 +141,11 @@ PHYRX_STATUS:  low nibble 0x0 -> 0x1, later raw word 0x00000421
 
 Four passive observations at 0, 1, 5 and 10 seconds after restoring the
 diagnostic all remained at state `2`, `PHYRDY=0` and RX low byte `0x21`.
+The fibre was then physically removed from the XR500v and returned to the
+household ONT; another passive read on the same boot still reported exactly
+state `2` and RX low byte `0x21`.  The retained transition is therefore an
+internal PHY state, not a continuing response to received optical power.
+
 These are hardware-owned status fields, not unrolled control writes; their
 retention does not request a safety power cut.  A cold boot should nevertheless
 be used before the next active experiment so that it begins again from the

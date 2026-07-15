@@ -383,9 +383,10 @@ Notes on this:
   OEM ready state `6`, asserted PHYRDY or produced the valid RX-sync nibble
   `0xa`.  TX_DISABLE stayed asserted, all digital TX gates stayed inactive,
   IRQ 22 remained at zero and the cold EN7570/APD state was untouched.  The
-  state-2 status persisted after rollback while every writable baseline word
-  remained restored, so a cold boot is required before the next active phase
-  but no emergency power cut was indicated.  Isolated FWRDY is therefore
+  state-2 status persisted after rollback and after physically removing the
+  fibre while every writable baseline word remained restored, so it is an
+  internal retained PHY state.  A cold boot is required before the next active
+  phase, but no emergency power cut was indicated.  Isolated FWRDY is therefore
   necessary enough to advance the internal FSM but insufficient for receiver
   bring-up.  See
   [`notes/2026-07-15-gpon-fwrdy-digital-handoff-live.md`](../notes/2026-07-15-gpon-fwrdy-digital-handoff-live.md).
