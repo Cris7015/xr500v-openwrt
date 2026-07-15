@@ -363,6 +363,33 @@ Notes on this:
   See
   [`notes/2026-07-15-matheus-en7523-xpon-crosscheck.md`](../notes/2026-07-15-matheus-en7523-xpon-crosscheck.md).
 
+  The first guarded GPON-MAC snapshot was subsequently repeated once with the
+  authorised live fibre connected.  It was exactly identical to the earlier
+  disconnected-fibre baseline: ONU-ID `0xff`, activation O1, downstream PLOAM
+  FIFO empty and all GPON MAC interrupts masked.  The mux returned exactly
+  `3 -> 0 -> 3`, IRQ 22 stayed at zero, no optical/PHY write occurred and both
+  physical and digital TX barriers remained closed.  Ten preceding passive
+  PHY samples likewise stayed at FSM `0x3` with `RX_SYNC=0`; the changing cold
+  `LOS_DBG` byte is therefore not evidence of optical reception.  This closes
+  the passive MAC boundary and places the blocker before PLOAM, in receiver
+  bring-up.  See
+  [`notes/2026-07-15-gpon-mac-live-fibre-passive-comparison.md`](../notes/2026-07-15-gpon-mac-live-fibre-passive-comparison.md).
+
+  The next isolated digital handoff was then run once with the authorised
+  live fibre.  The audited probe changed only `PHYSET3.ESD_PRO` and
+  `PHYSET2.FWRDY`, completed six guarded samples and restored both writable
+  controls exactly.  FWRDY had a real immediate effect: `PHYSTA1[20:18]`
+  moved from cold state `3` to state `2`.  It nevertheless never reached the
+  OEM ready state `6`, asserted PHYRDY or produced the valid RX-sync nibble
+  `0xa`.  TX_DISABLE stayed asserted, all digital TX gates stayed inactive,
+  IRQ 22 remained at zero and the cold EN7570/APD state was untouched.  The
+  state-2 status persisted after rollback while every writable baseline word
+  remained restored, so a cold boot is required before the next active phase
+  but no emergency power cut was indicated.  Isolated FWRDY is therefore
+  necessary enough to advance the internal FSM but insufficient for receiver
+  bring-up.  See
+  [`notes/2026-07-15-gpon-fwrdy-digital-handoff-live.md`](../notes/2026-07-15-gpon-fwrdy-digital-handoff-live.md).
+
 That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
 
 ## Status and outlook
@@ -381,7 +408,13 @@ OpenWrt optical WAN.  The first combined live-fibre observer stopped on the
 one-count Vref boundary; phase 26 then reached the complete receiver/LOS prefix
 but stopped on the undocumented `LOS_CTRL2.byte2` outcome.  Phase 27 later
 completed its whole guarded write/sample sequence and cold recovery, but its
-detailed byte-2 report was not retained; no repeat is permitted.  In parallel,
+detailed byte-2 report was not retained; no repeat is permitted.  The
+isolated FWRDY handoff has now proved that the digital PHY FSM advances
+from state `3` to `2`, while also proving that FWRDY alone cannot reach ready
+state `6` or downstream sync.  The next receiver experiment therefore needs a
+newly audited cold-start combination of analogue/APD preparation and this
+digital step; neither prior one-shot nor isolated FWRDY runs should be
+repeated.  In parallel,
 the hardware-independent O1-O7 PLOAM core from the newer EN7523 work
 now compiles and passes its O1-O6, FIFO-word-order and OEM deduplication
 vectors on the real Linux 6.12/MIPS router.  The local cross-check also fixed
