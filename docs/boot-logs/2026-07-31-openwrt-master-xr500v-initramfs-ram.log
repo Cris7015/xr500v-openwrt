@@ -1,0 +1,569 @@
+BGA IC
+Xtal:1
+DDR3 init.
+DRAMC init done. 
+Calculate size.
+DRAM size=256MB
+Set new TRFC.
+ddr-1066
+
+7512DRAMC V1.2.2 (0)
+Set SPI Flash Clock to 25 Mhz
+
+
+EN751221 at Mon Aug 16 01:47:46 UTC 2021 version 1.1 free bootbase
+
+Memory size 256MB
+
+Set SPI Flash Clock to 25 Mhz
+spi_nand_probe: mfr_id=0xc8, dev_id=0x21
+Dected SPI NAND Flash : _SPI_NAND_DEVICE_ID_F50L1G, Flash Size=0x8000000
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xfb40
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xfb40
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xfb00
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xfb00
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf980
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf980
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf700
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf700
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf6c0
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf6c0
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf640
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf640
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf600
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf600
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf5c0
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf5c0
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf580
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf580
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf500
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf500
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf440
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf440
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf400
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf400
+[spinand_ecc_fail_check] : ECC cannot recover detected !, page=0xf200
+spi_nand_read_page: Bad Block, ECC cannot recovery detecte, page=0xf200
+bmt pool size: 94 
+BMT & BBT Init Success 
+tclinux partition size = 0x1000000, real size = 0x55aa56aa
+tclinux partition size < its real size
+tclinux_slave partition size = 0x1000000, real size = 0x14e8665f
+tclinux_slave partition size < its real size
+
+Press any key in 0.1 secs to enter boot command mode.
+
+bldr> 
+bldr> 
+bldr> xmdm a1000000 3be80
+CCCCCCCC
+bldr> xmdm a1000000 3be80
+CCCCCCCCCCCCreceived len=3be80
+bldr> memrl a1000000
+A1000000: 1000013F 
+bldr> memrl a1000004
+A1000004: 0 
+bldr> jump 81000000
+Jump to 81000000
+
+
+U-Boot 2026.07-00061-g31b0d5656830 (Jul 31 2026 - 17:00:50 -0300)
+
+CPU:   EcoNet/Airoha EN7512/EN7521 MIPS34K
+Clock: 225 MHz
+Model: TP-Link Archer XR500v v1 (RAM-only Ethernet chainload)
+DRAM:  255 MiB
+Core:  4 devices, 4 uclasses, devicetree: separate
+Loading Environment from <NULL>... OK
+In:    serial@1fbf0000
+Out:   serial@1fbf0000
+Err:   serial@1fbf0000
+Net:   
+Warning: airoha-gdm1 (eth0) using random MAC address - <random-uboot-mac>
+eth0: airoha-gdm1
+=> setenv ethaddr 02:58:50:00:00:01
+## Error: Can't overwrite "ethaddr"
+## Error inserting "ethaddr" variable, errno=1
+=> setenv ipaddr 192.168.68.221
+=> setenv serverip 192.168.68.248
+=> setenv netmask 255.255.255.0
+=> setenv netretry no
+=> setenv ethrotate no
+=> ping 192.168.68.248
+Using airoha-gdm1 device
+host 192.168.68.248 is alive
+=> tftpboot 83000000 xr500v-rfc-initramfs.uImage
+Using airoha-gdm1 device
+TFTP from server 192.168.68.248; our IP address is 192.168.68.221
+Filename 'xr500v-rfc-initramfs.uImage'.
+Load address: 0x83000000
+Loading: *#################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 #################################################################
+	 ###############################################
+	 146.5 KiB/s
+done
+Bytes transferred = 6405516 (61bd8c hex)
+=> iminfo 83000000
+
+## Checking Image at 83000000 ...
+   Legacy image found
+   Image Name:   OpenWrt-XR500v-initramfs
+   Image Type:   MIPS Linux Kernel Image (uncompressed)
+   Data Size:    6405452 Bytes = 6.1 MiB
+   Load Address: 80020000
+   Entry Point:  80020000
+   Verifying Checksum ... OK
+=> bootm 83000000
+## Booting kernel from Legacy Image at 83000000 ...
+   Image Name:   OpenWrt-XR500v-initramfs
+   Image Type:   MIPS Linux Kernel Image (uncompressed)
+   Data Size:    6405452 Bytes = 6.1 MiB
+   Load Address: 80020000
+   Entry Point:  80020000
+   Verifying Checksum ... OK
+Working FDT set to 0
+   Loading Kernel Image to 80020000
+
+Starting kernel ...
+
+zimage at:     800233C0 8063A198
+Uncompressing Linux at load address 81000000
+Copy device tree to address  823B0780
+Now, booting the kernel...
+[    0.000000] Linux version 6.18.39 (<build-user>@<build-host>) (mips-openwrt-linux-musl-gcc (OpenWrt GCC 14.4.0 r0+35621-c9833b993d) 14.4.0, GNU ld (GNU Binutils) 2.46.1) #0 SMP Fri Jul 31 15:32:11 2026
+[    0.000000] ISPRAM0: PA=1c000000,Size=00010000,enabled
+[    0.000000] printk: legacy bootconsole [early0] enabled
+[    0.000000] CPU0 revision is: 00019558 (MIPS 34Kc)
+[    0.000000] MIPS: machine is TP-Link Archer XR500v v1
+[    0.000000] Initrd not found or empty - disabling initrd
+[    0.000000] OF: reserved mem: Reserved memory: No reserved-memory node in the DT
+[    0.000000] Primary instruction cache 64kB, VIPT, 4-way, linesize 32 bytes.
+[    0.000000] Primary data cache 32kB, 4-way, VIPT, cache aliases, linesize 32 bytes
+[    0.000000] Zone ranges:
+[    0.000000]   Normal   [mem 0x0000000000000000-0x000000000fffffff]
+[    0.000000] Movable zone start for each node
+[    0.000000] Early memory node ranges
+[    0.000000]   node   0: [mem 0x0000000000000000-0x000000000fffffff]
+[    0.000000] Initmem setup node 0 [mem 0x0000000000000000-0x000000000fffffff]
+[    0.000000] percpu: Embedded 12 pages/cpu s18288 r8192 d22672 u49152
+[    0.000000] Kernel command line: 
+[    0.000000] printk: log buffer data + meta data: 131072 + 409600 = 540672 bytes
+[    0.000000] Dentry cache hash table entries: 32768 (order: 5, 131072 bytes, linear)
+[    0.000000] Inode-cache hash table entries: 16384 (order: 4, 65536 bytes, linear)
+[    0.000000] Writing ErrCtl register=0007510e
+[    0.000000] Readback ErrCtl register=0007510e
+[    0.000000] Built 1 zonelists, mobility grouping on.  Total pages: 65536
+[    0.000000] mem auto-init: stack:off, heap alloc:off, heap free:off
+[    0.000000] SLUB: HWalign=32, Order=0-3, MinObjects=0, CPUs=1, Nodes=1
+[    0.000000] rcu: Hierarchical RCU implementation.
+[    0.000000] rcu: 	RCU restricting CPUs from NR_CPUS=2 to nr_cpu_ids=1.
+[    0.000000] 	Tracing variant of Tasks RCU enabled.
+[    0.000000] rcu: RCU calculated value of scheduler-enlistment delay is 10 jiffies.
+[    0.000000] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=1
+[    0.000000] RCU Tasks Trace: Setting shift to 0 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=1.
+[    0.000000] NR_IRQS: 256
+[    0.000000] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[    0.000000] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 19112604462750000 ns
+[    0.000000] clocksource: timer: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 9556302233 ns
+[    0.000002] sched_clock: 32 bits at 200MHz, resolution 5ns, wraps every 10737418237ns
+[    0.008521] timer: using 200.000 MHz high precision timer (percpu mode)
+[    0.015988] Calibrating delay loop... 597.60 BogoMIPS (lpj=2988032)
+[    0.082687] pid_max: default: 32768 minimum: 301
+[    0.097537] Mount-cache hash table entries: 1024 (order: 0, 4096 bytes, linear)
+[    0.105545] Mountpoint-cache hash table entries: 1024 (order: 0, 4096 bytes, linear)
+[    0.130380] rcu: Hierarchical SRCU implementation.
+[    0.135581] rcu: 	Max phase no-delay instances is 1000.
+[    0.142644] smp: Bringing up secondary CPUs ...
+[    0.147554] smp: Brought up 1 node, 1 CPU
+[    0.152297] Memory: 237212K/262144K available (8133K kernel code, 633K rwdata, 1604K rodata, 10868K init, 223K bss, 24056K reserved, 0K cma-reserved)
+[    0.170663] posixtimers hash table entries: 512 (order: 0, 4096 bytes, linear)
+[    0.178671] futex hash table entries: 256 (8192 bytes on 1 NUMA nodes, total 8 KiB, linear).
+[    0.196374] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[    0.206554] /pcie@1fb83000: Fixed dependency cycle(s) with /pcie@1fb83000/interrupt-controller
+[    0.225962] clocksource: Switched to clocksource timer
+[    0.241228] NET: Registered PF_INET protocol family
+[    0.246880] IP idents hash table entries: 4096 (order: 3, 32768 bytes, linear)
+[    0.255798] tcp_listen_portaddr_hash hash table entries: 512 (order: 0, 4096 bytes, linear)
+[    0.264999] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[    0.273502] TCP established hash table entries: 2048 (order: 1, 8192 bytes, linear)
+[    0.281906] TCP bind hash table entries: 2048 (order: 3, 32768 bytes, linear)
+[    0.289830] TCP: Hash tables configured (established 2048 bind 2048)
+[    0.297301] MPTCP token hash table entries: 256 (order: 0, 4096 bytes, linear)
+[    0.305537] UDP hash table entries: 256 (order: 2, 14336 bytes, linear)
+[    0.312850] UDP-Lite hash table entries: 256 (order: 2, 14336 bytes, linear)
+[    0.321542] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[    0.327838] PCI: CLS 0 bytes, default 32
+[    0.366610] workingset: timestamp_bits=14 max_order=16 bucket_order=2
+[    0.376423] squashfs: version 4.0 (2009/01/31) Phillip Lougher
+[    0.382770] jffs2: version 2.2 (NAND) (SUMMARY) (ZLIB) (LZMA) (RTIME) (CMODE_PRIORITY) (c) 2001-2006 Red Hat, Inc.
+[    0.435449] mtk-pcie 1fb83000.pcie: host bridge /pcie@1fb83000 ranges:
+[    0.442747] mtk-pcie 1fb83000.pcie:       IO 0x001f608000..0x001f60ffff -> 0x0000000000
+[    0.451543] mtk-pcie 1fb83000.pcie:      MEM 0x0028000000..0x002fffffff -> 0x0028000000
+[    0.989027] mtk-pcie 1fb83000.pcie: PCI host bridge to bus 0001:00
+[    0.995765] pci_bus 0001:00: root bus resource [bus 00-ff]
+[    1.001831] pci_bus 0001:00: root bus resource [io  0x0000-0x7fff]
+[    1.008569] pci_bus 0001:00: root bus resource [mem 0x28000000-0x2fffffff]
+[    1.016410] pci 0001:00:01.0: [14c3:0811] type 01 class 0x060400 PCIe Root Port
+[    1.024616] pci 0001:00:01.0: PCI bridge to [bus 00]
+[    1.030081] pci 0001:00:01.0:   bridge window [mem 0x00000000-0x000fffff]
+[    1.039266] pci 0001:00:01.0: bridge configuration invalid ([bus 00-00]), reconfiguring
+[    1.048785] pci 0001:01:00.0: [14c3:7662] type 00 class 0x028000 PCIe Endpoint
+[    1.057108] pci 0001:01:00.0: BAR 0 [mem 0x00000000-0x000fffff 64bit]
+[    1.064150] pci 0001:01:00.0: ROM [mem 0x00000000-0x0000ffff pref]
+[    1.071603] pci 0001:01:00.0: PME# supported from D0 D3hot D3cold
+[    1.079055] pci 0001:00:01.0: PCI bridge to [bus 01-ff]
+[    1.084761] pci_bus 0001:01: busn_res: [bus 01-ff] end is updated to 01
+[    1.092118] pci 0001:00:01.0: bridge window [mem 0x00100000-0x001fffff] to [bus 01] add_size 100000 add_align 100000
+[    1.103651] pci 0001:00:01.0: bridge window [mem 0x28000000-0x281fffff]: assigned
+[    1.111914] pci 0001:01:00.0: BAR 0 [mem 0x28000000-0x280fffff 64bit]: assigned
+[    1.119995] pci 0001:01:00.0: ROM [mem 0x28100000-0x2810ffff pref]: assigned
+[    1.127701] pci 0001:00:01.0: PCI bridge to [bus 01]
+[    1.133130] pci 0001:00:01.0:   bridge window [mem 0x28000000-0x281fffff]
+[    1.140639] pci_bus 0001:00: resource 4 [io  0x0000-0x7fff]
+[    1.146702] pci_bus 0001:00: resource 5 [mem 0x28000000-0x2fffffff]
+[    1.153548] pci_bus 0001:01: resource 1 [mem 0x28000000-0x281fffff]
+[    1.161129] pcieport 0001:00:01.0: enabling device (0000 -> 0002)
+[    1.171113] mtk-pcie 1fb83000.pcie: port1 link retrained
+[    1.177786] Serial: 8250/16550 driver, 2 ports, IRQ sharing disabled
+[    1.185902] printk: legacy console [ttyS0] disabled
+[    1.191866] 1fbf0000.serial: ttyS0 at MMIO 0x1fbf0000 (irq = 9, base_baud = 115200) is a 16550
+[    1.201403] printk: legacy console [ttyS0] enabled
+[    1.201403] printk: legacy console [ttyS0] enabled
+[    1.211396] printk: legacy bootconsole [early0] disabled
+[    1.211396] printk: legacy bootconsole [early0] disabled
+[    1.234797] spi-nand spi0.0: GigaDevice SPI NAND was found.
+[    1.240526] spi-nand spi0.0: 128 MiB, block size: 128 KiB, page size: 2048, OOB size: 64
+[    1.250223] en75_bmt: skipping bad block 1023 in reserve area
+[    1.257085] en75_bmt: skipping bad block 1022 in reserve area
+[    1.263671] en75_bmt: skipping bad block 1021 in reserve area
+[    1.270522] en75_bmt: skipping bad block 1020 in reserve area
+[    1.277250] en75_bmt: skipping bad block 1019 in reserve area
+[    1.283821] en75_bmt: skipping bad block 1018 in reserve area
+[    1.290660] en75_bmt: skipping bad block 1017 in reserve area
+[    1.308472] en75_bmt: skipping bad block 1005 in reserve area
+[    1.316845] en75_bmt: skipping bad block 1004 in reserve area
+[    1.329435] en75_bmt: skipping bad block 998 in reserve area
+[    1.345340] en75_bmt: skipping bad block 988 in reserve area
+[    1.353597] en75_bmt: skipping bad block 987 in reserve area
+[    1.362698] en75_bmt: skipping bad block 985 in reserve area
+[    1.370934] en75_bmt: skipping bad block 984 in reserve area
+[    1.379170] en75_bmt: skipping bad block 983 in reserve area
+[    1.387399] en75_bmt: skipping bad block 982 in reserve area
+[    1.396480] en75_bmt: skipping bad block 980 in reserve area
+[    1.406417] en75_bmt: skipping bad block 977 in reserve area
+[    1.414571] en75_bmt: skipping bad block 976 in reserve area
+[    1.428807] en75_bmt: skipping bad block 968 in reserve area
+[    1.466966] en75_bmt: skipping bad block 930 in reserve area
+[    1.479534] en75_bmt: BBT not found and econet,can-write-factory-bbt is unset, giving up
+[    1.510249] 9 fixed-partitions partitions found on MTD device spi0.0
+[    1.516787] Creating 9 MTD partitions on "spi0.0":
+[    1.521594] 0x000000000000-0x000000040000 : "bootloader"
+[    1.528548] 0x000000040000-0x000000080000 : "romfile"
+[    1.536764] 0x000000080000-0x000000380000 : "kernel"
+[    1.546128] 0x000000380000-0x000001380000 : "rootfs_stock"
+[    1.567184] 0x000001380000-0x000001800000 : "misc"
+[    1.578095] 0x000001800000-0x000001b00000 : "kernel1"
+[    1.588099] 0x000001b00000-0x000002b00000 : "rootfs1"
+[    1.608574] mtd: setting mtd6 (rootfs1) as root device
+[    1.614623] 1 squashfs-split partitions found on MTD device rootfs1
+[    1.621049] 0x0000022a0000-0x000002b00000 : "rootfs_data"
+[    1.628249] 0x000002b00000-0x000002fe0000 : "others"
+[    1.639647] 0x000002fe0000-0x000003000000 : "bootflag"
+[    1.653520] NET: Registered PF_INET6 protocol family
+[    1.666837] Segment Routing with IPv6
+[    1.670621] In-situ OAM (IOAM) with IPv6
+[    1.674662] NET: Registered PF_PACKET protocol family
+[    1.679905] 8021q: 802.1Q VLAN Support v1.8
+[    1.723616] clk: Disabling unused clocks
+[    1.757831] Freeing unused kernel image (initmem) memory: 10868K
+[    1.763881] This architecture does not have kernel memory protection.
+[    1.770390] Run /init as init process
+[    2.233783] init: Console is alive
+[    2.259943] kmodloader: loading kernel modules from /etc/modules-boot.d/*
+[    2.281462] usbcore: registered new interface driver usbfs
+[    2.287195] usbcore: registered new interface driver hub
+[    2.292660] usbcore: registered new device driver usb
+[    2.308677] xhci-mtk 1fb90000.usb: xHCI Host Controller
+[    2.314046] xhci-mtk 1fb90000.usb: new USB bus registered, assigned bus number 1
+[    2.321881] xhci-mtk 1fb90000.usb: hcc params 0x01401198 hci version 0x96 quirks 0x0000000000280810
+[    2.331157] xhci-mtk 1fb90000.usb: irq 17, io mem 0x1fb90000
+[    2.337194] xhci-mtk 1fb90000.usb: xHCI Host Controller
+[    2.342467] xhci-mtk 1fb90000.usb: new USB bus registered, assigned bus number 2
+[    2.350000] xhci-mtk 1fb90000.usb: Host supports USB 3.0 SuperSpeed
+[    2.357974] hub 1-0:1.0: USB hub found
+[    2.362263] hub 1-0:1.0: 2 ports detected
+[    2.369604] hub 2-0:1.0: USB hub found
+[    2.373884] hub 2-0:1.0: 1 port detected
+[    2.387729] kmodloader: done loading kernel modules from /etc/modules-boot.d/*
+[    2.405718] init: - preinit -
+[    5.285972] random: crng init done
+Press the [f] key and hit [enter] to enter failsafe mode
+Press the [1], [2], [3] or [4] key and hit [enter] to select the debug level
+- generating board file -
+[    9.779376] procd: - early -
+[   10.377317] procd: - ubus -
+[   10.437902] procd: - init -
+Please press Enter to activate this console.
+[   11.428183] kmodloader: loading kernel modules from /etc/modules.d/*
+[   12.586511] econet_eth: loading out-of-tree module taints kernel.
+[   12.667431] econet_eth 1fb50000.ethernet: port 1 (LAN) registered with <factory-mac-redacted>
+[   12.915383] Loading modules backported from Linux version v6.18.39-0-gf89c29685
+[   12.922871] Backport generated by backports.git 614e5ed
+[   13.218113] mt76x2e 0001:01:00.0: enabling device (0000 -> 0002)
+[   13.224472] mt76x2e 0001:01:00.0: ASIC revision: 76120044
+[   13.597082] urngd: v1.0.2 started.
+[   13.936764] mt76x2e 0001:01:00.0: ROM patch build: 20141115060606a
+[   13.944755] mt76x2e 0001:01:00.0: Firmware Version: 0.0.00
+[   13.950378] mt76x2e 0001:01:00.0: Build: 1
+[   13.954486] mt76x2e 0001:01:00.0: Build Time: 201607111443____
+[   14.005951] mt76x2e 0001:01:00.0: Firmware running!
+[   14.011107] mt76x2e 0001:01:00.0: registering led 'mt76-phy0'
+[   14.329796] PPP generic driver version 2.4.2
+[   14.348973] NET: Registered PF_PPPOX protocol family
+[   14.400768] kmodloader: done loading kernel modules from /etc/modules.d/*
+
+
+
+BusyBox v1.38.0 (2026-05-13 02:19:59 UTC) built-in shell (ash)
+
+  _______                     ________        __
+ |       |.-----.-----.-----.|  |  |  |.----.|  |_
+ |   -   ||  _  |  -__|     ||  |  |  ||   _||   _|
+ |_______||   __|_____|__|__||________||__|  |____|
+          |__| W I R E L E S S   F R E E D O M
+ -----------------------------------------------------
+ OpenWrt SNAPSHOT, r0+35621-c9833b993d
+ -----------------------------------------------------
+
+ === WARNING! =====================================
+ There is no root password defined on this device!
+ Use the "passwd" command to set up a new password
+ in order to prevent unauthorized SSH logins.
+ --------------------------------------------------
+
+root@OpenWrt:~# [   37.755013] br-lan: port 1(eth0) entered blocking state
+[   37.760435] br-lan: port 1(eth0) entered disabled state
+[   37.765728] econet_eth 1fb50000.ethernet eth0: entered allmulticast mode
+[   37.772835] econet_eth 1fb50000.ethernet eth0: entered promiscuous mode
+[   37.809772] br-lan: port 1(eth0) entered blocking state
+[   37.815049] br-lan: port 1(eth0) entered forwarding state
+ubus call system board
+{
+	"kernel": "6.18.39",
+	"hostname": "OpenWrt",
+	"system": "EcoNet-EN75xx",
+	"model": "TP-Link Archer XR500v v1",
+	"board_name": "tplink,archer-xr500v-v1",
+	"rootfs_type": "initramfs",
+	"release": {
+		"distribution": "OpenWrt",
+		"version": "SNAPSHOT",
+		"firmware_url": "https://downloads.openwrt.org/",
+		"revision": "r0+35621-c9833b993d",
+		"target": "econet/en751221",
+		"description": "OpenWrt SNAPSHOT r0+35621-c9833b993d",
+		"builddate": "1785511931"
+	}
+}
+root@OpenWrt:~# uname -a
+Linux OpenWrt 6.18.39 #0 SMP Fri Jul 31 15:32:11 2026 mips GNU/Linux
+root@OpenWrt:~# cat /proc/mtd
+dev:    size   erasesize  name
+mtd0: 00040000 00020000 "bootloader"
+mtd1: 00040000 00020000 "romfile"
+mtd2: 00300000 00020000 "kernel"
+mtd3: 01000000 00020000 "rootfs_stock"
+mtd4: 00480000 00020000 "misc"
+mtd5: 00300000 00020000 "kernel1"
+mtd6: 01000000 00020000 "rootfs1"
+mtd7: 00860000 00020000 "rootfs_data"
+mtd8: 004e0000 00020000 "others"
+mtd9: 00020000 00020000 "bootflag"
+root@OpenWrt:~# ip -br link
+BusyBox v1.38.0 (2026-05-13 02:19:59 UTC) multi-call binary.
+
+Usage: ip [OPTIONS] address|route|link|neigh|rule [ARGS]
+
+OPTIONS := -f[amily] inet|inet6|link | -o[neline]
+
+ip addr add|del IFADDR dev IFACE | show|flush [dev IFACE] [to PREFIX]
+ip route list|flush|add|del|change|append|replace|test ROUTE
+ip link set IFACE [up|down] [arp on|off] [multicast on|off]
+	[promisc on|off] [mtu NUM] [name NAME] [qlen NUM] [address MAC]
+	[master IFACE | nomaster] [netns PID]
+ip neigh show|flush [to PREFIX] [dev DEV] [nud STATE]
+ip rule [list] | add|del SELECTOR ACTION
+root@OpenWrt:~# iw dev
+root@OpenWrt:~# df -h
+Filesystem                Size      Used Available Use% Mounted on
+tmpfs                   121.6M     11.0M    110.5M   9% /
+tmpfs                   121.6M    160.0K    121.4M   0% /tmp
+tmpfs                   512.0K         0    512.0K   0% /dev
+root@OpenWrt:~# ls -l /sys/class/net
+lrwxrwxrwx    1 root     root             0 Jan  1 00:00 br-lan -> ../../devices/virtual/net/br-lan
+lrwxrwxrwx    1 root     root             0 Jan  1 00:00 eth0 -> ../../devices/platform/1fb50000.ethernet/net/eth0
+lrwxrwxrwx    1 root     root             0 Jan  1 00:00 lo -> ../../devices/virtual/net/lo
+root@OpenWrt:~# ip addr show
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq master br-lan state UNKNOWN qlen 1000
+    link/ether <factory-mac-redacted> brd ff:ff:ff:ff:ff:ff
+3: br-lan: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP qlen 1000
+    link/ether <factory-mac-redacted> brd ff:ff:ff:ff:ff:ff
+    inet 192.168.1.1/24 brd 192.168.1.255 scope global br-lan
+       valid_lft forever preferred_lft forever
+    inet6 fd47:2f26:bf29::1/60 scope global noprefixroute 
+       valid_lft forever preferred_lft forever
+    inet6 fe80::5ea6:e6ff:feb2:438/64 scope link 
+       valid_lft forever preferred_lft forever
+root@OpenWrt:~# cat /sys/class/net/eth0/operstate
+unknown
+root@OpenWrt:~# cat /sys/class/net/eth0/carrier
+1
+root@OpenWrt:~# ls -l /sys/class/ieee80211
+lrwxrwxrwx    1 root     root             0 Jan  1 00:00 phy0 -> ../../devices/platform/1fb83000.pcie/pci0001:00/0001:00:01.0/0001:01:00.0/ieee80211/phy0
+root@OpenWrt:~# dmesg | tail -n 120
+[    1.048785] pci 0001:01:00.0: [14c3:7662] type 00 class 0x028000 PCIe Endpoint
+[    1.057108] pci 0001:01:00.0: BAR 0 [mem 0x00000000-0x000fffff 64bit]
+[    1.064150] pci 0001:01:00.0: ROM [mem 0x00000000-0x0000ffff pref]
+[    1.071603] pci 0001:01:00.0: PME# supported from D0 D3hot D3cold
+[    1.079055] pci 0001:00:01.0: PCI bridge to [bus 01-ff]
+[    1.084761] pci_bus 0001:01: busn_res: [bus 01-ff] end is updated to 01
+[    1.092118] pci 0001:00:01.0: bridge window [mem 0x00100000-0x001fffff] to [bus 01] add_size 100000 add_align 100000
+[    1.103651] pci 0001:00:01.0: bridge window [mem 0x28000000-0x281fffff]: assigned
+[    1.111914] pci 0001:01:00.0: BAR 0 [mem 0x28000000-0x280fffff 64bit]: assigned
+[    1.119995] pci 0001:01:00.0: ROM [mem 0x28100000-0x2810ffff pref]: assigned
+[    1.127701] pci 0001:00:01.0: PCI bridge to [bus 01]
+[    1.133130] pci 0001:00:01.0:   bridge window [mem 0x28000000-0x281fffff]
+[    1.140639] pci_bus 0001:00: resource 4 [io  0x0000-0x7fff]
+[    1.146702] pci_bus 0001:00: resource 5 [mem 0x28000000-0x2fffffff]
+[    1.153548] pci_bus 0001:01: resource 1 [mem 0x28000000-0x281fffff]
+[    1.161129] pcieport 0001:00:01.0: enabling device (0000 -> 0002)
+[    1.171113] mtk-pcie 1fb83000.pcie: port1 link retrained
+[    1.177786] Serial: 8250/16550 driver, 2 ports, IRQ sharing disabled
+[    1.185902] printk: legacy console [ttyS0] disabled
+[    1.191866] 1fbf0000.serial: ttyS0 at MMIO 0x1fbf0000 (irq = 9, base_baud = 115200) is a 16550
+[    1.201403] printk: legacy console [ttyS0] enabled
+[    1.211396] printk: legacy bootconsole [early0] disabled
+[    1.234797] spi-nand spi0.0: GigaDevice SPI NAND was found.
+[    1.240526] spi-nand spi0.0: 128 MiB, block size: 128 KiB, page size: 2048, OOB size: 64
+[    1.250223] en75_bmt: skipping bad block 1023 in reserve area
+[    1.257085] en75_bmt: skipping bad block 1022 in reserve area
+[    1.263671] en75_bmt: skipping bad block 1021 in reserve area
+[    1.270522] en75_bmt: skipping bad block 1020 in reserve area
+[    1.277250] en75_bmt: skipping bad block 1019 in reserve area
+[    1.283821] en75_bmt: skipping bad block 1018 in reserve area
+[    1.290660] en75_bmt: skipping bad block 1017 in reserve area
+[    1.308472] en75_bmt: skipping bad block 1005 in reserve area
+[    1.316845] en75_bmt: skipping bad block 1004 in reserve area
+[    1.329435] en75_bmt: skipping bad block 998 in reserve area
+[    1.345340] en75_bmt: skipping bad block 988 in reserve area
+[    1.353597] en75_bmt: skipping bad block 987 in reserve area
+[    1.362698] en75_bmt: skipping bad block 985 in reserve area
+[    1.370934] en75_bmt: skipping bad block 984 in reserve area
+[    1.379170] en75_bmt: skipping bad block 983 in reserve area
+[    1.387399] en75_bmt: skipping bad block 982 in reserve area
+[    1.396480] en75_bmt: skipping bad block 980 in reserve area
+[    1.406417] en75_bmt: skipping bad block 977 in reserve area
+[    1.414571] en75_bmt: skipping bad block 976 in reserve area
+[    1.428807] en75_bmt: skipping bad block 968 in reserve area
+[    1.466966] en75_bmt: skipping bad block 930 in reserve area
+[    1.479534] en75_bmt: BBT not found and econet,can-write-factory-bbt is unset, giving up
+[    1.510249] 9 fixed-partitions partitions found on MTD device spi0.0
+[    1.516787] Creating 9 MTD partitions on "spi0.0":
+[    1.521594] 0x000000000000-0x000000040000 : "bootloader"
+[    1.528548] 0x000000040000-0x000000080000 : "romfile"
+[    1.536764] 0x000000080000-0x000000380000 : "kernel"
+[    1.546128] 0x000000380000-0x000001380000 : "rootfs_stock"
+[    1.567184] 0x000001380000-0x000001800000 : "misc"
+[    1.578095] 0x000001800000-0x000001b00000 : "kernel1"
+[    1.588099] 0x000001b00000-0x000002b00000 : "rootfs1"
+[    1.608574] mtd: setting mtd6 (rootfs1) as root device
+[    1.614623] 1 squashfs-split partitions found on MTD device rootfs1
+[    1.621049] 0x0000022a0000-0x000002b00000 : "rootfs_data"
+[    1.628249] 0x000002b00000-0x000002fe0000 : "others"
+[    1.639647] 0x000002fe0000-0x000003000000 : "bootflag"
+[    1.653520] NET: Registered PF_INET6 protocol family
+[    1.666837] Segment Routing with IPv6
+[    1.670621] In-situ OAM (IOAM) with IPv6
+[    1.674662] NET: Registered PF_PACKET protocol family
+[    1.679905] 8021q: 802.1Q VLAN Support v1.8
+[    1.723616] clk: Disabling unused clocks
+[    1.757831] Freeing unused kernel image (initmem) memory: 10868K
+[    1.763881] This architecture does not have kernel memory protection.
+[    1.770390] Run /init as init process
+[    1.774059]   with arguments:
+[    1.774065]     /init
+[    1.774071]   with environment:
+[    1.774077]     HOME=/
+[    1.774083]     TERM=linux
+[    2.233783] init: Console is alive
+[    2.259943] kmodloader: loading kernel modules from /etc/modules-boot.d/*
+[    2.281462] usbcore: registered new interface driver usbfs
+[    2.287195] usbcore: registered new interface driver hub
+[    2.292660] usbcore: registered new device driver usb
+[    2.308677] xhci-mtk 1fb90000.usb: xHCI Host Controller
+[    2.314046] xhci-mtk 1fb90000.usb: new USB bus registered, assigned bus number 1
+[    2.321881] xhci-mtk 1fb90000.usb: hcc params 0x01401198 hci version 0x96 quirks 0x0000000000280810
+[    2.331157] xhci-mtk 1fb90000.usb: irq 17, io mem 0x1fb90000
+[    2.337194] xhci-mtk 1fb90000.usb: xHCI Host Controller
+[    2.342467] xhci-mtk 1fb90000.usb: new USB bus registered, assigned bus number 2
+[    2.350000] xhci-mtk 1fb90000.usb: Host supports USB 3.0 SuperSpeed
+[    2.357974] hub 1-0:1.0: USB hub found
+[    2.362263] hub 1-0:1.0: 2 ports detected
+[    2.369604] hub 2-0:1.0: USB hub found
+[    2.373884] hub 2-0:1.0: 1 port detected
+[    2.387729] kmodloader: done loading kernel modules from /etc/modules-boot.d/*
+[    2.405718] init: - preinit -
+[    5.285972] random: crng init done
+[    9.779376] procd: - early -
+[   10.377317] procd: - ubus -
+[   10.437902] procd: - init -
+[   11.428183] kmodloader: loading kernel modules from /etc/modules.d/*
+[   12.586511] econet_eth: loading out-of-tree module taints kernel.
+[   12.667431] econet_eth 1fb50000.ethernet: port 1 (LAN) registered with <factory-mac-redacted>
+[   12.915383] Loading modules backported from Linux version v6.18.39-0-gf89c29685
+[   12.922871] Backport generated by backports.git 614e5ed
+[   13.218113] mt76x2e 0001:01:00.0: enabling device (0000 -> 0002)
+[   13.224472] mt76x2e 0001:01:00.0: ASIC revision: 76120044
+[   13.597082] urngd: v1.0.2 started.
+[   13.936764] mt76x2e 0001:01:00.0: ROM patch build: 20141115060606a
+[   13.944755] mt76x2e 0001:01:00.0: Firmware Version: 0.0.00
+[   13.950378] mt76x2e 0001:01:00.0: Build: 1
+[   13.954486] mt76x2e 0001:01:00.0: Build Time: 201607111443____
+[   14.005951] mt76x2e 0001:01:00.0: Firmware running!
+[   14.011107] mt76x2e 0001:01:00.0: registering led 'mt76-phy0'
+[   14.097365] ieee80211 phy0: Selected rate control algorithm 'minstrel_ht'
+[   14.329796] PPP generic driver version 2.4.2
+[   14.348973] NET: Registered PF_PPPOX protocol family
+[   14.400768] kmodloader: done loading kernel modules from /etc/modules.d/*
+[   37.755013] br-lan: port 1(eth0) entered blocking state
+[   37.760435] br-lan: port 1(eth0) entered disabled state
+[   37.765728] econet_eth 1fb50000.ethernet eth0: entered allmulticast mode
+[   37.772835] econet_eth 1fb50000.ethernet eth0: entered promiscuous mode
+[   37.809772] br-lan: port 1(eth0) entered blocking state
+[   37.815049] br-lan: port 1(eth0) entered forwarding state
+root@OpenWrt:~# ip addr add 192.168.68.222/24 dev br-lan
+root@OpenWrt:~# ping -c 8 192.168.68.248
+PING 192.168.68.248 (192.168.68.248): 56 data bytes
+64 bytes from 192.168.68.248: seq=0 ttl=128 time=12.112 ms
+64 bytes from 192.168.68.248: seq=1 ttl=128 time=1.617 ms
+64 bytes from 192.168.68.248: seq=2 ttl=128 time=1.336 ms
+64 bytes from 192.168.68.248: seq=3 ttl=128 time=1.050 ms
+64 bytes from 192.168.68.248: seq=4 ttl=128 time=10.741 ms
+64 bytes from 192.168.68.248: seq=5 ttl=128 time=10.456 ms
+64 bytes from 192.168.68.248: seq=6 ttl=128 time=10.145 ms
+64 bytes from 192.168.68.248: seq=7 ttl=128 time=9.873 ms
+
+--- 192.168.68.248 ping statistics ---
+8 packets transmitted, 8 packets received, 0% packet loss
+round-trip min/avg/max = 1.050/7.166/12.112 ms
+root@OpenWrt:~# 
