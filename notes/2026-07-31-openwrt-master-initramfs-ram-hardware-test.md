@@ -267,8 +267,9 @@ Before making a persistent-installation claim for the 6.18 RFC:
 1. port and review the already hardware-tested 6.12 BMT/NAND/DTS integration
    against the 6.18 driver instead of enabling an unbounded BBT scan;
 2. port the existing XR500v image recipe, validation scripts, upgrade hook,
-   BLDR-compatible TrendChip header, 3 MiB kernel constraint, and 512-byte
-   rootfs boundary;
+   BLDR-compatible 512-byte TrendChip header, 3 MiB `kernel1` container limit
+   (`0x2ffe00` maximum compressed payload), and the separate all-zero 512-byte
+   gap before SquashFS at `0x300200`;
 3. cold-test Linux Ethernet without relying on U-Boot network initialization;
 4. integrate and validate the dual-switch DSA topology and all four LAN ports;
 5. separately add/test MT7603, LEDs/buttons, xPON, and FXS where appropriate.
