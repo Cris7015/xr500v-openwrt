@@ -10,9 +10,11 @@ working OpenWrt shell, and the single flat Ethernet path carried bidirectional
 traffic with matching payload hashes.
 
 This changes the RFC status from compile-tested to hardware-tested for the
-minimal RAM-boot scope.  It does **not** validate persistent installation,
-the complete dual-switch/DSA topology, all four LAN ports, GPON, or the other
-omitted peripherals.
+minimal RAM-boot scope.  It does **not** validate the already-known XR500v
+persistent path on Linux 6.18, the complete dual-switch/DSA topology, all four
+LAN ports, GPON, or the other omitted peripherals.  The separate Linux 6.12
+lab tree has hardware-tested board-specific sysupgrade support; that support
+was intentionally not included in this first minimal 6.18 RFC.
 
 ## Exact source and artifacts
 
@@ -112,7 +114,7 @@ No `bflag`, NAND/MTD write, or persistent environment command was used.
 The kernel is SMP-capable but this DTS run enumerated one CPU only.  A second
 VPE/core is not validated by this result.
 
-### SPI NAND and partition geometry: read-only pass, persistent fail
+### SPI NAND and partition geometry: read-only pass; persistence omitted
 
 Linux detected the GigaDevice/F50L1G SPI NAND as 128 MiB with 128 KiB erase
 blocks, 2048-byte pages, and 64-byte OOB.  The expected stock partition map
@@ -130,16 +132,44 @@ others      0x2b00000-0x2fe0000  read-only
 bootflag    0x2fe0000-0x3000000  read-only
 ```
 
-The serious remaining blocker is:
+The minimal 6.18 RFC emitted:
 
 ```text
 en75_bmt: BBT not found and econet,can-write-factory-bbt is unset, giving up
 ```
 
-Bootbase finds its own BMT/BBT, while current Linux skips a group of reserve
-blocks and cannot find a compatible table.  Therefore this run proves NAND
-detection and read-only NVMEM access only.  It does not authorize OpenWrt
-MTD writes, sysupgrade, BBT creation, or a persistent image.
+This is expected for the reduced RFC DTS: it carries `econet,bmt` but omits
+the board-specific BBT opt-in and fixes from the hardware-tested 6.12 tree.
+It is **not** evidence that the XR500v cannot sysupgrade on Linux 6.18, nor is
+it a new hardware limitation.
+
+The 6.12 XR500v tree already implements the working persistent path with:
+
+- `econet,can-write-factory-bbt` plus an explicit empty
+  `econet,factory-badblocks` list in the board DTS, selecting controlled BMT
+  reconstruction instead of the destructive raw-OOB scan;
+- local `en75_bmt` and NAND erase fixes for the empty-list/UBI behavior;
+- a board image recipe that enforces the 3 MiB `kernel1` layout;
+- `platform_check_image()` validation of the TrendChip header, kernel budget,
+  zeroed 512-byte gap, SquashFS offset, and rootfs size;
+- `platform_do_upgrade()` RAM-pivot writes of only the `kernel1` and `rootfs1`
+  slices while preserving the separate `openwrt_ubi` overlay.
+
+The corresponding 6.12 overlay files are:
+
+- `target/linux/econet/dts/en751221_tplink_archer-xr500v.dts`
+- `target/linux/econet/image/en751221.mk`
+- `target/linux/econet/base-files/lib/upgrade/platform.sh`
+- `target/linux/econet/patches-6.12/910-en75_bmt-block-isbad-override.patch`
+- `target/linux/econet/patches-6.12/911-nand-erase-skip-isbad.patch`
+
+That exact path has completed multiple real 6.12 sysupgrades and returned the
+router at `192.168.68.222`.  None of those device-specific pieces were ported
+or reviewed against 6.18 for this minimal RFC, and the profile consequently
+produces only an initramfs kernel, not an XR500v `sysupgrade.bin`.  Therefore
+this particular 6.18 image remains read-only until the known 6.12 persistence
+stack is ported and revalidated; the restriction is scoped to the RFC, not to
+the device or kernel generation in principle.
 
 Although MTD marked `rootfs1` as the candidate root and found a
 `rootfs_data` split, `ubus call system board` reported `rootfs_type` as
@@ -232,12 +262,13 @@ The minimal DTS/profile can now be described as hardware-tested for RAM boot,
 console, read-only board/NVMEM identification, MT7662/USB probe, and one flat
 Ethernet path.
 
-Before any persistent installation claim:
+Before making a persistent-installation claim for the 6.18 RFC:
 
-1. resolve or explicitly model the Bootbase BMT/BBT format without creating a
-   new factory BBT on this device;
-2. implement and validate the BLDR-compatible TrendChip header, 3 MiB kernel
-   constraint, and 512-byte rootfs boundary;
+1. port and review the already hardware-tested 6.12 BMT/NAND/DTS integration
+   against the 6.18 driver instead of enabling an unbounded BBT scan;
+2. port the existing XR500v image recipe, validation scripts, upgrade hook,
+   BLDR-compatible TrendChip header, 3 MiB kernel constraint, and 512-byte
+   rootfs boundary;
 3. cold-test Linux Ethernet without relying on U-Boot network initialization;
 4. integrate and validate the dual-switch DSA topology and all four LAN ports;
 5. separately add/test MT7603, LEDs/buttons, xPON, and FXS where appropriate.
