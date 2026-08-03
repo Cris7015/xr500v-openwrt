@@ -1,5 +1,63 @@
 ## Summary
 
+> **2026-07-26 offline WAN-QDMA lifecycle update:** `econet-eth` r2 now keeps
+> one logical xPON consumer across WAN-QDMA provider absence/reprobe, assigns a
+> fresh attachment generation on both reprobe and re-registration, masks each
+> delivered cause bit before its hard-IRQ callback, and exposes an explicit
+> source-drain-then-rearm API. Teardown now masks/ACKs and synchronizes only
+> successfully requested IRQs before NAPI/page-pool destruction, including
+> partial-probe failures. A matching non-autoloaded observer r2 intentionally
+> remains one-shot because it cannot drain the PHY source. Strict checks,
+> static symbol inspection and two clean Linux-6.12.80 MIPS builds passed with
+> identical direct-build hashes. The modules were packaged but not installed
+> or loaded; no PON MAC/PHY, FIFO, PLOAM or optical-TX path is connected. See
+> [`notes/2026-07-26-en751221-xpon-qdma-lifecycle-rearm-offline.md`](../notes/2026-07-26-en751221-xpon-qdma-lifecycle-rearm-offline.md).
+>
+> **2026-07-26 offline PLOAM r3 update:** the hardware-independent lab core now
+> propagates callback errors, rolls back logical/dedup state for identical-copy
+> retries, implements the EN751221 OEM upstream repetition and Alloc-ID
+> contracts, retains one AES key/index across a partial two-fragment send, and
+> checks EqD overflow. Exact O1–O7, failure-injection and wire-vector tests now
+> execute on the host from the same three source files, including ASan/UBSan,
+> instead of merely compiling into a MIPS module. Two clean Linux-6.12.80 MIPS
+> builds reproduced `.ko` SHA-256
+> `54fc080e79d30c2efdc58ddff0242116e98bb2e0fde45c535bd614ae889c69aa`.
+> The module still has no hardware path and was not loaded. Physical transition
+> atomicity remains a blocker; the follow-on QDMA lifecycle checkpoint closed
+> its compile-only reprobe/remove/mask/rearm contract, but no real PHY/MAC
+> consumer is attached. See
+> [`notes/2026-07-26-gpon-ploam-fail-closed-fsm-offline.md`](../notes/2026-07-26-gpon-ploam-fail-closed-fsm-offline.md).
+>
+> **2026-07-19 live RX/O2 update:** phases 28–40 completed the guarded OEM
+> EN7570/APD receiver handoff, reached stable xPON PHY_READY with GPON sync
+> `0xa` and FEC, and then observed the GPON MAC with physical TX disabled.
+> Passive 1.36-ms and 27.26-ms windows stayed in O1; an explicit, reversible
+> O1-to-O2 test then held O2 for 1.1 seconds and restored O1/ATM exactly.  The
+> GTC counter advanced exactly 8,800 frames—one every 125 us—and the
+> downstream-superframe counter matched it, proving sustained PHY-to-MAC
+> synchronization over a complete 1.024-second reference cadence.  HEC/CRC
+> and TX-burst counters remained zero.  Phase 34 then showed that the sampled
+> RX-EOF bit remained clear for later frames after a selective W1C.  Phase 35
+> extended that diagnostic and observed `PLOAMD_RECV` with nine queued 32-bit
+> words—three OEM-sized PLOAM records—while IRQs and TX remained disabled.
+> O1/ATM and every TX barrier were restored exactly; FIFO data was not
+> consumed.  Phase 38 then restored O1 before a single, audited three-word
+> FIFO pop, verified the OEM `9 -> 6` word-count transition and restored ATM
+> exactly. Phase 39 repeated that pop from a separate cold boot after its
+> first attempt safely stopped at the phase-28 RSSI oracle; the retry captured
+> a second, separately classified downstream record with the same TX barriers.
+> Phase 40 then removed two complete records from one FIFO snapshot, verified
+> the exact `9 -> 6 -> 3` accounting and left the third record queued. Both
+> privately classify as identical Upstream Overhead messages. This establishes
+> their observed FIFO dequeue sequence, not their optical spacing or a
+> recurring OLT cadence. Raw records remain private; O3, identity and all
+> upstream timing/TX paths remain forbidden. See
+> [`notes/2026-07-19-gpon-phase40-o2-two-pop-live.md`](../notes/2026-07-19-gpon-phase40-o2-two-pop-live.md),
+> [`notes/2026-07-18-gpon-phase39-o2-second-single-pop-live.md`](../notes/2026-07-18-gpon-phase39-o2-second-single-pop-live.md)
+> and [`notes/2026-07-18-gpon-phase38-o2-single-pop-live.md`](../notes/2026-07-18-gpon-phase38-o2-single-pop-live.md).
+> Earlier FIFO-discovery evidence is in
+> [`notes/2026-07-16-gpon-phase35-ploamd-fifo-live.md`](../notes/2026-07-16-gpon-phase35-ploamd-fifo-live.md).
+>
 > **2026-07-14 EN757x source update:** the archived
 > [`Sirherobrine23/airoha_xpon_en757x`](https://github.com/Sirherobrine23/airoha_xpon_en757x)
 > remains useful corroborating material.  Its first modern Linux patch is not a
@@ -35,19 +93,22 @@
 > [`notes/2026-07-10-gpon-no-olt-phase2-passive-status.md`](../notes/2026-07-10-gpon-no-olt-phase2-passive-status.md).
 > Phase 3 made the xPON MMIO probe a persistent DT platform driver, extended
 > the TX safety snapshot, and identified the OEM physical TX-disable gate as
-> active-high GPIO16.  The live router now confirms both independent inhibits:
-> GPIO16 is an asserted output and `PHYSET3.TXEN` is clear.  An audit also shows
+> active-high GPIO16. The live router confirms GPIO16 as an asserted output
+> while `PHYSET3` bit 5 is clear. A later OEM audit corrected the latter's
+> meaning: clear selects normal GPON burst mode; it is not a second physical
+> inhibit. An audit also shows
 > why Merbanan's current PON-PHY driver cannot be loaded as a passive probe: its
 > `probe()` performs mode/reset/counter/IRQ writes.  See
 > [`notes/2026-07-10-gpon-no-olt-phase3-xpon-platform-baseline.md`](../notes/2026-07-10-gpon-no-olt-phase3-xpon-platform-baseline.md).
 > Phase 4 split the OEM/Merbanan combined init and produced a compile-only,
 > fail-closed RX stage.  Its sole PHY operation clears the signal-detect
-> deglitch bit while physically asserting GPIO16 TX-disable and forcing TXEN
-> low.  The module is intentionally absent from the shipping image, autoload
+> deglitch bit while physically asserting GPIO16 TX-disable and retaining
+> `PHYSET3` bit 5 clear. The module is intentionally absent from the shipping
+> image, autoload
 > and DTB, and was not loaded on the router.  See
 > [`notes/2026-07-11-gpon-no-olt-phase4-rx-init-compile-only.md`](../notes/2026-07-11-gpon-no-olt-phase4-rx-init-compile-only.md).
 > Phase 5 ran that isolated stage on the lab router without fibre.  The sole
-> write changed `PHYSET3` from `0x4581e114` to `0x4581e110`, leaving TXEN low,
+> write changed `PHYSET3` from `0x4581e114` to `0x4581e110`, leaving bit 5 clear,
 > GPIO16 TX-disable asserted, and every TX generator and xPON interrupt off.
 > Module removal restored `0x4581e114`; the complete before/after register dumps
 > were identical, EN7570 recorded no writes, and PPPoE stayed operational.  The
@@ -198,8 +259,10 @@ Notes on this:
   `0x1faf0000`.  It persistently snapshots mode/FSM/sync, analogue status,
   interrupt state and all known TX generators without writing or latching
   anything.  It also reserves GPIO16 `TX_DISABLE` with `GPIOD_ASIS`; the live
-  state is output-high/asserted while `PHYSET3.TXEN`, PRBS, test-frame and
-  rogue-test enables are clear.  This is the fail-closed baseline for a later
+  state is output-high/asserted while `PHYSET3` bit 5, PRBS, test-frame and
+  rogue-test enables are clear. The bit-5 state is retained as a mode/config
+  invariant, not counted as an independent TX kill. This is the fail-closed
+  baseline for a later
   RX-only init prototype, not an active PHY driver.
 - A separate compile-only RX-init package exists outside the device image.  It
   requires independent module-parameter and DT opt-ins plus asserted physical
@@ -330,25 +393,232 @@ Notes on this:
   strict abort path, not optical reception, APD operation or the cause of the
   one-LSB Vref difference.  See
   [`notes/2026-07-13-gpon-phase25-rx-apd-a2-live-safe-abort.md`](../notes/2026-07-13-gpon-phase25-rx-apd-a2-live-safe-abort.md).
+  Phases 28–31 subsequently completed the combined receiver handoff and
+  crossed the first MAC state-machine boundary.  Phase 28 completed all 18
+  fixed EN7570 writes, three bounded xPON writes and 21/21 guarded samples,
+  reaching PHY FSM 6, GPON sync `0xa` and FEC with TX disabled.  Phases 29 and
+  30 observed the reset/default MAC in O1 for up to 27.26 ms; only
+  `rx_eof_err_int` appeared.  Phase 31 then changed only the activation field
+  O1-to-O2, sampled O2 nine times over 3.005 ms and restored O1 and the exact
+  ATM mux.  During that 3.005-ms window the PLOAMd FIFO remained empty and no
+  serial-number, ranging, upstream or TX event appeared.  An OEM source audit
+  then confirmed the stock ordering `PHY_READY -> O2 -> gpon_enable()` and
+  found no additional downstream parser-enable write before O2.  See
+  [`notes/2026-07-16-gpon-phase28-31-rx-handoff-o2-live.md`](../notes/2026-07-16-gpon-phase28-31-rx-handoff-o2-live.md).
+  Phase 32 extended the same audited O2 transition to 240 ms and added only
+  read-only framing counters.  `DBG_RX_GTC_CNT` advanced exactly 1,920 frames
+  and `DBG_DS_SPF_CNT` matched the one-frame-per-125-us cadence, with zero
+  HEC/CRC errors and zero TX bursts.  The PLOAMd FIFO nevertheless remained
+  empty throughout the measured window.  See
+  [`notes/2026-07-16-gpon-phase32-o2-framing-live.md`](../notes/2026-07-16-gpon-phase32-o2-framing-live.md).
+  Phase 33 retained the identical write surface and observed one continuous
+  1.1-second O2 interval.  It received exactly 8,800 GTC frames, including
+  8,192 at the 1.024-second checkpoint, with the downstream-superframe counter
+  in lockstep and all HEC/CRC/TX counters zero.  No PLOAMd FIFO or receive
+  indication appeared in 10,245 guarded checks.  The sticky
+  `PHY_RX_EOF signal error` status was not cleared, so this run cannot yet tell
+  whether it was a single mux-transition event or reasserted on later frames.
+  O1, ATM and every transmit inhibit were restored exactly.  See
+  [`notes/2026-07-16-gpon-phase33-o2-cycle-live.md`](../notes/2026-07-16-gpon-phase33-o2-cycle-live.md).
+  A follow-up OEM audit classified `G_INT_ENABLE` as an IRQ mask rather than a
+  parser/FIFO enable and found that status bits can latch while it is zero.
+  The next minimal diagnostic is therefore a bit-20-only W1C clear followed by
+  a 1–3-ms receive-only observation.  The main remaining stock-order delta is
+  a 1-us GPON MAC reset pulse after selecting the GPON mux, but that pulse is
+  not yet safe to reproduce: the Ethernet driver owns the shared reset array
+  and stock quiesces PHY, MBI/GDM and CPU traffic first.
+  Phase 34 then cleared only bit 20 after the first sampled post-O2 RX-GTC
+  advance.  It remained clear across 24 additional frames over 3.006 ms,
+  while all other latched status bits were preserved.  This proves that the
+  indication was not reasserting per frame in that window and is consistent
+  with a one-time transition latch.  PLOAMd remained absent in this short
+  classification window and O1, ATM and every TX barrier were restored.  See
+  [`notes/2026-07-16-gpon-phase34-eof-w1c-live.md`](../notes/2026-07-16-gpon-phase34-eof-w1c-live.md).
+  Phase 35 combined that clear with the complete 1.1-second observation, then
+  selectively cleared only the remaining safe startup-status subset
+  `0x22010000`.  About 238 ms later the reset/default O2 MAC raised
+  `PLOAMD_RECV` and reported PLOAMd FIFO status `0x00090009`: nine current
+  32-bit words, maximum-used nine and no overrun.  The OEM consumes exactly
+  three words per 12-byte PLOAM record, so this is three complete record slots,
+  although their contents and distinctness are not yet known.  The observer
+  did not consume FIFO data, enabled no IRQ and generated zero TX bursts.  O1,
+  ATM and every physical/digital TX barrier were restored exactly.  This is
+  the first OpenWrt proof that the MAC PLOAM recognizer/FIFO receive path works
+  beyond GTC framing.  It does not yet establish whether the second status
+  clear caused the event or merely preceded the next OLT discovery cycle.  See
+  [`notes/2026-07-16-gpon-phase35-ploamd-fifo-live.md`](../notes/2026-07-16-gpon-phase35-ploamd-fifo-live.md).
+  Phase 38 was the separately audited destructive successor.  It accepted the
+  exact normal `PLOAMD_RECV` trigger, restored O1 before reading the FIFO, and
+  required an identical final FIFO/status pair immediately before the pop.
+  Exactly three downstream data-register reads changed the hardware count from
+  nine to six 32-bit words, with maximum-used still nine and no overrun.  The
+  record passed structural validation and is retained only in the private lab
+  capture; no raw word, identity or decoded content is published.  IRQs and
+  TX remained disabled, the TX-burst counter stayed zero, and ATM plus every
+  physical/digital TX barrier were restored exactly.  See
+  [`notes/2026-07-18-gpon-phase38-o2-single-pop-live.md`](../notes/2026-07-18-gpon-phase38-o2-single-pop-live.md).
+  Phase 39 deliberately repeated that destructive receive boundary only after
+  a fresh physical cold boot. Its first attempt stopped safely in phase 28
+  when the strict RSSI Vref gate did not match: no MAC handoff, FIFO read or
+  phase-39 observer execution followed. The cold-boot retry passed all 21
+  phase-28 samples, accepted only the separately characterized early trigger
+  residue, restored O1 before its one three-word pop, and verified the same
+  `9 -> 6` accounting. Physical TX disable remained asserted, `PHYSET3` bit 5
+  remained in GPON burst mode, GPON IRQs and TX remained disabled, and O1/ATM
+  were restored exactly.
+  The phase-38 and phase-39 records are privately classified at a high level
+  as Upstream Overhead and Extended Burst Length respectively. They were
+  captured on separate cold boots, so this does not establish their on-wire
+  order or cadence; no raw record or optical identity is published. See
+  [`notes/2026-07-18-gpon-phase39-o2-second-single-pop-live.md`](../notes/2026-07-18-gpon-phase39-o2-second-single-pop-live.md).
+  Phase 40 extended the boundary from another fresh cold boot. It restored O1
+  once before any FIFO-data read, removed two consecutive three-word records
+  from the same snapshot, and independently verified the FIFO/status pair and
+  every transmit guard around both pops. The hardware count changed exactly
+  `9 -> 6 -> 3`, leaving the third complete record queued. Both private entries
+  classify as identical Upstream Overhead broadcasts. This is their observed
+  dequeue sequence in one already-populated FIFO; the CPU/MMIO pop timings are
+  not optical cadence measurements and the untouched third entry is still
+  unknown. GPON IRQs and TX remained disabled, the TX-burst counter stayed
+  zero, and O1/ATM plus every physical/digital TX barrier were restored
+  exactly. See
+  [`notes/2026-07-19-gpon-phase40-o2-two-pop-live.md`](../notes/2026-07-19-gpon-phase40-o2-two-pop-live.md).
+  A later guarded O3 attempt then stopped before O2 because
+  `O3_O4_PLOAMU_CTRL` (`0x3c4`) was in hardware-auto mode. OEM source confirms
+  that bit 0 clear permits the MAC to construct the O3/O4 upstream
+  serial-number response autonomously, so continuing would have violated the
+  RX-only contract even with GPIO16 asserted and `PHYSET3` bit 5 clear. The r11
+  compile-only successor adds a second default-off opt-in which, only after an
+  exact O1/reset/TX-disabled baseline, may set `old | BIT(0)` and hold software
+  control as an invariant. It removes every GPON interrupt-status write and
+  aborts on any TX-status, TX-counter or upstream-FIFO movement. The original
+  word can be restored only after proving O1 and before returning the WAN mux
+  to ATM. r11 passed two offline audits and reproducible source/`.ko` builds.
+  Its later one-shot live run reached local O3, observed `SN_Request` and
+  retained three Upstream Overhead plus three Extended Burst Length records.
+  It then aborted immediately on an isolated MAC debug TX-burst count
+  `0 -> 1`; no TX/SN-send interrupt, upstream-FIFO delta or upstream write was
+  observed, and GPIO16 remained asserted. OEM source supports interpreting the
+  isolated count as a scheduled SN slot rather than proof of optical emission,
+  but the run remained fail-closed and ended in a verified physical power cut.
+  See
+  [`notes/2026-07-26-gpon-o3-software-ploam-gate.md`](../notes/2026-07-26-gpon-o3-software-ploam-gate.md)
+  and
+  [`notes/2026-07-26-gpon-o3-r11-live-safe-abort.md`](../notes/2026-07-26-gpon-o3-r11-live-safe-abort.md).
+  The compile-only r12 successor permanently latches any TX IRQ, MAC
+  TX-counter delta or upstream-FIFO delta. It may tolerate only the exact,
+  stable `+1` MAC count for risk-reducing O1/formatter cleanup; any upstream
+  latch still forbids restoring hardware-auto PLOAM control and requires a
+  power cut. r12 adds no write call site and has passed reproducible clean
+  MIPS builds plus an independent static audit. It has not been loaded on the
+  router. See
+  [`notes/2026-07-26-gpon-o3-r12-cleanup-hardening.md`](../notes/2026-07-26-gpon-o3-r12-cleanup-hardening.md).
+  The r13 successor adds the directly readable MAC
+  `DBG_TX_GEM_CNT` as another permanent upstream latch. It also records the
+  PHY TX status/frame/burst words with the OEM double-read pattern, but leaves
+  them raw and unlatched: changed and unchanged values are diagnostic-only and
+  cannot affect abort, cleanup or success. The time-critical O1/two-pop window
+  uses only compact MAC reads at every pre/post boundary; it never touches the
+  PHY counter latch. An independent audit found and closed one missing
+  IRQ-off boundary before the final source passed two audits and two
+  reproducible clean MIPS builds. r13 preserves r12's exact write surface. See
+  [`notes/2026-07-26-gpon-o3-r13-tx-correlation-compile.md`](../notes/2026-07-26-gpon-o3-r13-tx-correlation-compile.md).
+  Its first live invocation stopped earlier in phase 28 on the already-known
+  strict RSSI-oracle signature (`vref=0x0209`, zero RSSI, five I2C writes and
+  zero MMIO writes/samples). r13 itself never loaded; a physical power cut was
+  performed before the bounded cold-boot retry. See
+  [`notes/2026-07-26-gpon-o3-r13-live-attempt1-phase28-abort.md`](../notes/2026-07-26-gpon-o3-r13-live-attempt1-phase28-abort.md).
+  The retry passed phase 28 and loaded r13. It reproduced local O3,
+  `SN_Request` and the same private three-plus-three downstream record
+  classification. The MAC TX-burst counter again changed `0 -> 1`, while
+  2,912 samples of `DBG_TX_GEM_CNT` remained zero and the raw, unlatched PHY
+  TX frame/burst words remained zero. The PLOAMu FIFO status additionally
+  changed `0x00800080 -> 0x80800080`: only the OEM-defined bit-31 underrun
+  flag moved, while both availability fields stayed at 128. That combined
+  source (`TX_BURST + PLOAMU`) correctly disqualified r12's isolated-`+1`
+  cleanup exception. O1 and ATM were restored, but the formatter and forced
+  software-PLOAM control remained pinned, so the run ended `unsafe-pinned`
+  and a physical power cut was verified. No TX/SN-send IRQ, TX-GEM movement,
+  upstream write or identity change was observed; none of these counters prove
+  optical transmission or silence. See
+  [`notes/2026-07-26-gpon-o3-r13-live-tx-correlation.md`](../notes/2026-07-26-gpon-o3-r13-live-tx-correlation.md).
+  The r14 successor then admitted only that exact stable combined class for
+  risk-reducing cleanup: `TX_BST_CNT +1`, the bit-31-only PLOAMu underrun,
+  unchanged FIFO occupancy fields and TX-GEM count, no TX IRQ or upstream
+  write, and no unsafe IRQ bit at any cleanup boundary. Its one-shot live run
+  reproduced local O3, `SN_Request` and the same private three-plus-three
+  downstream classification. All 15 class guards passed, the formatter was
+  restored exactly, activation returned to O1 and the WAN mux returned to
+  ATM. Software-PLOAM control intentionally remained pinned after the
+  upstream latch, so the run still ended `unsafe-pinned` and required physical
+  power removal, which was then verified for more than 35 seconds. No private
+  record was retrieved from that unsafe result.
+  This closes the r13 cleanup question but remains internal-MAC/RX evidence,
+  not proof of optical transmission, silence or OLT acceptance. See
+  [`notes/2026-07-26-gpon-o3-r14-live-exact-cleanup.md`](../notes/2026-07-26-gpon-o3-r14-live-exact-cleanup.md).
+  An offline-only follow-up then extracted a namespaced, hardware-independent
+  three-word PLOAM wire layer. It classifies and decodes only
+  `Upstream_Overhead` and `Extended_Burst_Length`, the two downstream classes
+  established by r14, and compiles synthetic three-plus-three copies through
+  the OEM first-of-three filter. The decoder has no MMIO, IRQ, FIFO, GPIO,
+  I2C, identity or hardware-TX path and exports no kernel ABI. Two clean
+  Linux-6.12.80 MIPS builds produced the same `.ko`; the module was not loaded
+  on the router, so this is compile/static evidence rather than a runtime
+  result. The lab FSM now consumes those semantic decoders directly and checks
+  every decoded field, avoiding a second manual implementation. A subsequent
+  r3 checkpoint closed logical error propagation/retry, ordered-worker,
+  repetition, synchronous/pending AES-key, Alloc-ID and EqD-overflow contracts
+  and executed the exact sources on the host. It remains lab-only and
+  disconnected from hardware because the multi-callback O2/O3/O4/O5
+  transitions are not yet physical transactions. A separate two-line QDMA fix
+  keeps the cached IRQ mask equal to the active hardware mask, so xPON consumer
+  registration cannot revive an unrelated pending NAPI interrupt; provider
+  reprobe/removal and event mask/rearm are still incomplete and there is no
+  live bit-16/24 delivery evidence. See
+  [`notes/2026-07-26-gpon-ploam-wire-decoder-offline.md`](../notes/2026-07-26-gpon-ploam-wire-decoder-offline.md)
+  and
+  [`notes/2026-07-26-gpon-ploam-fail-closed-fsm-offline.md`](../notes/2026-07-26-gpon-ploam-fail-closed-fsm-offline.md).
 
-That is the full extent of what is wired in: the reset lines are named and asserted as a side effect of Ethernet bring-up, and the interrupt source is part of the shared QDMA model. Everything above the SoC-reset level — MAC, PHY, laser, MPCP/OMCI, TDMA — is absent.
+That is the current experimental extent: receiver bring-up, a reversible O2
+observation, two separately booted single-record FIFO pops, one same-FIFO
+two-record pop, and guarded local-O3 RX observations work only through manually
+loaded, fail-closed lab modules.
+There is still no shipping GPON MAC/PHY driver, PLOAM state machine, laser
+transmit support, GEM/QDMA data path or OMCI integration.
 
 ## Status and outlook
 
-GPON is still unported, but no-OLT bench work is useful for identifying and
-validating the individual hardware blocks.  It has confirmed the xPON PHY CSR
-window and the EN7570 control interface without enabling OpenWrt TX.  The live
-drop now supplies a stock end-to-end oracle: the OEM system reaches O5, runs
-OMCI and carries PPPoE service with its authorised identity.  OpenWrt has now
-also reproduced the minimum initial APD sequence in isolation while retaining
-all observed TX barriers, but it has not yet demonstrated optical reception.
-Reproducing the stock outcome still requires a complete, safe receiver/PHY
-bring-up, thermal APD policy, PLOAM, burst timing, GEM/OMCI and WAN-QDMA
-integration.  The current probes are a sound foundation, not yet a working
-OpenWrt optical WAN.  The first combined live-fibre observer stopped before
-LOS, polarity and APD because its deliberately exact Vref oracle differed by
-one ADC count; that preserved the safety boundary but left the combined RX
-question unanswered.
+GPON is still unported, but the live work has now demonstrated optical
+reception through the EN7570 and xPON PHY: OpenWrt reaches PHY_READY, GPON sync
+and FEC while every transmit barrier remains asserted.  The stock firmware
+still supplies the end-to-end oracle—O5, OMCI and PPPoE service with its
+authorised identity—whereas OpenWrt now demonstrates both exact downstream GTC
+framing and a live `PLOAMD_RECV`/non-empty-FIFO event through the reset/default
+MAC in O2, with IRQs and TX disabled. Phases 38 and 39 completed two
+OEM-audited, RX-only single-record pops from separate cold boots. Phase 40
+then completed two bounded pops in one capture, verified `9 -> 6 -> 3`, and
+left the third entry queued while every TX barrier remained asserted. Its two
+private entries are identical Upstream Overhead broadcasts; this is FIFO
+dequeue evidence, not an optical timing measurement. The first phase-39
+attempt additionally demonstrated the fail-closed RSSI-oracle abort before
+any MAC handoff or FIFO read. A stage-A-only long control remains useful to
+test whether clearing bits 16/25/29 was causal; any further destructive
+receive capture needs a fresh physical cold boot and the same fail-closed
+limits. A raw reset-register experiment is still neither needed nor
+authorised.
+The r13 O3 retry further separated the internal MAC indications: a stable
+`TX_BST_CNT +1` coincided with a bit-31-only PLOAMu FIFO underrun, while
+`TX_GEM_CNT` and the raw PHY frame/burst words stayed at zero. This supports
+an internal scheduled/empty-FIFO event, not an optical conclusion. A
+source-only refinement then used that exact pattern solely to make failure
+cleanup less stateful. r14 restored the formatter, O1 and ATM under exact
+stable guards while retaining software PLOAM control and the mandatory cold
+power-cycle result.
+Reproducing the stock outcome still requires a transactional hardware adapter
+for the now-tested software PLOAM core, transmitter calibration and burst
+timing, GEM/OMCI and WAN-QDMA integration.
+The current probes now establish a receiver, framing and downstream-PLOAM
+foundation, not yet a working OpenWrt optical WAN.
 
 ## Cross-references
 

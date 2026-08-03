@@ -7,12 +7,22 @@ module now builds cleanly and passes a first static review, but it has not been
 loaded, has not touched the router, and must not be used live until the final
 independent audit and one-shot private runner exist**
 
+> Update 2026-07-26: the status and frozen hashes above describe the original
+> 2026-07-19 checkpoint. Later guarded revisions were exercised separately.
+> The historical r10 Extended Burst hardening described below was
+> compile-verified but failed the final write-surface contract because it still
+> inherited two GPON interrupt-status W1C writes. It was never pinned for a live
+> run. The current r11 compile-only successor removes those writes and adds the
+> separately audited software-PLOAM control gate described below.
+
 ## Purpose
 
 This note hands off a narrow reviewable change set for the TP-Link Archer
 XR500v / EcoNet EN751221 GPON work. The target remains receive-only: observe
-the downstream O2-to-O3 activation conversation while proving that no optical
-upstream transmission was possible.
+the downstream O2-to-O3 activation conversation while keeping every audited
+digital and physical transmit-disable guard asserted. Those guards do not by
+themselves prove zero optical power; that would require independent optical
+measurement.
 
 This is not a live GPON result. It does not demonstrate O3 on the device, does
 not authorize optical transmission, and does not replace the required cold-boot
@@ -92,7 +102,8 @@ Implemented fixes:
 - wired the previously unused O3 stages through `o3_rx_run_o3_lab()`:
   1. validate the initial downstream records;
   2. save and program the audited formatter state;
-  3. enter local MAC/PHY O3 while transmit remains physically killed;
+  3. enter local GPON MAC O3 while the phase-28 PHY remains RX-ready and every
+     audited transmit disable remains asserted;
   4. run a bounded complete-record drain/classification window;
   5. restore every saved formatter word and the original activation word;
 - any final FIFO level not divisible by three is rejected as a partial record;
@@ -143,7 +154,7 @@ grep -nE 'iowrite32|regmap_(write|update_bits)|gpiod_set|i2c_transfer|INT_ENABLE
   package/kernel/xr500v-gpon-o3-rx-lab
 ```
 
-Review result:
+Historical review result (superseded by r11):
 
 - no `gpiod_set*()` call;
 - no `i2c_transfer()` call;
@@ -158,6 +169,10 @@ Review result:
 - xPON mutation is limited to the three formatter words `0x400`, `0x404` and
   `0x408`.
 
+The W1C entries above later became a blocker under the stricter RX-only audit
+contract. r11 removes them; GPON interrupt status is read-only in the current
+compile-only source.
+
 ## Safety boundary retained
 
 The module still requires the guarded phase-28 EN7570/xPON receiver handoff and
@@ -165,7 +180,9 @@ still treats GPIO16 as the real external `TX_DISABLE` gate. The intended live
 boundary remains:
 
 - GPIO16 / GPIO528 must be output-high in every guard sample;
-- `PHYSET3.TXEN` must remain clear;
+- `PHYSET3` bit 5 must remain clear as the expected GPON burst-mode
+  configuration; OEM source shows that it is not an independent physical TX
+  inhibit;
 - rogue-TX, PRBS and test-frame enables must remain zero;
 - xPON and GPON interrupt enables must remain zero;
 - no ONU identity may become valid;
@@ -177,31 +194,111 @@ boundary remains:
 No raw PLOAM words, decoded payload fields, optical identity, serial numbers,
 passwords or provider-specific values are included in this note.
 
-## Important review caveat
+## Historical r10 Extended-burst review
 
-The source keeps a conditional extended-burst formatter path: after a complete
-downstream record classifies as **Extended Burst Length**, it may program MAC
-`0x09c` and xPON `0x408` for the extended preamble state. This matches the
-local handoff contract for a later O3/O4 formatter step, but it should be
-treated as a explicit review decision because the independent
-first-implementation audit allow-list is narrower and calls MAC `0x09c` a new
-experiment.
+The r10 guarded source resolved the original Extended Burst caveat by keeping
+**Extended Burst Length classification-only**. A complete downstream record can
+set the classification/counting result, but it cannot apply an extended-burst
+formatter step. The ordinary status exposes a real write-count oracle and the
+worker fails closed if that counter changes while an Extended Burst Length
+record is handled.
 
-Recommended decision before any live run: either formally approve that
-conditional `0x09c` path in the final audit, or disable it for the first O3
-RX-only run and only classify Extended Burst Length without programming the
-extended preamble.
+MAC `GPON_G_PLOU_PREAMBLE3` (`0x09c`) remains a read-only member of the saved
+formatter snapshot and equality checks. It is absent from the write allow-list
+and is never written or restored. xPON `XPON_GPON_EXT_PREAMBLE` (`0x408`)
+remains in the independently audited formatter allow-list, but it is used only
+by the initial Upstream Overhead-derived O3/O4 formatter setup and its exact
+restoration. It is not conditionally reprogrammed after Extended Burst Length.
+
+Reintroducing a `0x09c` write, or using `0x408` as an Extended Burst Length
+action, remains a separate experiment requiring its own audit.
+
+r10 nevertheless retained two selective W1C writes to
+`GPON_G_INT_STATUS`. That contradicted the stricter offline audit contract,
+which requires the interrupt-status register to remain read-only. Therefore
+r10 is historical compile evidence only and is not eligible to be pinned in
+the live runner.
+
+The compile-verified r10 artifacts for this hardening are:
+
+```text
+source SHA-256:
+34ee6a345b6f90b9d9dabddd29cbf97ac651d941856fced2643d7773923f9d62
+
+built module SHA-256:
+70e21a6715ffc27f97204d1ab7d66b22be09965ca9a1b059eb34bf04922dd811
+
+package SHA-256:
+f750fcc540da9180d0a619780575a876e3ebf83f1d56c2bf01e1502508c5dbf4
+```
+
+The source and `.ko` hashes reproduced exactly across a clean rebuild at the
+time. Those exact r10 files were not frozen before the r11 build replaced the
+working artifacts, so the hashes above are provenance records rather than
+currently available pinnable files. The APK container hash did not reproduce
+and must never be used as the live runner's identity oracle.
+
+The root-readable r10 rebuild log remains outside the repository. Its
+provenance hash is:
+
+```text
+SHA-256: 309e522485382e4c1b927d71b3b92ecd348a97789d1e16211cb59a77a22400c3
+```
+
+## r11 software-PLOAM gate — compile-only result
+
+r11 removes every write to `GPON_G_INT_STATUS` and introduces a second,
+default-off, read-only module parameter:
+
+```text
+force_software_ploamu_control:bool
+```
+
+Only after the exact O1/reset/TX-disabled baseline passes may that opt-in use
+the dedicated write path:
+
+```text
+forced = saved_O3_O4_PLOAMU_CTRL | BIT(0)
+```
+
+The complete word must read back exactly; bit 8 and all reserved bits are
+preserved. The forced word is checked through the O2/O3 and IRQ-off guards.
+Any PLOAMu-send/SN-send status, TX-burst increment or upstream-FIFO change
+aborts immediately. The saved word is restored only after O1 and all
+transmit-disable guards are proved, and before the WAN mux returns to ATM. If
+that proof fails, the module remains unsafe-pinned and requires a physical
+power cut.
+
+An independent clean MIPS rebuild reproduced the source and `.ko` byte for
+byte:
+
+```text
+source SHA-256:
+c766a043254f04cc07b353d44084889102661224a56699c06f5111db939b5b74
+
+built module SHA-256:
+7bab8b95a6758c9606852340d6c7eb2b528eff3cc26d8e4037e76722238befd9
+```
+
+`modinfo` exposes the explicit opt-in, `git diff --check` passes, and
+checkpatch reports 0 errors and 0 warnings (24 style checks). The APK container
+again changed across equivalent builds, so it is not an identity oracle.
+
+At this checkpoint, r11 had passed two offline source audits but had not been
+loaded on the XR500v. It was subsequently frozen and run exactly once; the
+separate live result is documented in
+[`notes/2026-07-26-gpon-o3-r11-live-safe-abort.md`](../notes/2026-07-26-gpon-o3-r11-live-safe-abort.md).
 
 ## What this checkpoint does not prove
 
 It does not prove live O3, O5, OMCI, GEM/QDMA, optical upstream ranging, laser
 calibration, TX bursts, IPv4/IPv6 provisioning, or an operational optical WAN.
-It only proves that the previously non-compiling O3 RX-only experiment now
-builds and passes a first offline safety/style review.
+It proves only that the O3 RX-only experiment builds and that r11 passes the
+current offline write-surface, restoration and fail-closed review.
 
 ## Suggested reviewer checklist
 
-Before a runner is created, please review the committed diff for:
+Before a new artifact is pinned in the runner, please review the diff for:
 
 1. the O3 guard split: strict pre-O3 internal checks versus O3-local internal
    event observation;
@@ -214,6 +311,6 @@ Before a runner is created, please review the committed diff for:
 6. the restoration proof: formatter words, activation word and WAN mode must
    be exact before any PASS is declared.
 
-Only after that review should a one-shot private runner be written, and the
-first live attempt still requires a newly observed physical power-off of at
-least 35 seconds.
+The separately reviewed runner was still a disabled draft at this checkpoint.
+Its later one-shot promotion and physical recovery are covered by the live r11
+note above.
