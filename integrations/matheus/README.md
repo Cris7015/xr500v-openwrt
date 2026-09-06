@@ -1,5 +1,10 @@
 # XR500v: Airoha/EcoNet integration review set
 
+**Review follow-up:** the mixed reference PR has been split into
+[focused board and PPE submissions](focused/README.md). The archive below
+remains a reference, not the set proposed for wholesale merging. The
+ASoC/SLIC redesign is a separate, explicitly unimplemented follow-up.
+
 Public source snapshot, 2026-09-06. This is **not a complete firmware overlay,
 not a ready-to-flash release, and not a claim that unmodified Matheus HEAD
 works on the XR500v**. Do not copy this directory wholesale over a build.

@@ -1,0 +1,33 @@
+From d3bbc22166740ce62a9b1517a6b6bc53130d907d Mon Sep 17 00:00:00 2001
+From: Cristian Papa <pcristian292@gmail.com>
+Date: Sun, 6 Sep 2026 22:14:56 +0000
+Subject: [PATCH] net: airoha: skip V1 bind lookups for multicast
+
+V1 flow installation accepts only unicast Ethernet rewrites. Skip tuple
+parsing and the locked flow-list scan for multicast/broadcast RX frames,
+leaving their normal delivery and the existing short-header path intact.
+
+The actual RX function passes host guard tests and the modified source
+compiles as a MIPS translation unit. No new hardware benchmark is claimed.
+---
+ drivers/net/ethernet/airoha/airoha_ppe.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/net/ethernet/airoha/airoha_ppe.c b/drivers/net/ethernet/airoha/airoha_ppe.c
+index 17d98bb7ff..845319c1e2 100644
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -3088,6 +3088,13 @@ static void airoha_ppe_v1_rx_check(struct airoha_ppe *ppe, struct sk_buff *skb,
+ 	    reason != AIROHA_PPE_CPU_REASON_HIT_UNBIND &&
+ 	    reason != AIROHA_PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED)
+ 		return;
++	/* Multicast is not eligible for the unicast Ethernet rewrites accepted
++	 * by the V1 offload path. Leave it on the normal receive path without
++	 * parsing a tuple or walking the flow list under the bind lock.
++	 */
++	if (skb_headlen(skb) >= ETH_HLEN &&
++	    is_multicast_ether_addr(skb->data))
++		return;
+ 	if (!airoha_foe_v1_parse_tuple(skb, &tuple))
+ 		return;
+ 
