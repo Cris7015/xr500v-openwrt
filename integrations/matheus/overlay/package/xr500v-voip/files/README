@@ -1,0 +1,37 @@
+XR500v dual FXS
+===============
+
+/etc/init.d/voip starts both lines automatically. Audio defaults match the
+tested RAM setup: echo cancellation, mild noise reduction and 50% playback.
+Use /etc/config/xr500v-voip for enable/disable and audio options, then restart
+voip with handsets on-hook. Do not run the old laboratory voip-dual alongside.
+
+Phone1: /dev/xr500v-voice, SIP LAN:5060, ctrl_tcp loopback:4444.
+Phone2: /dev/xr500v-voice1, SIP LAN:5062, ctrl_tcp loopback:4445.
+Each manager owns its ctrl_tcp connection. Diagnostics go through the root-only
+FIFO under /var/run/xr500v-voip/phoneN/control; never displace it with nc.
+
+Persistent configuration:
+  /etc/xr500v-voip/config                 common baresip settings
+  /etc/xr500v-voip/phoneN/accounts.template  @LANIP@ substitution
+  /etc/xr500v-voip/phoneN/accounts        optional exact account-file override
+  /etc/xr500v-voip/phoneN/config          optional per-line settings override
+  /etc/xr500v-voip/phoneN/contacts        optional contacts override
+  /etc/xr500v-voip/phoneN/speeddial       optional URI to dial on lifting
+
+Accounts/config are rendered privately into /var/run/xr500v-voip/phoneN;
+stored files are not overwritten. No test speed dial or ISP credentials are
+shipped. Defaults are local SIP accounts phone1/phone2, regint=0 (no registrar).
+Managed SIP accounts and pre-call keypad dialing are available through the
+companion LuCI application. Local shortcuts are 1# and 2#, calling the other
+physical port. Neither a successful local call nor a running SIP process
+validates provider registration, in-call IVR support or emergency calling.
+
+Legacy single-line accounts.template and contacts are retained for backup;
+custom legacy account settings must be explicitly mapped to phoneN before
+using the new dual service. Check real NAND configuration before sysupgrade.
+The package's keep.d entry preserves the whole configuration directory.
+
+The audio module statically links SpeexDSP; see speexdsp.COPYING for its notice.
+This public snapshot is for integration review; retain your own known-good
+firmware and configuration when testing.
