@@ -1,0 +1,39 @@
+From: Cristian Papa <pcristian292@gmail.com>
+Subject: [PATCH] net: airoha: finish stopping GPON LED blink before setting it
+
+led_set_brightness(LED_OFF) schedules the software blink cancellation on
+the LED workqueue. An immediate nonzero brightness call can still observe
+LED_BLINK_SW and only update new_blink_brightness. The pending cancellation
+then turns the LED off, losing the requested static-on state. On gpio-leds
+the cached brightness can also retain the last blink phase after the worker
+has driven the physical GPIO off.
+
+The xPON LED helper already runs in sleepable context under led_lock. Flush
+the LED work item after requesting blink cancellation, then apply the final
+brightness. This makes both static-on and static-off deterministic and
+updates their cached brightness after the blink timer has stopped.
+
+Verified on XR500v v055 using a RAM observer: consumers resolved correctly
+to green:pon/red:los and modes were ON/OFF, but both GPIOs were physically
+off. Exercising blink followed by OFF, flush_work and final brightness
+produced PON on/LOS off with matching cached values and no remaining blink.
+
+Signed-off-by: Cristian Papa <pcristian292@gmail.com>
+---
+ drivers/net/ethernet/airoha/airoha_xpon.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -1206,8 +1206,10 @@ static void airoha_xpon_set_led(struct le
+ {
+ 	if (!led || *current_mode == mode)
+ 		return;
+-	if (*current_mode == AIROHA_XPON_LED_BLINK)
++	if (*current_mode == AIROHA_XPON_LED_BLINK) {
+ 		led_set_brightness(led, LED_OFF);
++		flush_work(&led->set_brightness_work);
++	}
+ 
+ 	switch (mode) {
+ 	case AIROHA_XPON_LED_ON:

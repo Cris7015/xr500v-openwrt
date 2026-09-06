@@ -1,0 +1,231 @@
+From: Cristian Papa <pcristian292@gmail.com>
+Subject: [PATCH] net: airoha: drive optional GPON LEDs from link state
+
+Allow boards to provide PON and LOS LED consumers to the xPON driver. Drive
+them from the PLOAM state, the digital PHY LOS indication and transmitter
+fault events:
+
+- PON on in O5;
+- PON blinking while activation is in progress with no LOS;
+- LOS blinking while receive LOS is asserted;
+- LOS on briefly after TX fault or TX signal-detect failure;
+- both off while GPON is inactive and no fault is present.
+
+The optional consumers keep the behavior unchanged on boards without an
+"leds" property.
+
+Signed-off-by: Cristian Papa <pcristian292@gmail.com>
+---
+ drivers/net/ethernet/airoha/airoha_xpon.c | 112 ++++++++++++++++++++++
+ 1 file changed, 112 insertions(+)
+
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -24,6 +24,7 @@
+ #include <linux/i2c.h>
+ #include <linux/io.h>
+ #include <linux/iopoll.h>
++#include <linux/leds.h>
+ #include <linux/list.h>
+ #include <linux/math64.h>
+ #include <linux/mfd/syscon.h>
+@@ -1024,6 +1025,15 @@ struct xpon_priv {
+ 	bool			mac_enabled;
+ 	bool			phy_link_known;
+ 	bool			phy_link_up;
++	struct led_classdev	*pon_led;
++	struct led_classdev	*los_led;
++	/* Serializes front-panel LED state changes. */
++	struct mutex		led_lock;
++	u8			pon_led_mode;
++	u8			los_led_mode;
++	bool			led_optical_known;
++	bool			led_los;
++	unsigned long		tx_fault_until;
+ 	struct airoha_gpon_omci omci;
+ 	struct airoha_xpon_oam_handler omci_handler;
+ 	struct sfp_bus		*sfp_bus;
+@@ -1182,6 +1192,67 @@ struct xpon_priv {
+ 
+ };
+ 
++enum airoha_xpon_led_mode {
++	AIROHA_XPON_LED_OFF,
++	AIROHA_XPON_LED_ON,
++	AIROHA_XPON_LED_BLINK,
++};
++
++#define AIROHA_XPON_LED_BLINK_MS	500
++#define AIROHA_XPON_TX_FAULT_LED_MS	2000
++
++static void airoha_xpon_set_led(struct led_classdev *led, u8 *current_mode,
++				enum airoha_xpon_led_mode mode)
++{
++	if (!led || *current_mode == mode)
++		return;
++	if (*current_mode == AIROHA_XPON_LED_BLINK)
++		led_set_brightness(led, LED_OFF);
++
++	switch (mode) {
++	case AIROHA_XPON_LED_ON:
++		led_set_brightness(led, led->max_brightness);
++		break;
++	case AIROHA_XPON_LED_BLINK:
++		led_blink_set_nosleep(led, AIROHA_XPON_LED_BLINK_MS,
++				      AIROHA_XPON_LED_BLINK_MS);
++		break;
++	case AIROHA_XPON_LED_OFF:
++	default:
++		led_set_brightness(led, LED_OFF);
++		break;
++	}
++
++	*current_mode = mode;
++}
++
++static void airoha_xpon_update_gpon_leds(struct xpon_priv *priv)
++{
++	enum airoha_xpon_led_mode pon = AIROHA_XPON_LED_OFF;
++	enum airoha_xpon_led_mode los = AIROHA_XPON_LED_OFF;
++	unsigned long tx_fault_until;
++
++	if (priv->mode != AIROHA_XPON_MODE_GPON ||
++	    (!priv->pon_led && !priv->los_led))
++		return;
++
++	tx_fault_until = READ_ONCE(priv->tx_fault_until);
++	if (tx_fault_until && time_before(jiffies, tx_fault_until)) {
++		los = AIROHA_XPON_LED_ON;
++	} else if (READ_ONCE(priv->led_optical_known) &&
++		   READ_ONCE(priv->led_los)) {
++		los = AIROHA_XPON_LED_BLINK;
++	} else if (READ_ONCE(priv->mac_enabled)) {
++		pon = READ_ONCE(priv->gpon_o5) ? AIROHA_XPON_LED_ON :
++						    AIROHA_XPON_LED_BLINK;
++	}
++
++	mutex_lock(&priv->led_lock);
++	airoha_xpon_set_led(priv->pon_led, &priv->pon_led_mode, pon);
++	airoha_xpon_set_led(priv->los_led, &priv->los_led_mode, los);
++	mutex_unlock(&priv->led_lock);
++}
++
+ static int airoha_xpon_reset_mac(struct xpon_priv *priv)
+ {
+ 	int ret;
+@@ -3781,6 +3852,7 @@ static void gpon_cb_state_changed(void *
+ 		mutex_lock(&priv->link_state_lock);
+ 		priv->gpon_o5 = state == GPON_O5_OPERATION;
+ 		mutex_unlock(&priv->link_state_lock);
++		airoha_xpon_update_gpon_leds(priv);
+ 		airoha_gpon_omci_set_state(&priv->omci, state);
+ 		gpon_refresh_netdev_link(priv, false);
+ 		return;
+@@ -3869,6 +3941,7 @@ static void gpon_cb_state_changed(void *
+ 	mutex_lock(&priv->link_state_lock);
+ 	priv->gpon_o5 = state == GPON_O5_OPERATION;
+ 	mutex_unlock(&priv->link_state_lock);
++	airoha_xpon_update_gpon_leds(priv);
+ 	gpon_refresh_netdev_link(priv, false);
+ 
+ 	if (state != GPON_O5_OPERATION)
+@@ -4356,6 +4429,7 @@ static int gpon_enable(struct xpon_priv *
+ 	gpon_ploam_rx_queue_reset(priv);
+ 	ploam_start(priv->ploam);
+ 	WRITE_ONCE(priv->mac_enabled, true);
++	airoha_xpon_update_gpon_leds(priv);
+ 	gpon_dbru_sw_reset(priv);
+ 	mod_delayed_work(system_highpri_wq, &priv->txsd_work, 1);
+ 	WRITE_ONCE(priv->phy_link_known, false);
+@@ -4634,6 +4708,7 @@ reset_session:
+ 	priv->omci_operational = false;
+ 	bitmap_zero(priv->service_gems, GPON_MAX_GEM_ID);
+ 	mutex_unlock(&priv->link_state_lock);
++	airoha_xpon_update_gpon_leds(priv);
+ 	cancel_delayed_work(&priv->gem_mib_work);
+ 	bitmap_zero(priv->hw_gems, GPON_MAX_GEM_ID);
+ 	gpon_refresh_netdev_link(priv, true);
+@@ -4798,6 +4873,13 @@ static void gpon_txsd_poll_fn(struct work
+ 		priv->txsd_last_ns = now;
+ 		priv->txsd_last_gem = gem;
+ 		priv->txsd_last_bst = bst;
++		if (status & (XPON_PHY_INT_TX_SD_FAIL |
++			      XPON_PHY_INT_TRANS_TF)) {
++			WRITE_ONCE(priv->tx_fault_until,
++				   jiffies +
++				   msecs_to_jiffies(AIROHA_XPON_TX_FAULT_LED_MS));
++			mod_delayed_work(priv->fsm_wq, &priv->phy_link_work, 0);
++		}
+ 	}
+ 	mod_delayed_work(system_highpri_wq, &priv->txsd_work, 1);
+ }
+@@ -4884,2 +4966,5 @@ static void airoha_xpon_phy_link_work_fn
+ 		goto rearm;
++	WRITE_ONCE(priv->led_optical_known, true);
++	WRITE_ONCE(priv->led_los, los);
++
+ 
+@@ -4905,6 +4990,7 @@ static void airoha_xpon_phy_link_work_fn
+ 	if (changed && link)
+ 		gpon_adjust_internal_delay(priv);
+ 
++	airoha_xpon_update_gpon_leds(priv);
+ 	gpon_sample_upstream_tx(priv);
+ 
+ rearm:
+@@ -5402,6 +5488,9 @@ static void gpon_sfp_link_down(void *upst
+ 	struct xpon_priv *priv = upstream;
+ 
+ 	dev_warn(priv->dev, "GPON optical link down / LOS\n");
++	WRITE_ONCE(priv->led_optical_known, true);
++	WRITE_ONCE(priv->led_los, true);
++	airoha_xpon_update_gpon_leds(priv);
+ 	ploam_notify_los(priv->ploam);
+ }
+ 
+@@ -5410,6 +5499,9 @@ static void gpon_sfp_link_up(void *upstre
+ 	struct xpon_priv *priv = upstream;
+ 
+ 	dev_info(priv->dev, "GPON optical link up\n");
++	WRITE_ONCE(priv->led_optical_known, true);
++	WRITE_ONCE(priv->led_los, false);
++	airoha_xpon_update_gpon_leds(priv);
+ 	if (READ_ONCE(priv->started) &&
+ 	    READ_ONCE(priv->optical_active) &&
+ 	    !READ_ONCE(priv->mac_enabled))
+@@ -6625,12 +6717,24 @@ static int airoha_xpon_probe(struct platf
+ 		return -ENOMEM;
+ 	priv->dev = dev;
+ 	priv->match_data = data;
++	mutex_init(&priv->led_lock);
+ 	ret = airoha_xpon_get_mode(dev, data, &priv->mode);
+ 	if (ret)
+ 		return ret;
+ 	INIT_DELAYED_WORK(&priv->gem_mib_work, gpon_gem_mib_work_fn);
+ 	INIT_DELAYED_WORK(&priv->phy_link_work,
+ 			  airoha_xpon_phy_link_work_fn);
++	if (device_property_present(dev, "leds")) {
++		priv->pon_led = devm_of_led_get_optional(dev, 0);
++		if (IS_ERR(priv->pon_led))
++			return dev_err_probe(dev, PTR_ERR(priv->pon_led),
++					     "failed to get PON LED\n");
++
++		priv->los_led = devm_of_led_get_optional(dev, 1);
++		if (IS_ERR(priv->los_led))
++			return dev_err_probe(dev, PTR_ERR(priv->los_led),
++					     "failed to get LOS LED\n");
++	}
+ 
+ 	dev_info(dev, "xPON initial mode: %s\n",
+ 		 airoha_xpon_mode_name(priv->mode));
+@@ -6872,6 +6976,10 @@ static void airoha_xpon_remove(struct pla
+ 		put_device(priv->lddla_dev);
+ 	if (airoha_xpon_is_gpon(priv))
+ 		airoha_xpon_cleanup_gpon(priv);
++	WRITE_ONCE(priv->led_optical_known, false);
++	WRITE_ONCE(priv->led_los, false);
++	WRITE_ONCE(priv->tx_fault_until, 0);
++	airoha_xpon_update_gpon_leds(priv);
+ 	dev_put(priv->gdm_dev);
+ 	priv->gdm_dev = NULL;
+ }

@@ -1,0 +1,43 @@
+From: Cristian Papa <cristian@example.invalid>
+Subject: [PATCH] net: airoha: allow factory sleep-counter preactivation
+
+The factory gpon_dev_init() writes SLEEP_CNT=0xffffffff and pulses
+SLEEP_GLB_CFG.reload_sleep_cnt before entering O2.  A late O5 poke changes
+hardware DBRu behaviour but cannot test whether the O2/O4/O5 edge consumes
+this state.
+
+Add a default-off lab parameter that reproduces the factory ordering after
+the idle-GEM threshold setup and before GPON activation.
+
+Signed-off-by: Cristian Papa <cristian@example.invalid>
+---
+ drivers/net/ethernet/airoha/airoha_xpon.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -177,5 +177,10 @@ MODULE_PARM_DESC(gpon_oem_phy_reset_enab
+ 		 "EN751221 lab: pulse TOP_TEST_MISC0_CTRL[25] with the GPON MAC reset");
+ 
++static bool gpon_oem_sleep_counter_enable;
++module_param(gpon_oem_sleep_counter_enable, bool, 0644);
++MODULE_PARM_DESC(gpon_oem_sleep_counter_enable,
++		 "EN751221 lab: load the factory sleep counter before GPON activation");
++
+ /*
+  * gpon_dev_typeB_restore() closes its register restore with
+  * G_SN_MSG_CFG |= (2 << 16), i.e. tx_power_mode = 2 (gpon_dev.c:2637-2642).
+@@ -2085,5 +2090,13 @@ static int gpon_prepare_hardware(struct
+ 	priv->fine_delay_cur = priv->match_data->gpon_fine_delay;
+ 	gpon_rmw(priv, GPON_DBG_IDLE_GEM_THLD, GENMASK(15, 0),
+ 		 priv->match_data->gpon_idle_gem_threshold);
++	if (gpon_oem_sleep_counter_enable) {
++		gpon_write(priv, GPON_SLEEP_CNT, ~0U);
++		gpon_set_bits(priv, GPON_SLEEP_GLB_CFG, BIT(30));
++		dev_info(priv->dev,
++			 "GPON factory sleep counter loaded before activation: cfg=%#010x count=%#010x\n",
++			 gpon_read(priv, GPON_SLEEP_GLB_CFG),
++			 gpon_read(priv, GPON_SLEEP_CNT));
++	}
+ 	dev_info(priv->dev,
+ 		 "GPON formatter baseline: cap=%#010x pref=%#010x dly=%#010x idle=%#010x no-msg=%#010x/%#010x/%#010x mac-set=%#010x tx-sync-opt=%#010x ploamu-ctrl=%#010x\n",

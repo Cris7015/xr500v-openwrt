@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.o
+*.ko
+*.apk
+*.ipk
+*.bin
+*.wav
+*.raw
+*.pcap
+*.pcapng
+*.tar*
+*.zip

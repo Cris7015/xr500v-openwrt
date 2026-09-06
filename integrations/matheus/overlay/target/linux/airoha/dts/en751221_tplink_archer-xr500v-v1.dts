@@ -1,0 +1,485 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+
+#include "en751221.dtsi"
+
+/ {
+	model = "TP-Link Archer XR500v v1";
+	compatible = "tplink,archer-xr500v-v1", "econet,en751221";
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x10000000>;
+	};
+
+	pcm0: pcm@1fbd0000 {
+		compatible = "econet,en751221-pcm";
+		reg = <0x1fbd0000 0x1000>;
+		interrupt-parent = <&intc>;
+		interrupts = <11>;
+		status = "okay";
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		ppe_foe: ppe-foe@dc00000 {
+			reg = <0x0dc00000 0x00180000>;
+			no-map;
+		};
+
+		/*
+		 * The EN751221 QDMA_WAN exposes an 8 MiB HWF buffer window through
+		 * the SLM, backed by the 4 MiB physical pool used by the OEM SDK.
+		 * Keep it out of Linux RAM so the SLM can own it exclusively.
+		 */
+		qdma1_slm: qdma1-slm@d800000 {
+			reg = <0x0d800000 0x00400000>;
+			no-map;
+		};
+	};
+
+	chosen {
+		stdout-path = "/serial@1fbf0000:115200";
+		/*
+		 * loglevel=4: keep KERN_ERR and above on the console, everything else
+		 * only in dmesg. The xPON driver emits ~89 dev_info() calls, several of
+		 * them ~400-character register dumps, on every activation cycle. printk
+		 * to a 115200 console is synchronous, so a single dump costs ~35 ms and
+		 * a full cycle hundreds -- spent inside the ordered workqueue that runs
+		 * the PLOAM state machine, i.e. exactly where GPON activation is timing
+		 * sensitive. Nothing is lost: dmesg still has it all.
+		 */
+		/*
+		 * v0.47: OEM-faithful upstream profile now that the BOSA rail is on.
+		 * SLEEP_CNT=0xffffffff is loaded in gpon_dev_init() before O2, like the
+		 * factory driver, and the software DBRu back door stays off so the MAC
+		 * reports queue occupancy by itself (hardware DBRu).
+		 */
+		/* Hardware DBRu and sleep-counter defaults now live in the driver. */
+		bootargs = "console=ttyS0,115200 loglevel=4";
+		linux,usable-memory-range = <0x00020000 0x0ffe0000>;
+	};
+
+	/*
+	 * Front-panel GPIOs recovered from the factory led_def table and already
+	 * exercised by the previous XR500v OpenWrt tree.  GPON/LOS are left
+	 * without a default trigger until their state policy is validated below.
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		led_pon: led-pon {
+			label = "green:pon";
+			gpios = <&pinctrl 2 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_wps: led-wps {
+			label = "green:wps";
+			gpios = <&pinctrl 7 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_usb: led-usb {
+			label = "green:usb";
+			gpios = <&pinctrl 11 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_los: led-los {
+			label = "red:los";
+			gpios = <&pinctrl 24 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_phone1: led-phone1 {
+			label = "green:phone1";
+			gpios = <&pinctrl 25 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_phone2: led-phone2 {
+			label = "green:phone2";
+			gpios = <&pinctrl 26 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_internet: led-internet {
+			label = "green:internet";
+			gpios = <&pinctrl 28 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+	};
+
+	keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <20>;
+
+		key-reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&pinctrl 0 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+
+		key-wifi {
+			label = "wifi";
+			linux,code = <KEY_RFKILL>;
+			gpios = <&pinctrl 4 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+
+		key-wps {
+			label = "wps";
+			linux,code = <KEY_WPS_BUTTON>;
+			gpios = <&pinctrl 9 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+	};
+
+	/* Optics through the standard SFP subsystem.
+	 *
+	 * TX_DISABLE is GPIO 16, ACTIVE HIGH: driving it high asserts TX_DISABLE,
+	 * i.e. the laser is OFF. Verified on hardware against the OEM led_def table
+	 * (led_no 42 -> gpio 16) and by sampling the pin; note the OEM
+	 * ledCtrl[].onoff field is a polarity setting, not a state, which inverts
+	 * the naive reading of the vendor code.
+	 *
+	 * The pin belongs to the sfp core, which de-asserts it in
+	 * sfp_module_tx_enable() and only then lets the GPON MAC rearm the EN7570
+	 * safe circuit (airoha_lddla_tx_rearm(), whose kdoc requires exactly that
+	 * order). Claiming the pin elsewhere breaks the sequence: the latch reset
+	 * does not take while TX_DISABLE is still asserted and the laser stays
+	 * clamped at ibias=0/imod=0 forever.
+	 *
+	 * During bring-up this board deliberately held the pin outside the sfp with
+	 * a gpio-export, as a hardware barrier against transmitting onto a live ISP
+	 * PON before the stack was trusted. That barrier has served its purpose --
+	 * the ONU now reaches and holds O5 -- so the pin goes back where it belongs.
+	 */
+	pon0: pon0 {
+		compatible = "sff,sfp";
+		i2c-bus = <&i2c_sfp>;
+		tx-disable-gpios = <&pinctrl 16 GPIO_ACTIVE_HIGH>;
+	};
+
+	/*
+	 * Autonomous cold-boot profile: the SFP core owns GPIO16. It first
+	 * asserts TX_DISABLE, then deasserts it before module_start(), whose xPON
+	 * callback rearms the EN7570 and starts the GPON MAC in that order.
+	 */
+};
+
+&eth {
+	memory-region = <&ppe_foe>, <&qdma1_slm>;
+	memory-region-names = "ppe-foe", "qdma1-slm";
+	status = "okay";
+};
+
+&gdm1 {
+	nvmem-cells = <&macaddr_misc_f100 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+};
+
+&switch0 {
+	status = "okay";
+};
+
+&switch1 {
+	status = "okay";
+};
+
+/* XR500v case labels are reversed relative to the companion switch ports. */
+&gsw_port1 {
+	label = "lan4";
+	status = "okay";
+};
+
+&gsw_port2 {
+	label = "lan3";
+	status = "okay";
+};
+
+&gsw_port3 {
+	label = "lan2";
+	status = "okay";
+};
+
+&gsw_port4 {
+	label = "lan1";
+	status = "okay";
+};
+
+&gsw_phy1 {
+	status = "okay";
+};
+
+&gsw_phy2 {
+	status = "okay";
+};
+
+&gsw_phy3 {
+	status = "okay";
+};
+
+&gsw_phy4 {
+	status = "okay";
+};
+
+/* ---- xPON -------------------------------------------------------------
+ * The XR500v carries an Airoha LDD/LA answering on I2C 0x70, not the Semtech
+ * GN25L95 on the Mitrastar board. Bound as en7570, matching the other EN751221
+ * boards (Genexis Platinum-4410, Jiuzhou EN7526GT); en7571 only appears on
+ * EN7523 boards. Both drivers read the same two registers and expect 0x03 at
+ * 0x0170, but 0x015c is a stashed variant byte for en7570 and a rejecting
+ * revision floor for en7571 -- this part reads 0x01 there.
+ *
+ * Calibration data normally comes from the "bob" partition in flash via
+ * nvmem. This profile keeps SPI-NAND disabled for RAM-boot safety, so the
+ * nvmem-cells reference is deliberately left out: on this board the PHY RX
+ * impedance auto-calibration succeeds on its own (ANACAL1 rx-imp code=20),
+ * unlike the JCOW407 where it rails to 0 and has to be forced.
+ */
+&i2c0 {
+	status = "okay";
+
+	en7570: lddla@70 {
+		compatible = "airoha,en7570";
+		reg = <0x70>;
+		phys = <&xpon_phy>;
+		phy-names = "xpon";
+		/* Factory LDD/LA calibration: 100 big-endian words in "misc". */
+		nvmem-cells = <&en7570_cal>;
+		nvmem-cell-names = "calibration";
+
+		i2c_sfp: i2c-sfp {
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+	};
+};
+
+&xpon_phy {
+	status = "okay";
+};
+
+&xpon {
+	/* Reference export: optical service is disabled until provisioned. */
+	status = "disabled";
+	/* Order consumed by airoha-xpon: GPON status, then LOS. */
+	leds = <&led_pon>, <&led_los>;
+	led-names = "pon", "los";
+
+	/* Optical provisioning is configured separately from board wiring. */
+
+	sfp = <&pon0>;
+};
+
+&gdm2 {
+	nvmem-cells = <&macaddr_misc_f100 1>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+	phy-mode = "internal";
+};
+
+&usb {
+	/* The XR500v exposes the USB 2.0 lane of this dual-role controller. */
+	mediatek,u3p-dis-msk = <0x1>;
+	status = "okay";
+};
+
+&pcie0 {
+	status = "okay";
+	/* MT7603 requires the vendor config-TLP format and a post-PHY reset. */
+	econet,en751221-port0-quirks;
+	econet,en751221-scu = <&scuclk>;
+};
+
+&slot0 {
+	wifi@0,0 {
+		compatible = "mediatek,mt76";
+		reg = <0x0000 0 0 0 0>;
+
+		/*
+		 * MT7603 expects a 1 KiB EEPROM. mt76 zero-initializes that
+		 * buffer before copying this compact 256-byte non-zero prefix;
+		 * valid calibration-free fields are then merged from eFuse.
+		 */
+		mediatek,eeprom-data = [
+			03 76 00 00 02 76 03 50 00 01 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 22 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 b8 40 c8 20 00 00 00 40 c8 20 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			05 00 00 00 a4 00 00 88 00 00 00 00 00 00 00 00
+		];
+		mediatek,eeprom-merge-otp;
+		mediatek,gpio-led;
+		nvmem-cells = <&macaddr_misc_f100 1>;
+		nvmem-cell-names = "mac-address";
+	};
+};
+
+&pcie1 {
+	status = "okay";
+};
+
+&slot1 {
+	wifi@0,0 {
+		compatible = "mediatek,mt76";
+		reg = <0x0000 0 0 0 0>;
+		nvmem-cells = <&eeprom_misc_e0000>, <&macaddr_misc_f100 2>;
+		nvmem-cell-names = "eeprom", "mac-address";
+
+		led {
+			led-sources = <2>;
+			led-active-low;
+		};
+	};
+};
+
+/*
+ * BOSA transmitter supply enable. The shipping XR500v phy.ko ends
+ * pon_phy_init() with gpio_BOSA_Tx_power_on(), which the GPL source spells
+ * ledTurnOff(LED_PHY_VCC_DISABLE) ("turn on BOSA Tx 3V3") and the binary
+ * resolves to GPIO 27 driven low (GPIO_CTRL1[23:22]=01, OE bit 27, DATA bit
+ * 27 = 0). Left alone, the pin floats high through its pull-up, i.e.
+ * VCC_DISABLE stays asserted: the laser still lights for short bursts but the
+ * supply collapses inside long ones, which is exactly the TX_SD_FAIL /
+ * rogue / Deactivate_ONU-ID signature on every allocation above ~2 KB and
+ * the 60 Mbit/s upstream ceiling. Measured on the same cold boot with the
+ * pin as input vs. driven low: 19 vs 294 Mbit/s at a 3072-byte report, and
+ * 403 Mbit/s with the hardware DBRu report -- parity with the OEM firmware.
+ *
+ * A hog applies at gpiochip registration, before the SFP core claims GPIO 16,
+ * which floats high (TX_DISABLE asserted) until then, so the rail comes up
+ * with the transmitter safely disabled, matching the OEM order
+ * (gpio_tx_dis_reset() before gpio_BOSA_Tx_power_on()).
+ */
+&pinctrl {
+	pon_vcc_enable: pon-vcc-enable-hog {
+		gpio-hog;
+		gpios = <27 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "pon-vcc-disable";
+	};
+};
+
+/* ---- NAND / OEM layout ------------------------------------------------
+ * Slot A (kernel/rootfs_stock) is the untouched TP-Link firmware; slot B
+ * (kernel1/rootfs1) is where OpenWrt lives and what bflag=1 boots.  The
+ * bad-block table is the EcoNet BMT the BLDR itself uses; the driver is
+ * configured fail-closed: no dynamic remaps, write-through, and it refuses
+ * to attach unless the reserve geometry is the one tested on this board.
+ */
+&nand {
+	status = "okay";
+	econet,bmt;
+	econet,esmt-f50l1g41a-oem-fdm;
+	econet,bmt-write-through;
+	econet,assert-reserve-size = <94>;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "bootloader";
+			reg = <0x0 0x40000>;
+			read-only;
+		};
+
+		partition@40000 {
+			label = "romfile";
+			reg = <0x40000 0x40000>;
+			read-only;
+		};
+
+		partition@80000 {
+			label = "kernel";
+			reg = <0x80000 0x300000>;
+			read-only;
+		};
+
+		partition@380000 {
+			label = "rootfs_stock";
+			reg = <0x380000 0x1000000>;
+			read-only;
+		};
+
+		partition@1380000 {
+			label = "misc";
+			reg = <0x1380000 0x480000>;
+			read-only;
+
+			nvmem-layout {
+				compatible = "fixed-layout";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				macaddr_misc_f100: macaddr@f100 {
+					compatible = "mac-base";
+					reg = <0xf100 0x6>;
+					#nvmem-cell-cells = <1>;
+				};
+
+				/* EN7570 calibration blob: magic 0x07050700 at +0x94. */
+				en7570_cal: calibration@20000 {
+					reg = <0x20000 0x190>;
+				};
+
+				eeprom_misc_e0000: eeprom@e0000 {
+					reg = <0xe0000 0x200>;
+				};
+			};
+		};
+
+		partition@1800000 {
+			label = "kernel1";
+			reg = <0x1800000 0x300000>;
+		};
+
+		partition@1b00000 {
+			label = "rootfs1";
+			reg = <0x1b00000 0x1000000>;
+			linux,rootfs;
+		};
+
+		partition@2b00000 {
+			label = "others";
+			reg = <0x2b00000 0x4e0000>;
+			read-only;
+		};
+
+		partition@2fe0000 {
+			label = "bootflag";
+			reg = <0x2fe0000 0x20000>;
+			read-only;
+		};
+
+		/* Dedicated OpenWrt overlay in the OEM-unallocated range, apart
+		 * from the 16 MiB firmware slots and the BMT reserve at the end. */
+		partition@3000000 {
+			label = "openwrt_ubi";
+			reg = <0x3000000 0x4000000>;
+		};
+	};
+};

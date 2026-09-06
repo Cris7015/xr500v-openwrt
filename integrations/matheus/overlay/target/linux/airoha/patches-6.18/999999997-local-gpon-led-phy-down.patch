@@ -1,0 +1,19 @@
+From: Cristian Papa <pcristian292@gmail.com>
+Subject: [PATCH] net: airoha: keep LOS indication while digital PHY is down
+
+LOS can briefly deassert without PHY_READY while fibre is absent. That is
+not proof of a usable optical link. Do not alternate the PON registration
+indicator with LOS merely because that raw bit changes. This affects only
+the front-panel policy, not the GPON state machine or optical registers.
+
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -1268,4 +1268,6 @@
+-	} else if (READ_ONCE(priv->led_optical_known) &&
+-		   READ_ONCE(priv->led_los)) {
++	} else if ((READ_ONCE(priv->led_optical_known) &&
++		    READ_ONCE(priv->led_los)) ||
++		   (READ_ONCE(priv->phy_link_known) &&
++		    !READ_ONCE(priv->phy_link_up))) {
+ 		los = AIROHA_XPON_LED_BLINK;
+ 	} else if (READ_ONCE(priv->mac_enabled)) {

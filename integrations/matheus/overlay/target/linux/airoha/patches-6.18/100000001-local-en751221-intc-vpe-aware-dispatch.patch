@@ -1,0 +1,106 @@
+From: Cristian Papa <pcristian292@gmail.com>
+Subject: [PATCH] irqchip/econet-en751221: split cascade dispatch per VPE
+
+The pending registers are shared by both VPEs.  Once SMP is enabled, both
+CPUs can dispatch the same PCIe cascade concurrently and race on the child
+controller's write-one-to-clear status register.  Under WiFi load this loses
+edge-triggered device interrupts and the machine resets without a panic.
+
+Split dispatch using the shadow-interrupt table: shadow bits belong to VPE1
+and all other bits to VPE0.  Translate a shadow back to its real hwirq before
+handing it to genirq, and mask any line with no mapped handler.
+
+The tree already crosses PENDING with MASK in an earlier patch; retain that
+behaviour and apply the VPE ownership split to the enabled snapshot.
+
+Signed-off-by: Cristian Papa <pcristian292@gmail.com>
+--- a/drivers/irqchip/irq-econet-en751221.c
++++ b/drivers/irqchip/irq-econet-en751221.c
+@@ -54,5 +54,8 @@ static struct {
+ 	void __iomem	*membase;
+ 	u8		interrupt_shadows[IRQ_COUNT];
++	/* Pending bits owned by VPE1 and their real interrupt numbers. */
++	u32		shadow_bits[2];
++	u8		shadow_owner[IRQ_COUNT];
+ } econet_intc __ro_after_init;
+ 
+ static DEFINE_RAW_SPINLOCK(irq_lock);
+@@ -122,37 +125,62 @@ static void econet_mask_all(void)
+ 	econet_wreg(REG_MASK1, 0, ~0);
+ }
+ 
+-static void econet_intc_handle_pending(struct irq_domain *d, u32 pending, u32 offset)
++static void econet_intc_handle_pending(struct irq_domain *d, u32 pending,
++				       u32 offset, bool vpe1)
+ {
+ 	int hwirq;
+ 
+ 	while (pending) {
+ 		hwirq = fls(pending) - 1;
+-		generic_handle_domain_irq(d, hwirq + offset);
+ 		pending &= ~BIT(hwirq);
++		hwirq += offset;
++
++		/* A shadow is VPE1's view of the real per-CPU interrupt. */
++		if (vpe1)
++			hwirq = econet_intc.shadow_owner[hwirq];
++
++		if (generic_handle_domain_irq(d, hwirq)) {
++			econet_chmask(hwirq, false);
++			pr_err_ratelimited("%s: masking undispatchable hwirq %d\n",
++					   __func__, hwirq);
++		}
+ 	}
+ }
+ 
+ static void econet_intc_from_parent(struct irq_desc *desc)
+ {
+ 	struct irq_chip *chip = irq_desc_get_chip(desc);
+ 	struct irq_domain *domain;
+-	u32 pending0, pending1;
++	u32 pending0, pending1, active;
++	bool vpe1 = smp_processor_id() != 0;
+ 
+ 	chained_irq_enter(chip, desc);
+ 
+ 	pending0 = ioread32(econet_intc.membase + REG_PENDING0);
+ 	pending1 = ioread32(econet_intc.membase + REG_PENDING1);
+ 
+ 	pending0 &= ioread32(econet_intc.membase + REG_MASK0);
+ 	pending1 &= ioread32(econet_intc.membase + REG_MASK1);
+ 
+-	if (unlikely(!(pending0 | pending1))) {
++	/*
++	 * Each VPE sees the same enabled pending snapshot.  Dispatch only its
++	 * half so a chained PCIe handler never runs concurrently on both CPUs.
++	 */
++	active = pending0 | pending1;
++	if (vpe1) {
++		pending0 &= econet_intc.shadow_bits[0];
++		pending1 &= econet_intc.shadow_bits[1];
++	} else {
++		pending0 &= ~econet_intc.shadow_bits[0];
++		pending1 &= ~econet_intc.shadow_bits[1];
++	}
++
++	if (unlikely(!active)) {
+ 		spurious_interrupt();
+-	} else {
++	} else if (pending0 | pending1) {
+ 		domain = irq_desc_get_handler_data(desc);
+-		econet_intc_handle_pending(domain, pending0, 0);
+-		econet_intc_handle_pending(domain, pending1, 32);
++		econet_intc_handle_pending(domain, pending0, 0, vpe1);
++		econet_intc_handle_pending(domain, pending1, 32, vpe1);
+ 	}
+ 
+ 	chained_irq_exit(chip, desc);
+@@ -321,6 +349,8 @@ static int get_shadow_interrupts(struct
+ 
+ 		econet_intc.interrupt_shadows[target] = shadow;
+ 		econet_intc.interrupt_shadows[shadow] = IS_SHADOW;
++		econet_intc.shadow_bits[shadow / 32] |= BIT(shadow % 32);
++		econet_intc.shadow_owner[shadow] = target;
+ 	}
+ 
+ 	return 0;

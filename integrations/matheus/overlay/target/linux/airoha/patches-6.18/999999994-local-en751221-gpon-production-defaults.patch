@@ -1,0 +1,120 @@
+From: Cristian Papa <pcristian292@gmail.com>
+Subject: [PATCH] net: airoha: select EN751221 hardware DBRu defaults
+
+Use hardware DBRu and initialize the factory sleep counter by default for
+EN751221 GPON, as validated on cold boots of the Archer XR500v. Preserve
+explicit boot and runtime parameter overrides and the other SoC defaults.
+
+Make the internal probe mux and periodic upstream lab sampler opt-in via
+gpon_debug. Optical state, registration and fault reporting remain enabled.
+
+Signed-off-by: Cristian Papa <pcristian292@gmail.com>
+
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -101,6 +101,7 @@
+ static DEFINE_MUTEX(gpon_dbru_devices_lock);
+ 
+ static bool gpon_dbru_enable = true;
++static bool gpon_dbru_enable_overridden;
+ static unsigned int gpon_dbru_floor_bytes;
+ static unsigned int gpon_dbru_cap_bytes = 1152;
+ static unsigned int gpon_dbru_poll_ms = 4;
+@@ -178,9 +179,31 @@
+ 		 "EN751221 lab: pulse TOP_TEST_MISC0_CTRL[25] with the GPON MAC reset");
+ 
+ static bool gpon_oem_sleep_counter_enable;
+-module_param(gpon_oem_sleep_counter_enable, bool, 0644);
++static bool gpon_sleep_counter_overridden;
++
++static int gpon_sleep_counter_set(const char *val,
++				  const struct kernel_param *kp)
++{
++	int ret = param_set_bool(val, kp);
++
++	if (!ret)
++		WRITE_ONCE(gpon_sleep_counter_overridden, true);
++	return ret;
++}
++
++static const struct kernel_param_ops gpon_sleep_counter_ops = {
++	.set = gpon_sleep_counter_set,
++	.get = param_get_bool,
++};
++
++module_param_cb(gpon_oem_sleep_counter_enable, &gpon_sleep_counter_ops,
++		&gpon_oem_sleep_counter_enable, 0644);
+ MODULE_PARM_DESC(gpon_oem_sleep_counter_enable,
+-		 "EN751221 lab: load the factory sleep counter before GPON activation");
++		 "load the factory sleep counter before activation; default on for EN751221");
++
++static bool gpon_debug;
++module_param(gpon_debug, bool, 0644);
++MODULE_PARM_DESC(gpon_debug, "enable GPON lab probe and periodic upstream diagnostics");
+ 
+ /*
+  * gpon_dev_typeB_restore() closes its register restore with
+@@ -263,6 +286,7 @@
+ 	bool en7523_gpon_defaults;
+ 	bool gpon_mbi_release_on_ranging;
+ 	bool gpon_oem_reset_order;
++	bool gpon_hw_dbru_default;
+ 	bool mac_irq_via_eth;
+ 	bool prepare_before_mmio;
+ 	bool gpon_reset_on_start;
+@@ -1363,7 +1387,7 @@
+ {
+ 	u32 ctrl, high, low;
+ 
+-	if (READ_ONCE(priv->inherit_ro))
++	if (!READ_ONCE(gpon_debug) || READ_ONCE(priv->inherit_ro))
+ 		return;
+ 
+ 	ctrl = gpon_read(priv, GPON_DBG_PROBE_CTRL);
+@@ -1738,6 +1762,7 @@
+ 	ret = kstrtobool(val, &enabled);
+ 	if (ret)
+ 		return ret;
++	WRITE_ONCE(gpon_dbru_enable_overridden, true);
+ 	WRITE_ONCE(*(bool *)kp->arg, enabled);
+ 	gpon_dbru_reconfigure_all();
+ 	return 0;
+@@ -4890,7 +4915,7 @@
+ {
+ 	u32 bst, gem, gnt, stray, invld;
+ 
+-	if (priv->mode != AIROHA_XPON_MODE_GPON ||
++	if (!READ_ONCE(gpon_debug) || priv->mode != AIROHA_XPON_MODE_GPON ||
+ 	    ploam_get_state(priv->ploam) != GPON_O5_OPERATION)
+ 		return;
+ 
+@@ -6435,6 +6460,7 @@
+ };
+ 
+ static const struct airoha_xpon_match_data en751221_xpon_data = {
++	.gpon_hw_dbru_default = true,
+ 	.gpon_idle_gem_threshold = GPON_IDLE_GEM_THLD_EN751221,
+ 	.mode = AIROHA_XPON_MODE_GPON,
+ 	.mode_from_dt = true,
+@@ -6448,6 +6474,7 @@
+ };
+ 
+ static const struct airoha_xpon_match_data en751221_gpon_data = {
++	.gpon_hw_dbru_default = true,
+ 	.gpon_idle_gem_threshold = GPON_IDLE_GEM_THLD_EN751221,
+ 	.mode = AIROHA_XPON_MODE_GPON,
+ 	.wan_mode_mask = EN751221_SCU_WAN_MODE_MASK,
+@@ -6724,6 +6751,13 @@
+ 		return -ENOMEM;
+ 	priv->dev = dev;
+ 	priv->match_data = data;
++	/* Keep explicit module/boot overrides available for diagnostics. */
++	if (data->gpon_hw_dbru_default) {
++		if (!READ_ONCE(gpon_dbru_enable_overridden))
++			WRITE_ONCE(gpon_dbru_enable, false);
++		if (!READ_ONCE(gpon_sleep_counter_overridden))
++			WRITE_ONCE(gpon_oem_sleep_counter_enable, true);
++	}
+ 	mutex_init(&priv->led_lock);
+ 	ret = airoha_xpon_get_mode(dev, data, &priv->mode);
+ 	if (ret)

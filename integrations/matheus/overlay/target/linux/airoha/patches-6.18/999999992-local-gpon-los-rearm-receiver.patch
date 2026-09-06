@@ -1,0 +1,30 @@
+From: Cristian Papa <pcristian292@gmail.com>
+Subject: [PATCH] net: airoha: rearm GPON receiver once after LOS
+
+The LOS-specific TO2 path fully disables both the MAC and the digital PHY,
+then expects an SFP link-up notification to restart them.  Integrated GPON
+front ends cannot produce that notification after the PHY has been powered
+off, so reconnecting the fibre leaves the ONU permanently in O1.
+
+Schedule one restart after the orderly shutdown.  The restarted PHY remains
+in O2 while LOS is asserted and its existing link poll can then observe the
+fibre returning.  This is a single rearm, not a periodic restart loop.
+
+Signed-off-by: Cristian Papa <pcristian292@gmail.com>
+---
+ drivers/net/ethernet/airoha/airoha_xpon.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -5070,6 +5070,10 @@ static void gpon_to2_work_fn(struct work_
+ 		dev_warn(priv->dev,
+ 			 "GPON TO2 expired in O6 with the optical link still down, waiting for the fibre\n");
+ 		gpon_disable(priv);
++		if (READ_ONCE(priv->started) &&
++		    READ_ONCE(priv->optical_active))
++			mod_delayed_work(priv->fsm_wq, &priv->restart_work,
++					 msecs_to_jiffies(GPON_DEACTIVATE_RESTART_MS));
+ 		return;
+ 	}
+ 

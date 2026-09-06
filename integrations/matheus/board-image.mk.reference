@@ -1,0 +1,25 @@
+# Reference ONLY: these recipes depend on the reviewed NAND/BMT/platform
+# changes and the local zboot chain. They are NOT included in any Makefile.
+# Do not advertise a flashable image for an unvalidated upstream build.
+
+define Build/xr500v-trendchip-header
+	$(STAGING_DIR_HOST)/bin/python3 $(TOPDIR)/target/linux/airoha/image/xr500v-trendchip-header.py $@
+endef
+
+define Device/tplink_archer-xr500v-v1
+  DEVICE_VENDOR := TP-Link
+  DEVICE_MODEL := Archer XR500v
+  DEVICE_VARIANT := v1
+  DEVICE_DTS := en751221_tplink_archer-xr500v-v1
+  KERNEL_SIZE := 3072k
+  KERNEL := kernel-bin | append-dtb | lzma
+  KERNEL_INITRAMFS := kernel-bin | append-dtb | uImage none
+  BLOCKSIZE := 128k
+  DEVICE_PACKAGES := kmod-usb3 kmod-usb-xhci-mtk kmod-usb-storage \
+    kmod-mt7603 kmod-mt76x2 kmod-gpio-button-hotplug kmod-leds-gpio
+  IMAGES := sysupgrade.bin
+  IMAGE/sysupgrade.bin := append-kernel | check-size 0x2ffe00 | \
+    pad-to $$$$(KERNEL_SIZE) | append-rootfs | check-size 0x1300000 | \
+    xr500v-trendchip-header | append-metadata
+endef
+# TARGET_DEVICES intentionally not extended until integration is validated.

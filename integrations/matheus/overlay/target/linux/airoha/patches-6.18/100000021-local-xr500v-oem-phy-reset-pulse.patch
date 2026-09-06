@@ -1,0 +1,104 @@
+From: Cristian Papa <cristian@example.invalid>
+Subject: [PATCH] net: airoha: reproduce EN751221 factory GPON PHY reset pulse
+
+The exact XR500v factory xpon.ko differs from the available GPL build: its
+normal rogue_state=false branch clears TOP_TEST_MISC0_CTRL[25] while the
+GPON MAC reset is asserted, waits 1 ms, then releases the MAC and PHY
+before running PHY DEV_INIT and TRANS_MODEL.
+
+The cold autonomous driver reproduced the rest of that sequence but omitted
+this physical PHY pulse.  Add it behind a default-off lab parameter so the
+write-only initialization state can be tested safely from a RAM-only image.
+
+Signed-off-by: Cristian Papa <cristian@example.invalid>
+---
+ drivers/net/ethernet/airoha/airoha_xpon.c | 51 +++++++++++++++++++++--
+ 1 file changed, 43 insertions(+), 8 deletions(-)
+
+--- a/drivers/net/ethernet/airoha/airoha_xpon.c
++++ b/drivers/net/ethernet/airoha/airoha_xpon.c
+@@ -164,5 +164,18 @@ MODULE_PARM_DESC(gpon_oem_reset_enable,
+ 		 "EN751221: pulse the GPON MAC reset with MBI stopped");
+ 
++/*
++ * The exact factory xpon.ko pulses TOP_TEST_MISC0_CTRL[25] together with the
++ * GPON MAC reset whenever rogue_state is false, which is the normal boot
++ * state.  Keep the newly recovered pulse opt-in until hardware validation.
++ */
++#define EN751221_TOP_TEST_MISC0_CTRL	0x380
++#define EN751221_GPON_PHY_RESET		BIT(25)
++
++static bool gpon_oem_phy_reset_enable;
++module_param(gpon_oem_phy_reset_enable, bool, 0644);
++MODULE_PARM_DESC(gpon_oem_phy_reset_enable,
++		 "EN751221 lab: pulse TOP_TEST_MISC0_CTRL[25] with the GPON MAC reset");
++
+ /*
+  * gpon_dev_typeB_restore() closes its register restore with
+  * G_SN_MSG_CFG |= (2 << 16), i.e. tx_power_mode = 2 (gpon_dev.c:2637-2642).
+@@ -1898,15 +1911,15 @@ static int gpon_set_mbi_datapath(struct
+  * reset restores the register defaults.
+  *
+- * The PHY hardware reset the vendor performs next to this one is guarded by
+- * CONFIG_USE_MT7520_ASIC and is compiled out of a CONFIG_USE_A60928 build such
+- * as this board, so it is deliberately not reproduced.  The PHY software
+- * re-init (PON_SET_PHY_DEV_INIT plus PON_SET_PHY_TRANS_MODEL_SETTING) is what
+- * airoha_xpon_phy_start() performs, and the caller runs it immediately after
+- * this helper returns.
++ * Unlike the available GPL build assumptions, the exact factory xpon.ko does
++ * contain the TOP_TEST_MISC0_CTRL[25] PHY reset pulse in the normal
++ * rogue_state=false branch.  Reproduce it only when the lab parameter is set;
++ * the caller runs PHY DEV_INIT and TRANS_MODEL immediately after this helper.
+  */
+ static int gpon_oem_reset_mac(struct xpon_priv *priv)
+ {
+-	int ret;
++	bool phy_reset_asserted = false;
++	u32 top_test = 0;
++	int phy_ret, ret;
+ 
+ 	if (!priv->mac_reset) {
+ 		dev_warn(priv->dev,
+@@ -1934,10 +1948,30 @@ static int gpon_oem_reset_mac(struct xpo
+ 		return ret;
+ 	}
+ 
++	if (gpon_oem_phy_reset_enable) {
++		ret = regmap_clear_bits(priv->scu,
++					EN751221_TOP_TEST_MISC0_CTRL,
++					EN751221_GPON_PHY_RESET);
++		if (ret) {
++			reset_control_deassert(priv->mac_reset);
++			return dev_err_probe(priv->dev, ret,
++					     "failed to assert GPON PHY reset\n");
++		}
++		phy_reset_asserted = true;
++	}
++
+ 	mdelay(1);
+ 
+ 	ret = reset_control_deassert(priv->mac_reset);
++	if (phy_reset_asserted) {
++		phy_ret = regmap_set_bits(priv->scu,
++					  EN751221_TOP_TEST_MISC0_CTRL,
++					  EN751221_GPON_PHY_RESET);
++		if (phy_ret)
++			return dev_err_probe(priv->dev, phy_ret,
++					     "failed to release GPON PHY reset\n");
++	}
+ 	if (ret) {
+ 		dev_err(priv->dev, "failed to release GPON MAC reset: %d\n", ret);
+ 		return ret;
+ 	}
+@@ -1956,8 +1992,10 @@ static int gpon_oem_reset_mac(struct xpo
+ 	if (ret)
+ 		return ret;
+ 
++	regmap_read(priv->scu, EN751221_TOP_TEST_MISC0_CTRL, &top_test);
+ 	dev_info(priv->dev,
+-		 "OEM reset order: MAC reset done, mbi=%#08x gbl=%#08x sn_cfg=%#08x\n",
++		 "OEM reset order: MAC reset done, PHY-pulse=%u top-test=%#010x mbi=%#08x gbl=%#08x sn_cfg=%#08x\n",
++		 phy_reset_asserted, top_test,
+ 		 gpon_read(priv, GPON_MBI_MPI_STOP),
+ 		 gpon_read(priv, GPON_GBL_CFG),
+ 		 gpon_read(priv, GPON_SN_MSG_CFG));

@@ -1,0 +1,47 @@
+#
+# Copyright (c) 2015 The Linux Foundation. All rights reserved.
+# Copyright (c) 2011-2015 OpenWrt.org
+#
+
+. /lib/functions/uci-defaults.sh
+. /lib/functions/system.sh
+
+setup_interfaces()
+{
+  local board="$1"
+
+  case "$board" in
+  jiuzhou,en7526gt)
+    ucidef_set_interface_lan "lan1 lan2 lan3 lan4"
+    ucidef_set_interface_wan "pon0" "dhcp"
+    ;;
+  genexis,platinum-4410)
+    ucidef_set_interface_lan "lan1 lan2"
+    ucidef_set_interface_wan "pon0" "dhcp"
+    ;;
+  mitrastar,gpt-2741gnac-n1)
+    ucidef_set_interface_lan "lan1 lan2 lan3 lan4"
+    ;;
+  tplink,archer-xr500v-v1)
+    # Board wiring only. The subscriber chooses WAN VLAN/protocol privately.
+    # Factory LAN MAC is read from misc@0xf100; WAN uses the next address.
+    ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "eth1"
+    ucidef_set_interface "wan" device "eth1" protocol "none"
+    lan_mac=$(mtd_get_mac_binary misc 0xf100)
+    if [ -n "$lan_mac" ]; then
+      ucidef_set_interface_macaddr "lan" "$lan_mac"
+      ucidef_set_interface_macaddr "wan" "$(macaddr_add "$lan_mac" 1)"
+    fi
+    ;;
+  *)
+    echo "Unsupported hardware. Network interfaces not initialized"
+    ;;
+  esac
+}
+
+board_config_update
+board=$(board_name)
+setup_interfaces $board
+board_config_flush
+
+exit 0
