@@ -16,6 +16,11 @@ that every experimental driver is ready for upstream licensing acceptance.
   such as `spi.ko`, `pcm1.ko`, `slic3_main.c` and the Le9642 profile family.
   Profile tables and inferred programming sequences need maintainer review;
   working on one board is not evidence of a generic supported SLIC API.
+  In particular, the SLIC power-converter/profile configuration is specific
+  to this board. BB, IB and TB supply arrangements are not interchangeable;
+  selecting the wrong one can physically damage hardware. Do not load these
+  fixed-address/profile drivers on another model just because it has the
+  same SoC or SLIC name, or experimentally switch power modes to test them.
 - The Le9642 is a dual-channel chip, not two independent Le9642 packages.
   Legacy single-channel debugfs tests remain in the source and can reset,
   reconfigure or drive the hardware. They are **not** safe status interfaces

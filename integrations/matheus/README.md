@@ -11,6 +11,11 @@ separate. This directory preserves the newer work without conflating them.
 Hardware: TP-Link Archer XR500v v1, EN751221 (big-endian MIPS), EN7570 optical
 front end, cascaded MT7530 switches, MT7603/MT7662 radios, dual-channel Le9642.
 
+**Board-specific electrical configuration:** PCM/SLIC profiles are only a
+reference for this XR500v. Incorrect BB/IB/TB power-converter selection can
+damage hardware. Do not try these fixed-address/profile drivers on a different
+board or switch supply modes experimentally. See `PROVENANCE.md`.
+
 - Independent cold boot from NAND; persistent configuration and sysupgrade.
 - GPON O5, OMCI and PPPoE without inheriting a warm stock MAC state.
 - Four LAN ports, both radios, USB storage, buttons and PON/LOS panel behavior.
