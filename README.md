@@ -2,7 +2,27 @@
 
 OpenWrt port for the **TP-Link Archer XR500v** GPON router — SoC: EcoNet **EN751221** (MIPS 34Kc, big-endian).
 
-## Status (2026-06-21) — FUNCTIONAL ✅
+## Current work (2026-09-06): Matheus Airoha/EcoNet integration
+
+The newer local integration now cold-boots from NAND and brings up GPON
+O5/OMCI/PPPoE without a warm stock handoff. LAN, both radios, USB storage,
+PON/LOS LEDs and two FXS ports have been exercised. Local measurements include
+about 715/700 Mbit/s wired and 421/285 Mbit/s over 5 GHz; these are not
+guaranteed results or a complete long-duration qualification.
+
+The reviewed public sources are in **[integrations/matheus](integrations/matheus/)**:
+board/NAND/GPON references, WHNAT/PPE fixes, dual-FXS userspace and native LuCI
+accounts/status, with tests, provenance and explicit remaining limitations.
+The optical block is disabled in the reference DTS; WAN settings are
+configured for the target deployment.
+
+**This is a source review set, not a complete replacement overlay or a
+ready-to-flash firmware release.** Several changes still need porting to
+Matheus' current APIs. The older repository-root overlay, June status table
+and rebuild instructions below describe the historical cjdelisle-based port,
+not the newer tested integration. Do not mix their instructions or modules.
+
+## Historical status (2026-06-21)
 
 | Function | State |
 |---|---|
