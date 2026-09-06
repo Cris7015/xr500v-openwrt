@@ -1,0 +1,154 @@
+From: Cristian Papa <pcristian292@gmail.com>
+Subject: [PATCH] net: airoha: avoid multicast flow scans and report GEN1 activity
+
+Skip only binding for multicast RX packets, which cannot have a unicast
+rewrite in this backend; leave normal packet delivery intact. Derive flow
+last-used time from owned BIND/FIN hardware entries and real software RX
+instead of extending every flow on each statistics request. Preserve
+EN751221 native word order and handle the 15-bit seconds clock wrap.
+
+Signed-off-by: Cristian Papa <pcristian292@gmail.com>
+
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -873,6 +873,8 @@
+ 	struct list_head list;
+ 	struct econet_foe_entry data;
+ 	unsigned long cookie;
++	/* Actual RX/bind activity, or the latest hardware timestamp observed. */
++	unsigned long lastused;
+ 	u32 src_ip;
+ 	u32 dest_ip;
+ 	u16 src_port;
+@@ -883,6 +885,7 @@
+ extern u8 econet_rx_dbg_qdma_id;
+ struct econet_ppe {
+ 	/* debug */
++	u32 rx_multicast_skip;
+ 	u32 rx_reason_cnt[2][64];
+ 	u32 rx_dbg[8]; /* 0 calls,1 not_armed,2 skip_reason,3 parse_fail,4 no_flow,5 bind_invalid,6 owner_ok,7 commit */
+ 	u32 dbg_last_tuple[4];
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -2991,6 +2991,16 @@
+ 		ppe->rx_dbg[2]++;
+ 		return;
+ 	}
++	/* This backend only installs unicast Ethernet rewrites. In particular,
++	 * received IPTV multicast cannot match such a flow: avoid scanning the
++	 * entire list under the RX/TC lock for each packet. Only skip binding;
++	 * the caller still delivers the skb through the normal receive path.
++	 */
++	if (skb_headlen(skb) >= ETH_HLEN &&
++	    is_multicast_ether_addr(skb->data)) {
++		ppe->rx_multicast_skip++;
++		return;
++	}
+ 	if (!econet_ppe_parse_ipv4_tuple(skb, &src_ip, &dest_ip,
+ 					 &src_port, &dest_port)) {
+ 		ppe->rx_dbg[3]++;
+@@ -3011,6 +3021,7 @@
+ 		    flow->src_port != src_port || flow->dest_port != dest_port)
+ 			continue;
+ 
++		flow->lastused = jiffies;
+ 		ppe->rx_dbg[4]--;
+ 		bind_hash = econet_ppe_find_bind_way(ppe, flow, hash,
+ 						     &lookup_raw, &lookup_valid);
+@@ -3528,6 +3539,7 @@
+ 		return -ENOMEM;
+ 	flow->data = entry;
+ 	flow->cookie = cls->cookie;
++	flow->lastused = jiffies;
+ 	flow->src_ip = ntohl(src_addr);
+ 	flow->dest_ip = ntohl(dest_addr);
+ 	flow->src_port = ntohs(src_port);
+@@ -3565,9 +3577,67 @@
+ 	return 0;
+ }
+ 
+-static int econet_flow_offload_stats(struct flow_cls_offload *cls)
++static unsigned long econet_ppe_flow_lastused(struct econet_ppe *ppe,
++					      struct econet_flow_entry *flow)
++{
++	unsigned long sampled_at, lastused;
++	u32 ib1, state, now, idle;
++	u16 hash = flow->hash;
++
++	lockdep_assert_held(&ppe->lock);
++	if (!READ_ONCE(ppe->armed) ||
++	    hash == EN751221_PPE_INVALID_HASH ||
++	    hash >= ppe->common.eth->soc->ppe_dram_entries ||
++	    ppe->foe_owner[hash] != flow)
++		return flow->lastused;
++
++	/* Read the entry before the current clock so an RX timestamp update
++	 * cannot make it appear one tick in the future. Word 0 is already in
++	 * native byte order on EN751221. UNBIND has an unrelated 8-bit stamp;
++	 * never use it (or another flow's slot) to refresh this flow's lifetime.
++	 */
++	dma_rmb();
++	ib1 = READ_ONCE(econet_ppe_slot(ppe, hash)[0]);
++	state = FIELD_GET(AIROHA_FOE_IB1_BIND_STATE, ib1);
++	if (state != AIROHA_FOE_STATE_BIND && state != AIROHA_FOE_STATE_FIN)
++		return flow->lastused;
++
++	now = airoha_fe_rr(ppe->common.eth, REG_FE_FOE_TS);
++	sampled_at = jiffies;
++	idle = (now - FIELD_GET(AIROHA_FOE_IB1_BIND_TIMESTAMP, ib1)) &
++		AIROHA_FOE_IB1_BIND_TIMESTAMP;
++	/* The GEN1 FE clock advances in seconds and wraps at 15 bits. Retain
++	 * newer software activity when the cached DRAM timestamp lags behind.
++	 * Use wrap-safe jiffies comparison, including on this 32-bit target.
++	 */
++	lastused = sampled_at - idle * HZ;
++	if (time_after(lastused, flow->lastused))
++		flow->lastused = lastused;
++	return flow->lastused;
++}
++
++static int econet_flow_offload_stats(struct net_device *dev,
++				     struct flow_cls_offload *cls)
+ {
+-	flow_stats_update(&cls->stats, 0, 0, 0, jiffies,
++	struct econet_ppe *ppe = econet_ppe_from_netdev(dev);
++	struct econet_flow_entry *flow;
++	unsigned long lastused;
++
++	if (!ppe)
++		return -ENODEV;
++	spin_lock_bh(&ppe->lock);
++	flow = econet_ppe_find_flow(ppe, cls->cookie);
++	if (!flow) {
++		spin_unlock_bh(&ppe->lock);
++		return -ENOENT;
++	}
++	lastused = econet_ppe_flow_lastused(ppe, flow);
++	spin_unlock_bh(&ppe->lock);
++
++	/* Querying statistics is not traffic. Do not report jiffies here:
++	 * flowtable would indefinitely renew even unbound/inactive entries.
++	 */
++	flow_stats_update(&cls->stats, 0, 0, 0, lastused,
+ 			  FLOW_ACTION_HW_STATS_DELAYED);
+ 	return 0;
+ }
+@@ -3581,7 +3651,7 @@
+ 	case FLOW_CLS_DESTROY:
+ 		return econet_flow_offload_destroy(dev, cls);
+ 	case FLOW_CLS_STATS:
+-		return econet_flow_offload_stats(cls);
++		return econet_flow_offload_stats(dev, cls);
+ 	default:
+ 		return -EOPNOTSUPP;
+ 	}
+--- a/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
+@@ -539,6 +539,7 @@
+ 
+ 	seq_printf(m, "armed=%u\n", READ_ONCE(ppe->armed));
+ 	seq_printf(m, "flows=%u\n", flows);
++	seq_printf(m, "rx_multicast_skip=%u\n", ppe->rx_multicast_skip);
+ 	seq_printf(m, "rx_dbg calls=%u not_armed=%u skip_reason=%u parse_fail=%u no_flow=%u bind_invalid=%u owner_ok=%u commit=%u\n",
+ 		   ppe->rx_dbg[0], ppe->rx_dbg[1], ppe->rx_dbg[2], ppe->rx_dbg[3],
+ 		   ppe->rx_dbg[4], ppe->rx_dbg[5], ppe->rx_dbg[6], ppe->rx_dbg[7]);

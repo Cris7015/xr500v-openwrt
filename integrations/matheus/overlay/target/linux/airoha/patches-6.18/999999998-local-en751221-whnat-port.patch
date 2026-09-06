@@ -1,0 +1,326 @@
+From: Cristian Papa <pcristian292@gmail.com>
+Subject: [PATCH] net: airoha: add opt-in EN751221 WHNAT datapath
+
+Port pre-GRO ownership, batched FCPU WiFi delivery and devless descriptor
+reserve from the documented XR500v path. Preserve xPON egress and QDMA1.
+Hardware validation pending: default off, first packet budget 32.
+
+--- a/drivers/net/ethernet/airoha/Makefile
++++ b/drivers/net/ethernet/airoha/Makefile
+@@ -4,7 +4,7 @@
+ #
+ 
+ obj-$(CONFIG_NET_AIROHA) += airoha-eth.o
+-airoha-eth-y := airoha_common.o airoha_ppe.o airoha_eth.o airoha_qdma.o \
++airoha-eth-y := airoha_common.o airoha_ppe.o airoha_whnat.o airoha_eth.o airoha_qdma.o \
+ 		airoha_eth_gen1.o airoha_eth_gen2.o
+ airoha-eth-$(CONFIG_NET_AIROHA_PPE_DEBUGFS) += airoha_ppe_debugfs.o
+ airoha-eth-$(CONFIG_NET_AIROHA_SOC_WED) += airoha_wed.o airoha_wed_debugfs.o
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -19,6 +19,7 @@
+ 
+ #include "airoha_regs.h"
+ #include "airoha_eth.h"
++#include "airoha_whnat.h"
+ 
+ /* Serialize airoha_gdm_dev flags, QDMA pointer and PPE CPU port
+  * configuration.
+@@ -2835,6 +2836,21 @@
+ 	flow->hash = EN751221_PPE_INVALID_HASH;
+ }
+ 
++void airoha_whnat_invalidate_vif(struct econet_ppe *ppe, int idx)
++{
++	struct econet_flow_entry *flow, *next;
++	spin_lock_bh(&ppe->lock);
++	list_for_each_entry_safe(flow, next, &ppe->flows, list) {
++		if (flow->data.ipv4.l2.etype != htons(0x5678) ||
++		    flow->data.ipv4.l2.vlan1 != idx)
++			continue;
++		econet_ppe_release_flow_slot(ppe, flow, true);
++		list_del(&flow->list);
++		kfree(flow);
++	}
++	spin_unlock_bh(&ppe->lock);
++}
++
+ static u16 econet_ppe_find_bind_way(struct econet_ppe *ppe,
+ 				    struct econet_flow_entry *flow, u16 hash,
+ 				    struct econet_foe_entry *lookup_raw,
+@@ -3277,12 +3293,26 @@
+ {
+ 	struct airoha_gdm_common *gdm;
+ 	struct dsa_port *dp;
+-	int dsa_port = -1;
++	int dsa_port = -1, wifi_idx;
+ 	int err;
+ 
+ 	*xpon = false;
+ 	if (!odev)
+ 		return -EOPNOTSUPP;
++	wifi_idx = airoha_whnat_active() ? airoha_whnat_vif_index(odev) : -1;
++	if (wifi_idx >= 0) {
++		if (vlan_valid) return -EOPNOTSUPP;
++		/* Proven EN751221 FCPU recipe: dp=0, fqos=0; resolve BSS from
++		 * the egress netdevice, never the shared bridge's source MAC. */
++		econet_foe_entry_set_pse_port(entry, 0);
++		entry->ipv4.ib2 &= ~EN751221_FOE_IB2_PSE_QOS;
++		entry->ipv4.l2.vlan1 = wifi_idx;
++		entry->ipv4.l2.etype = htons(0x5678);
++		entry->ib1 &= ~EN751221_FOE_IB1_BIND_VLAN_LAYER;
++		entry->ib1 |= EN751221_FOE_IB1_BIND_VLAN_TAG |
++			FIELD_PREP(EN751221_FOE_IB1_BIND_VLAN_LAYER, 1);
++		return 0;
++	}
+ 
+ 	if (dsa_user_dev_check(odev)) {
+ 		dp = dsa_port_from_netdev(odev);
+@@ -3731,6 +3761,8 @@
+ 
+ 	dev_info(dev, "PPE FoE table at %pad, %u entries\n",
+ 		 &ppe->common.foe_dma, dram_entries);
++	if (airoha_is(eth, econet_en751221))
++		airoha_whnat_set_ppe(ppe);
+ 	return 0;
+ }
+ 
+@@ -3743,6 +3775,7 @@
+ 		return;
+ 
+ 	ppe = ppe_dev->priv;
++	airoha_whnat_clear_ppe(ppe);
+ 	if (READ_ONCE(ppe->armed))
+ 		econet_ppe_engine_disarm(ppe);
+ 	else
+--- a/drivers/net/ethernet/airoha/airoha_qdma.c
++++ b/drivers/net/ethernet/airoha/airoha_qdma.c
+@@ -25,6 +25,7 @@
+ #include <net/page_pool/helpers.h>
+ 
+ #include "airoha_eth.h"
++#include "airoha_whnat.h"
+ #include "airoha_eth_gen1.h"
+ #include "airoha_regs.h"
+ 
+@@ -172,6 +173,7 @@
+ 	/* FIFO of free entries because they complete out of order. */
+ 	u16				freelist_head;
+ 	u16				freelist_tail;
++	u16				free_count;
+ 
+ 	/* Not modified after init */
+ 	struct econet_qdma		*qdma;
+@@ -234,6 +236,8 @@
+ 	u32 ndesc = q->ndesc;
+ 	u32 cpu_i = (q->cpu_i + 1) % ndesc;
+ 	int rx_offset = q->qdma->cfg.rx_2b_offset ? NET_IP_ALIGN : 0;
++	int headroom = q->qdma->common.id == 0 &&
++		airoha_is(q->qdma->common.eth, econet_en751221) ? 64 : 0;
+ 
+ 	for (; cpu_i != end_i; cpu_i = (cpu_i + 1) % ndesc) {
+ 		struct econet_q_rx_ent *e = &q->entry[cpu_i];
+@@ -251,8 +255,8 @@
+ 
+ 		WARN_ON_ONCE(e->dma_addr);
+ 		e->buf = page_address(page) + offset;
+-		e->dma_addr = page_pool_get_dma_addr(page) + offset;
+-		pkt_len = SKB_WITH_OVERHEAD(q->buf_size) - rx_offset;
++		e->dma_addr = page_pool_get_dma_addr(page) + offset + headroom;
++		pkt_len = SKB_WITH_OVERHEAD(q->buf_size) - rx_offset - headroom;
+ 		e->dma_len = pkt_len + rx_offset;
+ 
+ 		WRITE_ONCE(pdesc->info, ((struct desc_info) {
+@@ -272,7 +276,8 @@
+ }
+ 
+ static void econet_qdma_rx_process_one(struct econet_q_rx *q, u32 cpu_i,
+-				     enum dma_data_direction dir)
++				     enum dma_data_direction dir,
++				     struct airoha_whnat_batch *batch)
+ {
+ 	struct econet_q_rx_ent *e = &q->entry[cpu_i];
+ 	struct sk_buff *skb;
+@@ -281,6 +286,8 @@
+ 	u32 hash;
+ 	u8 sport;
+ 	int len;
++	int headroom = q->qdma->common.id == 0 &&
++		airoha_is(q->qdma->common.eth, econet_en751221) ? 64 : 0;
+ 
+ 	memcpy(&desc, &q->desc[cpu_i], sizeof(desc));
+ 
+@@ -293,7 +300,7 @@
+ 	WRITE_ONCE(q->desc[cpu_i].pkt_addr, 0);
+ 
+ 	len = get_desc_info_pkt_len(&desc.info);
+-	if (!len || len > SKB_WITH_OVERHEAD(q->buf_size) -
++	if (!len || len > SKB_WITH_OVERHEAD(q->buf_size) - headroom -
+ 				(q->qdma->cfg.rx_2b_offset ? NET_IP_ALIGN : 0))
+ 		goto return_page;
+ 
+@@ -304,6 +311,7 @@
+ 	if (!skb)
+ 		goto return_page;
+ 
++	skb_reserve(skb, headroom);
+ 	if (q->qdma->cfg.rx_2b_offset)
+ 		skb_reserve(skb, NET_IP_ALIGN);
+ 	__skb_put(skb, len);
+@@ -327,6 +335,9 @@
+ 					get_erx_crsn(&desc.msg.erx));
+ 
+ 	sport = get_erx_sport(&desc.msg.erx);
++	if (airoha_whnat_rx(skb, &q->napi, q->qdma->common.id, sport,
++			    get_erx_crsn(&desc.msg.erx), batch))
++		return;
+ 	if (econet_rx_before_recv(q->qdma->common.eth, skb, sport)) {
+ 		dev_kfree_skb(skb);
+ 	} else {
+@@ -349,7 +360,8 @@
+ 	page_pool_put_full_page(q->page_pool, page, false);
+ }
+ 
+-static int econet_qdma_rx_process(struct econet_q_rx *q, int budget)
++static int econet_qdma_rx_process(struct econet_q_rx *q, int budget,
++				  struct airoha_whnat_batch *batch)
+ {
+ 	enum dma_data_direction dir = page_pool_get_dma_dir(q->page_pool);
+ 	u32 hardware_i = econet_rreg(&q->qchain_regs->rx_hwi);
+@@ -369,7 +381,7 @@
+ 	cpu_i = (q->cpu_i + 1) % ndesc;
+ 
+ 	for (done = 0; done < budget && cpu_i != hardware_i; done++) {
+-		econet_qdma_rx_process_one(q, cpu_i, dir);
++		econet_qdma_rx_process_one(q, cpu_i, dir, batch);
+ 		cpu_i = (cpu_i + 1) % ndesc;
+ 	}
+ 
+@@ -525,13 +537,20 @@
+ {
+ 	struct econet_q_rx *q = container_of(napi, struct econet_q_rx, napi);
+ 	struct econet_qdma *qdma = q->qdma;
++	struct airoha_whnat_batch batch;
++	struct airoha_whnat_batch *pending = NULL;
+ 	int cur, done = 0;
+ 
++	if (airoha_whnat_active() && qdma->common.id == 0) {
++		pending = &batch;
++		airoha_whnat_batch_init(pending);
++	}
+ 	do {
+-		cur = econet_qdma_rx_process(q, budget - done);
++		cur = econet_qdma_rx_process(q, budget - done, pending);
+ 		done += cur;
+ 	} while (cur && done < budget);
+ 
++	if (pending) airoha_whnat_batch_flush(pending);
+ 	if (done < budget && napi_complete(napi)) {
+ 		union econet_irq_purpose purpose;
+ 		union irq_bit b;
+@@ -695,12 +714,15 @@
+ 		e->freelist_next = 0xffff;
+ 		q->entry[q->freelist_tail].freelist_next = index;
+ 		q->freelist_tail = index;
++		q->free_count++;
+ 
+-		txq = netdev_get_tx_queue(skb->dev,
+-					  skb_get_queue_mapping(skb));
+-		netdev_tx_completed_queue(txq, 1, skb->len);
+-		if (netif_tx_queue_stopped(txq))
+-			netif_tx_wake_queue(txq);
++		if (skb->dev) {
++			txq = netdev_get_tx_queue(skb->dev, skb_get_queue_mapping(skb));
++			netdev_tx_completed_queue(txq, 1, skb->len);
++			if (netif_tx_queue_stopped(txq)) netif_tx_wake_queue(txq);
++		} else {
++			airoha_whnat_complete();
++		}
+ 
+ 		dev_kfree_skb_any(skb);
+ 	}
+@@ -752,6 +774,8 @@
+ 
+ 	guard(spinlock_bh)(&q->lock_bh);
+ 
++	if (!skb->dev && q->free_count <= 32)
++		return -EAGAIN;
+ 	index = q->freelist_head;
+ 	if (index == 0xffff)
+ 		return -EBUSY;
+@@ -784,8 +808,9 @@
+ 		e->xpon_submitted_ns = ktime_get_ns();
+ 	}
+ 	q->freelist_head = next_index;
++	q->free_count--;
+ 
+-	skb_tx_timestamp(skb);
++	if (skb->dev) skb_tx_timestamp(skb);
+ 
+ 	/*
+ 	 * Match the vendor QDMA handoff: the descriptor must be globally visible
+@@ -985,6 +1010,7 @@
+ 	q->entry[q->ndesc - 1].freelist_next = 0xffff;
+ 	q->freelist_tail = q->ndesc - 1;
+ 	q->freelist_head = 0;
++	q->free_count = q->ndesc;
+ 
+ 	econet_wreg(lower_32_bits(dma_addr), &q->qchain_regs->txbase);
+ 
+@@ -1586,6 +1612,7 @@
+ int airoha_qdma_gen1_destroy(struct econet_qdma *qdma)
+ {
+ 	guard(mutex)(&qdma->lock);
++	airoha_whnat_clear_qdma(qdma);
+ 
+ 	return airoha_qdma_gen1_destroy_locked(qdma);
+ }
+@@ -1612,6 +1639,9 @@
+ 	set_qregs_qcfg_tx_dma_en(&qcfg, true);
+ 	econet_wreg(qcfg, &qdma->regs->qdma_cfg);
+ 
++	if (qdma->common.id == 0 && airoha_is(qdma->common.eth, econet_en751221) &&
++	    is_qregs_qcfg_tx_immediate_done(&qcfg))
++		airoha_whnat_set_qdma(qdma);
+ 	return 0;
+ }
+ 
+@@ -1626,6 +1656,7 @@
+ 		return -EINVAL;
+ 	if (--qdma->users > 0)
+ 		return 0;
++	airoha_whnat_clear_qdma(qdma);
+ 
+ 	qcfg = econet_rreg(&qdma->regs->qdma_cfg);
+ 	set_qregs_qcfg_rx_dma_en(&qcfg, false);
+@@ -1657,6 +1688,7 @@
+ 			e->freelist_next = 0xffff;
+ 			q->entry[q->freelist_tail].freelist_next = j;
+ 			q->freelist_tail = j;
++			q->free_count++;
+ 		}
+ 	}
+ 
+@@ -1818,6 +1850,22 @@
+ 	return qdma;
+ }
+ 
++/* No QDMA1/GPON control changes: only LAN CPU -> PPE channel7, queue0. */
++int airoha_whnat_xmit(struct econet_qdma *qdma, struct sk_buff *skb)
++{
++	union desc_msg msg = {};
++	int ret;
++	if (qdma->common.id || !READ_ONCE(qdma->users))
++		return -EOPNOTSUPP;
++	set_etx_channel(&msg.etx, 7);
++	set_etx_queue(&msg.etx, 0);
++	set_etx_fport(&msg.etx, ETX_FPORT_PPE);
++	ret = airoha_qdma_gen1_xmit(qdma, skb, &msg, 0, NULL);
++	/* Positive EBUSY means consumed + ring now full. A positive DMA-map
++	 * error is NOT a successful handoff and must restore the original skb. */
++	return ret == 0 || ret == EBUSY ? ret : ret < 0 ? ret : -EIO;
++}
++
+ /* Generation-2 QDMA backend. */
+ static void airoha_qdma_set_irqmask(struct airoha_irq_bank *irq_bank,
+ 				    int index, u32 clear, u32 set)

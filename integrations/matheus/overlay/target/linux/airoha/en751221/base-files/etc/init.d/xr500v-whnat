@@ -1,0 +1,33 @@
+#!/bin/sh /etc/rc.common
+# Opt-in port validation. Separate config from the old econet-eth probe so
+# preserved legacy settings cannot silently enable an untested new backend.
+START=99
+STOP=05
+EXTRA_COMMANDS="apply status"
+PARAMS=/sys/module/airoha_eth/parameters
+
+apply() {
+	local enabled budget
+	[ "$(cat /tmp/sysinfo/board_name)" = tplink,archer-xr500v-v1 ] || return 0
+	[ -w "$PARAMS/whnat_enable" ] || return 1
+	config_load xr500v-whnat
+	config_get_bool enabled main enabled 0
+	config_get budget main max_packets 32
+	case "$budget" in ''|*[!0-9]*) return 1 ;; esac
+	[ "${#budget}" -le 10 ] && [ "$budget" -le 4294967295 ] || return 1
+	printf 'N\n' > "$PARAMS/whnat_enable"
+	printf '%s\n' "$budget" > "$PARAMS/whnat_max_packets" || return 1
+	[ "$enabled" = 0 ] || printf 'Y\n' > "$PARAMS/whnat_enable"
+}
+
+start() { apply; }
+stop() {
+	[ ! -w "$PARAMS/whnat_enable" ] || printf 'N\n' > "$PARAMS/whnat_enable"
+}
+status() {
+	local name
+	for name in whnat_enable whnat_max_packets whnat_handed whnat_completed whnat_returned whnat_downstream whnat_fallback; do
+		printf '%s=' "$name"
+		cat "$PARAMS/$name" 2>/dev/null || printf 'unavailable\n'
+	done
+}

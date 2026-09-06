@@ -1,0 +1,3 @@
+config whnat 'main'
+	option enabled '0'
+	option max_packets '32'
