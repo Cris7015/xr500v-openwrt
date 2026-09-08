@@ -1,148 +1,95 @@
-# XR500v OpenWrt port
+# TP-Link Archer XR500v — OpenWrt community port
 
-OpenWrt port for the **TP-Link Archer XR500v** GPON router — SoC: EcoNet **EN751221** (MIPS 34Kc, big-endian).
+Experimental OpenWrt work for the **Archer XR500v v1**, built around the
+**EcoNet EN7526G / EN751221 family**: GPON Internet, Wi-Fi acceleration and
+two analog telephone ports in one router.
 
-## Current work (2026-09-06): Matheus Airoha/EcoNet integration
+[OpenWrt wiki and photos](https://openwrt.org/inbox/toh/tp-link/archer_xr500v_v1) ·
+[Current source and tests](integrations/matheus/) ·
+[Focused contributions](integrations/matheus/focused/) ·
+[Release notes](https://github.com/Cris7015/xr500v-openwrt/releases) ·
+[Historical documentation](docs/Home.md)
 
-The newer local integration now cold-boots from NAND and brings up GPON
-O5/OMCI/PPPoE without a warm stock handoff. LAN, both radios, USB storage,
-PON/LOS LEDs and two FXS ports have been exercised. Local measurements include
-about 715/700 Mbit/s wired and 421/285 Mbit/s over 5 GHz; these are not
-guaranteed results or a complete long-duration qualification.
+**Development status — 8 September 2026:** this is a community project, not
+official XR500v support in OpenWrt release images. The newer GPON integration
+has been tested locally; its public source export is a review set, **not a
+complete reproducible build or a ready-to-flash firmware release**.
 
-The reviewed public sources are in **[integrations/matheus](integrations/matheus/)**:
-board/NAND/GPON references, WHNAT/PPE fixes, dual-FXS userspace and native LuCI
-accounts/status, with tests, provenance and explicit remaining limitations.
-The optical block is disabled in the reference DTS; WAN settings are
-configured for the target deployment.
+## Results in the local integration
 
-**This is a source review set, not a complete replacement overlay or a
-ready-to-flash firmware release.** Several changes still need porting to
-Matheus' current APIs. The older repository-root overlay, June status table
-and rebuild instructions below describe the historical cjdelisle-based port,
-not the newer tested integration. Do not mix their instructions or modules.
+These results describe the local Matheus-based integration, not every image
+available in Releases.
 
-## Historical status (2026-06-21)
+| Area | Exercised locally |
+| --- | --- |
+| Boot and persistence | Cold boot from NAND, persistent configuration and board-specific sysupgrade |
+| GPON | O5, OMCI and PPPoE without a warm handoff from stock |
+| Ethernet | Four Gigabit LAN ports through cascaded MT7530 switches |
+| Wi-Fi | 2.4 GHz and 5 GHz APs, with the WHNAT CPU/PPE handoff |
+| USB and panel | USB storage, buttons and front-panel LEDs, including PON/LOS |
+| Telephony | Two-way local SIP calls on both FXS ports, ring/hook control, echo cancellation and mild denoise |
+| LuCI | Native status, audio configuration and SIP account pages |
 
-| Function | State |
-|---|---|
-| Boot to console (UART, A/B slot flash) | ✅ |
-| **Ethernet LAN — 4 ports via DSA** | ✅ working (HW switching ~gigabit, CPU idle) |
-| **PCIe / WiFi — dual band** | ✅ 5 GHz AP (MT7662 / `mt76x2e`) + 2.4 GHz AP (MT7603 / `mt7603e`) |
-| **USB** (xHCI MediaTek + storage) | ✅ pendrive USB2 = `/dev/sda` |
-| **256 MB RAM** | ✅ (244 MB usable) |
-| **LAN TX throughput** | ✅ 161 Mbps as endpoint (BQL fix, was ~5M) |
-| Bridge (4 LAN + WiFi) + persistent config + internet | ✅ |
-| **HW-NAT (PPE flow offload)** | 🧪 **experimental — functional, under validation.** LAN↔LAN (~935 Mbit/s), LAN→WAN upload, and WAN→LAN PPPoE download all HW-offload at wire-speed with the CPU idle. Recently landed (egress DSA-port encoding + symmetric engine teardown) and **not yet soak-tested for long-term stability** — fall back to software offload (`flow_offloading_hw=0`) if you hit issues |
-| **WiFi HW forwarding (WHNAT, half-offload)** | 🧪 experimental — the PPE NATs in HW and the CPU re-injects to the radio; forwarded UDP ~514 Mbit/s (OEM-class) after the RX zero-copy fix. The OEM also uses half-offload (no full DMA-to-chip path exists on this silicon) |
-| **Telephone / VoIP (RJ11 FXS)** | ✅ working — clean bidirectional SIP calls + ring/answer/hangup (reconstructed SLIC driver) |
-| WAN / xPON (GPON fiber) | ❌ not supported (separate MAC block) |
+Selected local runs measured approximately **715/700 Mbit/s wired** and
+**421/285 Mbit/s over 5 GHz** (download/upload). They are observations, not
+guaranteed performance or a long-duration qualification. See the
+[validation scope and limitations](integrations/matheus/VALIDATION.md).
 
-**The breakthrough:** the EN751221 has **two cascaded MT7530 switches** — an on-die one (MMIO @ `0x1fb58000`, only port5 cascade + port6 CPU) and an external MCM one (over MDIO @ `0x1f`) that carries the 4 real LAN ports. Modeling this as a **nested DSA tree** (the MCM as a child of the on-die switch's MDIO bus) makes all 4 LAN ports + WiFi work, bridged, with internet — *without* needing the unpublished MDIO-master code that previously blocked this.
+Still open: the stress-time mt76 headroom warning, longer stability testing,
+and the remaining ports to current upstream APIs. Operator VoIP, in-call IVR
+and emergency calling are not validated. The
+[ALSA/ASoC and SLIC refactor](integrations/matheus/focused/ASOC-PLAN.md) is planned,
+not implemented.
+
+## Start here
+
+- **Review the current work:** [integration overview](integrations/matheus/)
+  and [focused submissions](integrations/matheus/focused/). The public
+  reference DTS leaves optical service disabled.
+- **Try an existing image:** read the exact
+  [release notes](https://github.com/Cris7015/xr500v-openwrt/releases) and match
+  your board, bootloader and BMT variant first. A newer tag does not mean an
+  image is compatible with every XR500v.
+- **Build or study the older port:** use the
+  [archived README and build instructions](docs/README-history-before-2026-09-08.md)
+  and [historical subsystem documentation](docs/Home.md). Those describe the
+  separate cjdelisle-based overlay, not the complete newer GPON integration.
+
+**Important:** the
+[August Bootbase 2019 / BMT81 release](https://github.com/Cris7015/xr500v-openwrt/releases/tag/v2026.08.28-bootbase2019-bmt81)
+is revision-specific and **does not support GPON**. It is not an image of the
+newer local integration. Confirm your recovery procedure before writing flash;
+do not mix images, modules or instructions from different variants.
 
 ## Hardware
-- SoC: EcoNet EN751221 (MIPS 34Kc, BE, ~600 MHz). SPI-NAND 128 MB. **256 MB DDR3**.
-- Switch: dual MT7530 — on-die (MMIO `0x1fb58000`) + MCM (MDIO `0x1f`). 4× GE LAN.
-- WiFi: **two** MediaTek PCIe radios — MT7662 (5 GHz, `mt76x2e`) + MT7603 (2.4 GHz, `mt7603e`). USB: xHCI (MediaTek).
-- WAN: GPON (own MAC, not in OpenWrt). Phone: Microsemi **Le9642** SLIC over ZSI — reconstructed driver (see VoIP section).
 
-## How to rebuild (this repo is an OVERLAY on top of cjdelisle/openwrt)
+- **Tested SoC:** EcoNet EN7526G, in the EN751221 software family; MIPS 34Kc, big-endian.
+  Identified using the manufacturer's package-code rule, not a visible chip marking.
+- **Memory:** 256 MiB RAM and 128 MiB SPI-NAND; bootloader/BMT variants exist.
+- **Networking:** four Gigabit LAN ports, cascaded MT7530 switches, GPON WAN.
+- **Radios:** MT7603 (2.4 GHz) and MT7662 (5 GHz).
+- **Peripherals:** USB 2.0 and two FXS ports on a dual-channel Le9642 SLIC.
 
-```bash
-git clone https://github.com/cjdelisle/openwrt.git && cd openwrt
-git checkout f3605b31fb            # pinned base (branch plan-b-nazox1, tag iter84-snapshot)
-cp -r <this-repo>/{package,target} .      # apply overlay
-cp <this-repo>/config.seed .config        # USB selections + kernel diet + target
-./scripts/feeds update -a && ./scripts/feeds install -a
-make defconfig && make -j$(nproc)
-```
+A matching SoC does not make another router compatible with XR500v firmware.
+SLIC power profiles are board-specific; see
+[provenance and electrical limits](integrations/matheus/PROVENANCE.md).
 
-**Pinned base:** `cjdelisle/openwrt` @ `f3605b31fb` (branch `plan-b-nazox1`).
-**`config.seed`** captures what lives in `.config` (gitignored): USB packages (`kmod-usb3`, `usb-storage`, `usb-xhci-mtk`, `fs-vfat`, `fs-exfat`) + kernel diet (`KALLSYMS`/`DEBUG_INFO` off, required so the compressed kernel fits in the `kernel1` partition of 3 MB).
+## Help move it forward
 
-> **⚠️ Build hygiene:** run `make package/kernel/econet-eth/clean` before a fresh build, and do not leave backup directories (`*-bak`, `*-disabled`, `*.iter*`) under `package/`. OpenWrt scans the entire `package/` tree and builds any such stale copies in parallel, which can overwrite the intended driver in the rootfs.
+Useful contributions include tests on a matching XR500v revision, reproducible
+bug reports and small driver or documentation patches. Report the board/build
+revision, steps and relevant log excerpts in
+[Issues](https://github.com/Cris7015/xr500v-openwrt/issues).
 
-## Key technical notes
-- **Nested DSA topology** — `target/linux/econet/dts/en751221.dtsi`: on-die `switch@1fb58000` with a child `mdio { switch@1f (mediatek,mcm) }`. MCM user PHYs at MDIO **1–4** (port0/PHY0 has no RJ45 jack).
-- **Inverted port mapping** (enclosure ≠ Linux): physical LAN1→`lan1` (MCM port4), LAN2→`lan2` (port3), LAN3→`lan3` (port2), LAN4→`lan4` (port1). Corrected in `en751221_tplink_archer-xr500v.dts`.
-- **USB** — node `usb@1fb90000` (mt8173-xhci). The USB3 port has no T-PHY wired → `STS1_U3_MAC_RST` never exits reset → `host_enable` timeout `-145`. Fix: `mediatek,u3p-dis-msk = <0x1>` (disables U3; USB2 port remains active). The `xhci-mtk` driver does NOT consume `phys`.
-- **256 MB** — `memory@0 reg = <0x0 0x10000000>` in the board dts. Requires disabling INITRAMFS + kernel diet (otherwise the compressed kernel does not fit in `kernel1`=3 MB; `dd conv=sync` rounds up to the nearest 3072k multiple).
-- **WiFi 2.4 GHz (MT7603)** — a *second* PCIe radio, separate from the 5 GHz MT7662. Two walls: enumeration needed the OEM global PCIe reset replicated at boot (the `mt7512_pcie_reset` sequence), and the `mt7603e` driver hung on the MCU EEPROM upload until a synthetic EEPROM was inlined in the DTS (`mediatek,eeprom-data` on the `wifi@0,0` node). 5 GHz (MT7662) runs on `mt76x2e`.
-- **Tagger** — econet-eth carries its own `mtk-tag.ko` (from `gsw/tag-mtk.c`), *not* the kernel's `tag_mtk`. `mtk_conduit_find_user` is device-agnostic.
-- **Operational gotcha** — the DSA conduit `eth0` must NOT be a member of `br-lan` (its bridge rx_handler bypasses the DSA tagger). `br-lan` = `lan1..lan4` (+ WiFi).
-- **Flash** — from a running XR500v OpenWrt use the board-specific `sysupgrade`
-  path with the validated TrendChip-patched image; it pivots to RAM and writes
-  the `kernel1`/`rootfs1` slices through the BMT-aware NAND driver.  Never run a
-  raw `mtd write` manually.  Stock OEM telnet `:2323` remains the recovery path
-  when OpenWrt cannot boot.
-- **Persistent network** — the DSA bridge comes up correctly only on a **clean boot**, not with `network restart`.
+The [focused contribution index](integrations/matheus/focused/) separates board
+basics and the PPE multicast fix from the remaining NAND, WHNAT, aging and
+PCM/SLIC work. Other EcoNet devices may benefit from individual driver changes;
+the firmware images and electrical settings are not interchangeable.
 
-## econet-eth driver patches (`package/kernel/econet-eth/patches/`)
-- `210-mcm-reset-optional` — the MCM does not expose a reset register; make it optional.
-- `220-mdio-bus-pre-dsa-register` — register the MCM PHYs before `dsa_register_switch` (otherwise `-ENODEV` on user ports).
-- `240-trgmii-cascade-cal` — port of `macMT7530doP6Cal` TRGMII from the OEM SDK.
-- `330-bql-min-limit` — **TX throughput fix**: `dql.min_limit=262144` on the GDM txqs. BQL was collapsing to ~86 bytes (QDMA signals TX-done per packet) → TX 5M → 161M (32×).
+## Credits
 
-### HW-NAT (PPE flow offload) — experimental 🧪
-A QDMA-based MTK-PPE clone (mainline `mtk_ppe` model, FoE V1) drives the hardware NAT. **Functional and committed, but recently landed and not yet soak-tested** — treat as experimental and keep `flow_offloading_hw=0` as the safe fallback.
-- `378 / 380 / 381` — PPE/flowtable offload core: FoE table, RX/TX bind hooks, lazy engine-arm on the first `FLOW_BLOCK_BIND`.
-- `383` — derive `ft_active` from the block-list (a WiFi UNBIND at boot must not clear the global flag while the LAN ports are still offloading).
-- `390 / 391 / 392` — **WHNAT** WiFi-forwarding perf: force-to-CPU batching, **RX zero-copy headroom** (the big one — +64 B headroom kills the per-frame `pskb_expand_head`; forwarded UDP 271 → 514 Mbit/s, ≈ OEM), and a per-poll vif cache.
-- `393` — encode the **egress DSA port** in the flowtable FoE entry (`set_dsa` from the `FLOW_ACTION_REDIRECT` dev). Without it every LAN entry is identical (`l2.etype=ETH_P_IP`) → the cascaded MT7530 falls back to ARL-by-MAC → only the conduit-adjacent port HW-forwards and the other user ports black-hole. Fixes LAN↔LAN to user ports **and** the WAN→LAN PPPoE download.
-- `394` — **symmetric engine teardown** on `FLOW_BLOCK_UNBIND`. The BIND arms the engine and steers all GDM1 ingress to the PPE, but the UNBIND never disarmed it, so toggling `flow_offloading` under load left a half-armed engine black-holing traffic until reboot. Adds `en75_ppe_engine_disarm()` (de-steer GDM1 → CPU, flush FoE, disable engine, clear the latch).
-- `395` — gate the per-packet trace logs behind a `ppe_trace` module-param (default off) so production builds keep `dmesg`/the serial console quiet under load.
-
-*(The earlier PPE WIP patches 340/350 from before this rework are in the git history, commit `39fb218`.)*
-
-## VoIP / Telephone (FXS)  ✅
-
-The XR500v's RJ11 phone jacks use a **Microsemi Le9642** SLIC (VE886/VP886 family)
-over **ZSI** (Zarlink Serial Interface, multiplexed on the PCM bus) — "not
-supported" by the EcoNet OpenWrt project. The full FXS/VoIP stack was reverse-
-engineered and rebuilt from scratch: the SoC PCM/TDM DMA engine, the ZSI
-transport, the SLIC profiles / line-state / ring, G.711 audio, and a SIP
-integration. A point-to-point SIP call (PC softphone ↔ Philips DECT handset)
-works clean **both directions**, with real **ring / answer / hangup**.
-
-`package/kernel/econet-pcm/` builds two kernel modules — **`pcm-en751221`** (the
-SoC PCM/TDM controller @ `0x1fbd0000`) and **`econet-slic`** (the Le9642 over ZSI
-@ `0x1fbd1000`) — plus a baresip audio module exposing `/dev/xr500v-voice`
-(16-bit linear, 8 kHz) and `xr500v-callmgr.c`, a small userspace daemon for the
-call flow.
-
-### Key technical notes
-- **DC feed current** — the cordless DECT base needs more loop current than the
-  600R AC profile default (ILA 0x07 = 25 mA); the mic stays marginal at the
-  voice ADC until raised. `slic_audio_setup` bumps the DCFEED ILA to 38 mA
-  (`feed_ila` param) — this alone removed the capture noise and hum.
-- **u-law, not 16-bit linear** — the Le9642 drives only 8 bits per PCM timeslot
-  even in "linear" mode, so 16-bit linear gave 8-bit resolution (quiet speech
-  quantized to silence → choppy). The codec runs **G.711 u-law** and the voice
-  thread (de)compands to/from 16-bit linear for the char device; u-law's log
-  companding preserves quiet speech. The SLIC uses different clock-slot offsets
-  for TX-capture (low byte) vs RX-playback (high byte) — the `tx_msb` param
-  selects the playback byte.
-- **OPFUNC before TXSLOT** — the codec mode must be written before the timeslots
-  latch, or only one 8-bit slot is allocated.
-- **Real call flow** (`xr500v-callmgr`) — ties the SLIC hook (debugfs) to
-  baresip's `ctrl_tcp`: an incoming call rings the handset, going off-hook
-  accepts, on-hook hangs up (no leftover line tone). The ring voltage (STATE
-  0x07, 70–90 V) corrupts the SIGREG hook bit, so it rings with a cadence and
-  samples the hook only in the gaps, debounced.
-- **Persistence** — modules reload live without reflashing (the SLIC state only
-  resets on a cold boot). The whole stack (fixed `.ko` + baresip + callmgr)
-  persists via the UBIFS overlay (`/lib/modules`, `/root/bsdeploy`,
-  `/root/voip-start.sh` launched from `rc.local`) — no firmware reflash needed.
-
-The SLIC bring-up history (ZSI handshake, profiles, the ring milestone, the
-codec saga) lives in the git history and `notes/`.
-
-## Structure
-- `package/kernel/econet-eth/` — eth + DSA driver (patches on the `cjdelisle/econet_eth` fork @ `c2f855cf`) + `files/` (switch init).
-- `package/kernel/econet-pcm/` — VoIP/FXS: `pcm-en751221` (PCM/TDM) + `econet-slic` (Le9642 over ZSI) kernel modules, the baresip `xr500v` audio module, and `xr500v-callmgr.c` (the ring/answer/hangup daemon).
-- `package/kernel/linux/modules/netdevices.mk` — adds `TARGET_econet` to deps + defines `kmod-dsa-mt7530`.
-- `target/linux/econet/` — DTS (SoC dtsi + XR500v board), `en751221/config-6.12`, image recipe, base-files, NAND patches.
-- `config.seed` — build selections (seed as `.config`).
-- `scripts/`, `docs/`, `notes/` — tools and iteration log.
-
-Built on EcoNet `econet/en751221` (Caleb DeLisle's port, merged to OpenWrt mainline 2025).
+This work builds on [Matheus / Sirherobrine23's Airoha trees](https://sirherobrine23.com.br/airoha),
+[merbanan's contributions](https://github.com/merbanan),
+[Caleb DeLisle's OpenWrt work](https://github.com/cjdelisle/openwrt), and the
+OpenWrt/Linux community. See the [provenance notes](integrations/matheus/PROVENANCE.md)
+and the notices in each source file.

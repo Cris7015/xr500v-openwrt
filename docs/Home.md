@@ -1,5 +1,12 @@
 # TP-Link Archer XR500v — Teardown & OpenWrt Port
 
+> **Historical documentation.** These pages describe the earlier port and
+> include superseded status and hardware statements. In particular, their
+> GPON "not ported" status does not describe the newer local integration.
+> See the [current project overview](../README.md) for the latest published
+> scope, limitations and links. Do not mix build or flash instructions between
+> the older overlay and the newer source review set.
+
 This is, to our knowledge, the first public technical documentation of the **TP-Link
 Archer XR500v** (v1) — a GPON home gateway sold in Latin America. TP-Link publishes
 only marketing specs for this device and states that it cannot run OpenWrt; this document
