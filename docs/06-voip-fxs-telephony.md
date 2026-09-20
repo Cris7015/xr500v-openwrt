@@ -1,5 +1,21 @@
 ## Summary
 
+> ### Where it stands now (20 September 2026)
+>
+> The driver and the call manager below are still the design in use; releases r15–r21
+> hardened and finished them. The PCM dual engine is now served by the **descriptor
+> completion IRQ** (about 200 interrupts per second, 20 ms safety timeout) instead of a
+> polling thread; the earlier interrupt attempt had failed because the wait queues were
+> initialised only in the legacy path, and the first swap rebooted the router before the
+> probe-time initialisation fixed it. Added since: shared ring group (one account rings
+> both phones), ring trip (answering during the ring burst), ring-start glitch and
+> clock-based cadence, capture muted while on-hook (the DC-DC light-load buzz no longer
+> reaches the far end), clean hang-up without the feed bounce, 40 ms hook sampling in a
+> call, baresip jitter buffer 3–12 packets / audio buffer 30–100 ms (measured WAN jitter to
+> the provider's IMS: 0.3 ms). Validated with real provider calls (Movistar IMS) and local
+> MicroSIP calls. Still missing: in-call DTMF (RFC 4733), caller-ID FSK, call waiting,
+> progress tones; emergency calling not validated.
+
 The Archer XR500v's two RJ11 telephone jacks are driven by a **Microsemi/Microchip Le9642** dual-channel SLIC (Subscriber Line Interface Circuit), a member of the VE886/VP886 "miSLIC" family. The OEM firmware speaks to it through the proprietary VoicePath API-II (VP-API-II) stack (`slic3.ko` + `pcm1.ko` + DSP blobs) on its 2.6.36/3.18 kernel — none of which is mainline, and none of which loads on the OpenWrt 6.12 target. The entire FXS/VoIP path on this wiki's OpenWrt port was therefore rebuilt from scratch: a ZSI control transport, the SLIC line bring-up (profiles, switcher, feed, ring, hook), a G.711 audio chain over the SoC PCM/TDM DMA engine, a full-duplex `/dev/xr500v-voice` character device, and a SIP integration (baresip + a small call-manager daemon) that makes a cordless DECT handset behave like a real telephone. Point-to-point SIP calls between a PC softphone and the handset work bidirectionally with clean audio, with working ring / answer / hang-up. Both FXS channels have been validated end-to-end one line at a time; the upstream EcoNet OpenWrt project explicitly excludes VoIP, so as far as is known this is the first working FXS port for this SoC family. See [02-hardware-chip-inventory.md](02-hardware-chip-inventory.md) for the device map and [03-boot-partitions-flashing.md](03-boot-partitions-flashing.md) for the flash/boot rules referenced below.
 
 ## Hardware topology

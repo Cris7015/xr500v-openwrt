@@ -63,13 +63,13 @@ The same physical SoC is referenced under several EcoNet/Airoha part numbers acr
 
 For practical purposes, treat EN751221 ≈ EN7521 ≈ EN7528 as one chip family. Sibling devices that share the SoC and were used as porting references include the **TP-Link Archer VR1200v v2**, **Nokia G-240G-E**, **SmartFiber XP8421-B**, **Zyxel PMG5617GA**, and the dual-WiFi **VC220-G3u**.
 
-### Mainline OpenWrt status
+### Mainline OpenWrt status (20 September 2026)
 
-The EcoNet EN75xx platform was merged into `openwrt/openwrt.git` mainline on **2025-09-11** (commit `73d0f9246042a487faf930a0571bd8c080bbc78f`, author Caleb James DeLisle / cjdelisle), targeting **kernel 6.12**. Most of the SoC support also landed in linux-mips upstream. The OpenWrt target is named **`econet`** with subtarget **`en751221`**.
+The EcoNet EN75xx platform was merged into `openwrt/openwrt.git` on **2025-09-11** (commit `73d0f9246042a487faf930a0571bd8c080bbc78f`, Caleb James DeLisle). The `econet` target is now on **kernel 6.18** with twelve boards; for the EN751221 subtarget: generic, Huawei HG2821T-U, Nokia G-240G-E, SmartFiber XP8421-B, TP-Link Archer VR1200v v2 and Zyxel PMG5617GA. Its Ethernet is the out-of-tree `kmod-econet-eth` package and EN751221 boards still get `lan=eth0` (no DSA). In Linux mainline (7.3-rc) the EN751221 has the platform code, interrupt controller, timer, clocks/resets and PCIe with its PHY; the Ethernet driver, the dual-switch DSA and the PHY drivers are Caleb's series under review on netdev, and pinctrl and xPON are not there.
 
-The XR500v itself is **not** an upstream-supported device. This port is an **overlay on top of `cjdelisle/openwrt` (pinned at `f3605b31fb`, branch `plan-b-nazox1`)**, adding a board-specific DTS, the dual-switch DSA model, the MT7603 2.4 GHz bring-up, the USB fix, the 256 MB unlock, and the reconstructed FXS/VoIP driver. The base cjdelisle tree ships the `en751221.dtsi`, the EN7528 PCIe support (patch `912-…`), and the en75_bmt NAND driver.
+The XR500v itself is in **no upstream device list**. The current images come from **Matheus Sampaio Queiroga's `airoha_en7523` tree** (target `airoha/en751221`), which carries the xPON MAC and optics, the PPE flow offload for this MIPS generation and the DSA; the XR500v board support is there as pull requests 64 (DTS, approved), 67 (U-Boot layout) and 68 (Wi-Fi). His pull request 20104 to `openwrt/openwrt` would fold the `econet` target into `airoha`. See chapter 11.
 
-> Note: TP-Link's marketing material states the XR500v cannot run OpenWrt. In practice it boots OpenWrt mainline (kernel 6.12) from slot B with working Ethernet, dual-band WiFi, USB, 256 MB RAM, and the FXS phone ports.
+> Note: TP-Link's marketing material states the XR500v cannot run OpenWrt. In practice it boots OpenWrt with Linux 6.18 as a full GPON gateway: fibre WAN, hardware NAT, dual-band Wi-Fi, USB, 256 MB RAM and both telephone ports.
 
 ### Major MMIO blocks
 

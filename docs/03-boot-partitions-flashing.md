@@ -1,5 +1,19 @@
 ## Summary
 
+> ### Where it stands now (20 September 2026)
+>
+> This chapter describes the **OEM bootloader layout**, which every public image except
+> the U-Boot track still uses: OpenWrt lives in slot B (`kernel1` + `rootfs1` behind the
+> TrendChip header) and keeps its overlay in the 64 MiB `openwrt_ubi` partition; the
+> stock firmware in slot A is never touched. The current `sysupgrade` path rewrites both
+> slices with a read-back check and re-provisions `openwrt_ubi`, restoring the saved
+> configuration into it. From stock, flash the August factory image first and then the
+> current `sysupgrade`. Units with the December 2019 bootloader (`bmt pool size: 81`) need
+> their own images; the August 2021 bootloader units (`bmt pool size: 94`) are the default.
+>
+> The alternative layout, **U-Boot + one UBI partition** with a FIT image, is documented
+> in [chapter 12](12-uboot-ubi-migration.md). It is one-way and needs a UART.
+
 The Archer XR500v boots via a proprietary TrendChip/EcoNet-derived bootloader (the `bldr>` prompt) that selects one of two firmware slots through a single byte-flag, `bflag`: `0` boots the stock OEM TCLinux image (slot A), `1` boots OpenWrt (slot B). The kernel partition for each slot is not a plain Linux image but is wrapped in a 512-byte proprietary header that the bootloader parses after LZMA decompression; producing a bootable OpenWrt image requires post-processing the OpenWrt `sysupgrade.bin` with `scripts/patch_trendchip_header.py` so those header fields (magic, kernel entry, rootfs offset/size, sub-magic) are valid — without it the bootloader dereferences garbage and crashes. The NAND is laid out in fixed partitions inherited from the OEM firmware, and OpenWrt adds a dedicated 64 MB UBI partition in the previously-unused free area between 0x3000000 and 0x7000000 without disturbing any OEM partition. Routine upgrades now use the board-specific, BMT-aware OpenWrt `sysupgrade` path; a manual `mtd write` from the live root remains unsupported. Stock telnet/web flashing is retained as the recovery and first-install path.
 
 This page is the canonical reference for the boot path, the full partition map with offsets, the header format and the patcher, the flashing procedure with its exact argument order, the repartition work, the UART pinout, the bootloader command set, and the brick taxonomy / recovery procedure. The device is recoverable from almost any software mistake (soft brick) via UART, the bootloader prompt, a local TFTP server and full NAND backups; only damaging the `boot` partition or the SoC itself is a true (hard) brick. See [02-hardware-chip-inventory.md](02-hardware-chip-inventory.md) for the SoC/chip inventory and [11-openwrt-port-build-persistence.md](11-openwrt-port-build-persistence.md) for the DTS and driver details.

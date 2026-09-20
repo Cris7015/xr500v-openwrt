@@ -1,5 +1,11 @@
 # Front-Panel LEDs
 
+> ### Where it stands now (20 September 2026)
+>
+> Unchanged, with one addition: on the U-Boot + UBI layout (chapter 12) the power LED is
+> `green:power` on GPIO 6, lit by U-Boot during boot and owned by the kernel afterwards.
+> On the OEM bootloader path the bootloader lights it and the kernel leaves it alone.
+
 The Archer XR500v has a ten-indicator front panel: **Power, GPON, LOS, Internet, 2.4GHz, 5GHz, WPS, Phone1, Phone2, USB**. Eight of these are ordinary active-low open-drain GPIOs on the EN751221 SoC, driven by a small reverse-engineered `gpio-tc3162` platform driver against the TrendChip GPIO block at physical `0x1fbf0200`. The two WiFi indicators (2.4GHz, 5GHz) are **not** SoC GPIOs at all — they live inside the two MediaTek WiFi chips, on two different mechanisms. They were initially hypothesized to require the proprietary OEM `rtpci` blob, but that conclusion was later overturned by reverse-engineering the OEM driver and confirming with live register pokes: the 5GHz LED is the MT7662 MAC LED engine slot 2 (active-low, configured purely from device tree), and the 2.4GHz LED is MT7603 chip-internal GPIO12/13 (active-low), lit by a small mainline `mt76` package patch. All ten indicators work natively in the OpenWrt port, persist across reboot, with no userspace scripts; the two radios blink on throughput via the driver-assigned `phyNtpt` trigger. This page documents the panel layout, the GPIO register block and its driver, the pad-enable quirk, the per-LED GPIO map, the phone-LED behavior, and the WiFi-LED result with exact register sequences.
 
 ## Panel overview

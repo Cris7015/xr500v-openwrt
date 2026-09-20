@@ -1,5 +1,36 @@
 ## Summary
 
+> ### Where it stands now (20 September 2026)
+>
+> **The optical WAN works.** Since release r13 (17 September) the developer unit runs
+> OpenWrt as its only ONU on a Movistar Argentina GPON OLT: O5 operational, OMCI managed
+> through `luci-app-omci`, PPPoE on VLAN 10, ~668/664 Mbit/s with the PPE offload, and
+> 15+ hours with zero BIP errors after the last fix. The first public image with it is
+> [`v2026.09.20-r21`](https://github.com/Cris7015/xr500v-openwrt/releases/tag/v2026.09.20-r21).
+>
+> What made the difference, in order:
+> 1. **The EN7570 optics driver** by Benjamin Larsson (merbanan) in Matheus's
+>    `airoha_en7523` tree, with the factory calibration read from the `misc` area
+>    (100 big-endian words at `0x20000`) through nvmem instead of a hand-made blob.
+> 2. **GPIO 27 (`3V3_BOSA_Tx`)** driven low like the OEM firmware does: left floating
+>    the transmitter supply is off on a cold boot and the OLT never sees the ONU.
+> 3. **Hardware DBRu with the OLT's S1 sleep window** and the O5 idle-GEM threshold,
+>    which took the upload from ~19 to ~405 Mbit/s and stopped the Deactivate storms.
+> 4. **The APD over-bias root cause**: our driver inverted the two calibration slopes and
+>    used a 0.09375 V/step DAC constant instead of the 0.103 V stored in flash, biasing
+>    the avalanche photodiode at 52.9 V instead of 49.4 V at 50 °C. GEM delineation
+>    loss after hours, BIP bursts and Deactivate followed. Fixed in r13, merged upstream
+>    in Matheus's kernel (PR 52).
+>
+> Not upstream: the xPON MAC and the optics drivers live only in the Matheus tree (kernel
+> `airoha_en7523_all`, OpenWrt `airoha_en7523`); the way into `openwrt/openwrt` is his
+> PR 20104 and AKoo7's PR 24577 (EN7528). Linux mainline has no PON framework at all.
+> Other OLTs are untested by us; the same driver reaches O5 on Nokia and bench OLTs in
+> other people's hands.
+>
+> Everything below this box is the laboratory history up to August 2026, kept because
+> the register-level findings are still the only public description of this MAC.
+
 > **2026-07-26 offline WAN-QDMA lifecycle update:** `econet-eth` r2 now keeps
 > one logical xPON consumer across WAN-QDMA provider absence/reprobe, assigns a
 > fresh attachment generation on both reprobe and re-registration, masks each

@@ -1,5 +1,20 @@
 # Ethernet & the DSA Switch
 
+> ### Where it stands now (20 September 2026)
+>
+> The current images use the **`airoha_eth` "gen1" driver** from Matheus's tree (the
+> mainline Airoha EN7523/EN7581 driver extended to the MIPS QDMA) with the PPE flow
+> offload, and the dual-MT7530 DSA from the `mt7530` driver patches Caleb is now sending
+> to netdev. The `econet-eth` patches listed below belong to the earlier port. Two
+> long-standing failures were fixed in September: a port going deaf after hours (the QDMA
+> TX completion woke only the queue of the freed skb; fixed by waking all queues, merged
+> upstream in Matheus's kernel as PR 53) and the boot-time "Ethernet lottery" (the TRGMII
+> training landed 2–4 taps from the real eye edge; the tap is fixed at 4 like the factory
+> firmware, PR 54). Measured: LAN↔LAN 929 Mbit/s with hardware NAT, fibre 668/664 Mbit/s,
+> 8/8 warm reboots and 4/4 power cuts with zero CRC errors. The topology below (on-die
+> switch in passthrough, external MCM switch with the user ports) is unchanged and is
+> exactly what Caleb's mainline series describes.
+
 The Archer XR500v routes its four RJ45 LAN jacks through **two cascaded MT7530-class switches**, not one: an *on-die* switch in the EN751221 SoC (reached over MMIO at `0x1fb58000`) whose only active ports are the cascade link (port 5) and the CPU link (port 6 → the frame engine's `gmac0`), and an *external* MT7530 wired as a **Multi-Chip Module (MCM)** reached over MDIO at PHY address `0x1f`, which carries the four user gigabit PHYs.
 
 The stock OEM firmware does **not** use DSA at all. It runs a monolithic `eth.ko` (plus `qdma_lan.ko` and `fe_core.ko`) that exposes `eth0` with `eth0.1..eth0.4` standard 802.1Q sub-interfaces, and a hardware `STAG → 802.1Q VTAG` conversion toggled via `/proc/tc3162/stag_to_vtag`. Reaching the same hardware through Linux DSA therefore required reverse-engineering both the tagger and the switch topology. Mainline DSA (single `mt7530-mmio` / `airoha,en7581-switch`) enumerated the ports but never passed RX traffic; the approach that works models the hardware as a **nested DSA tree** — the MCM switch declared as a child of the on-die switch's MDIO bus — driven by the out-of-tree `econet-eth` bundle (a fork of mainline `mt7530.c` with EN751221 support) plus its own DSA tagger `gsw/tag-mtk.c`. With the conduit (`eth0`) kept out of `br-lan`, all four LAN ports do bidirectional traffic with hardware switching, VLAN offload, and per-port isolation. TX throughput needed a separate BQL fix (5 Mbps → 161 Mbps as a CPU endpoint); LAN-to-LAN switching runs at line rate inside the silicon, and CPU-routed forwarding measured ~590 Mbps in a dedicated router test configuration. This page documents the approach that works alongside the dead ends, since the dead ends are part of the record.

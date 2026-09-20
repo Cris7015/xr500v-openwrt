@@ -1,5 +1,29 @@
 ## Summary
 
+> ### Where it stands now (20 September 2026)
+>
+> Since r7 (9 September 2026) the images are built from **Matheus Sampaio Queiroga's
+> `airoha_en7523` OpenWrt tree** (target `airoha/en751221`, Linux 6.18.41, `apk`), not
+> from the cjdelisle overlay described below. Each release is a locked recipe:
+> `sources.lock.json` pins the base and the five feeds by commit, `overlay.json` records
+> every changed file with its checksum and mode, `config.seed` freezes the configuration,
+> `build.py` prepares and verifies the tree, and host tests cover the telephony and PPE
+> helpers. Every release tree is diffed against the previous one (kernel, modules, rootfs,
+> device tree) before its image is accepted. The recipe itself is not published yet;
+> `integrations/matheus/` is the review export of the source delta.
+>
+> Two device profiles exist: `tplink_archer-xr500v-v1` (OEM bootloader, slot B + the
+> 64 MiB `openwrt_ubi` overlay, BMT94) and `tplink_archer-xr500v-v1-ubootmod` (U-Boot +
+> UBI, FIT image, chapter 12). A package feed built against the release kernel ships with
+> each release because `downloads.openwrt.org` has nothing for this target.
+>
+> Upstream: on Matheus's Gitea, OpenWrt PRs 64 (board DTS, approved), 67 (U-Boot layout)
+> and 68 (Wi-Fi); kernel PRs 52 (APD) and 53 (TX-queue wake) merged, 54 (TRGMII tap) and
+> 55 (PCIe port0) in review; U-Boot PR 8 (board, ESMT NAND, BootROM chainloader, timebase).
+> In `openwrt/openwrt` the `econet` target (kernel 6.18, twelve boards) still has no
+> XR500v and no DSA for EN751221 boards. The rest of this page documents the earlier
+> overlay-on-cjdelisle port and its traps; the recipe replaced it.
+
 This page is the developer / contributor guide for the OpenWrt port of the **TP-Link Archer XR500v** (SoC: EcoNet/Airoha **EN751221**, MIPS 24Kc/34Kc big-endian). A full OpenWrt 6.12 image boots from the device's second flash slot with working LAN (nested DSA), dual-band WiFi, USB and a reconstructed FXS/VoIP stack. The port is **not** a fork of OpenWrt — it is a small *overlay* (a handful of `package/` and `target/` directories plus a `config.seed`) layered on top of Caleb James DeLisle's `cjdelisle/openwrt` tree, which is itself the upstream of the now-mainline `econet` target. This document covers the upstream status, the overlay structure and pinned bases, the build environment, the iterate→build→flash loop, the UBIFS overlay persistence machinery (with its first-boot provisioning step), and the build traps that cost the most time — chiefly the duplicate-package stale-driver trap. For the hardware-level details of each subsystem, see the per-subsystem pages cross-referenced below.
 
 ## Upstream econet target status
