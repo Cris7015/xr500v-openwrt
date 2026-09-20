@@ -189,8 +189,8 @@ The NAND is split into a **dual-slot A/B layout**: slot A holds the stock OEM ke
 | **NAND** | SPI-NAND (~128 MB) — ESMT **F50L1G41A** | Boot + rootfs + overlay | SPI (`0x1fa10000`) | `spi-nand` + `en75_bmt` | Working |
 | **Ethernet switch (on-die)** | MT7530-class, ID `EN751221` | Cascade port5 + CPU port6 only | MMIO `0x1fb58000` | DSA `econet,en751221-switch` | Working |
 | **Ethernet switch (external)** | MT7530-class (MCM), ID `EN751221_EXT` | 4× user GbE LAN | MDIO addr `0x1f` (MCM) | DSA `mediatek,mcm` child | Working |
-| **2.4 GHz WiFi** | MediaTek **MT7603** (`14c3:7603`) | 802.11b/g/n 2×2 | PCIe domain 0 (port0 `0x1fb81000`) | `mt7603e` | Working as AP (after OEM PCIe reset replicated + synthetic EEPROM) |
-| **5 GHz WiFi** | MediaTek **MT7662 / MT76x2** (`14c3:7662`) | 802.11ac 2×2 VHT80 | PCIe domain 1 (port1 `0x1fb83000`) | `mt76x2e` | Working as AP, factory EEPROM |
+| **2.4 GHz WiFi** | MediaTek **MT7603** (`14c3:7603`), package marked `MT7592N` | 802.11b/g/n 2×2 | PCIe domain 0 (port0 `0x1fb81000`) | `mt7603e` | Working as AP (after OEM PCIe reset replicated + synthetic EEPROM) |
+| **5 GHz WiFi** | MediaTek **MT7662 / MT76x2** (`14c3:7662`), called `MT7612E` by the vendor config | 802.11ac 2×2 VHT80 | PCIe domain 1 (port1 `0x1fb83000`) | `mt76x2e` | Working as AP, factory EEPROM |
 | **FXS / SLIC** | Microsemi/Microchip **Le9642** (marked `Le9642P0C`; VE886/VP886) | 2× analog phone line | ZSI over PCM (`0x1fbd1000`) | `econet-slic` (reconstructed) | Working |
 | **PCM / TDM** | EN751221 on-SoC | Codec/voice DMA to SLIC | MMIO `0x1fbd0000` | `pcm-en751221` (reconstructed) | Working |
 | **WAN / GPON** | GPON ONU + xPON MAC (companion **EcoNet EN7570N**, likely) | Optical fiber WAN | xPON MAC block (own) | — | Not in OpenWrt |
@@ -198,13 +198,40 @@ The NAND is split into a **dual-slot A/B layout**: slot A holds the stock OEM ke
 | **GPIO / LEDs** | TrendChip **tc3162** GPIO | Panel LEDs + PCIe power lines | MMIO `0x1fbf0200` | `gpio-tc3162` | Working — panel 10/10 (8 SoC via `gpio-tc3162` + 2 WiFi LEDs inside MT7603/MT7662 via mt76) |
 | **UART** | ns16550 (on-SoC) | Serial console | `0x1fbf0000` | `8250`/`ns16550` | Working, 115200 8N1 |
 
+The radios carry three different names, which is worth stating once because the
+board markings do not match the drivers. What Linux binds to is the silicon, and
+the chips identify themselves consistently: PCI IDs `14c3:7603` / `14c3:7662`,
+the ASIC revision register of the 2.4 GHz part (`76030010`), and the first word
+of each EEPROM (`0x7603` / `0x7662`). The 2.4 GHz package is marked `MT7592N`,
+and the stock firmware maps the same pair of names to the same pair of drivers,
+in `filesystem/usr/etc/init.d/rcS` of the GPL source:
+
+```sh
+if [ "$TCSUPPORT_DUAL_WLAN_MT7612E" != "" ] ; then insmod mt7662e_ap.ko ; fi
+if [ "$TCSUPPORT_WLAN_MT7592"      != "" ] ; then insmod mt7603eap.ko ; fi
+```
+
+(both are `=y` in this board's `profile.cfg`). The 5 GHz part is the least
+settled of the three names, and the chip is not consistent about it either: the
+device enumerates as `0x7662`, the first word of its EEPROM reads `0x7662`, but
+`MT_EE_PCI_ID` (offset `0x00A`) carries `0x7612` with vendor `0x14c3`, and the
+driver prints `ASIC revision: 76120044`. `iw phy` exposes both bands on it,
+which an MT7612 (5 GHz only) would not do, so `MT7662` is used here and matches
+what the kernel binds against; just do not read it as a part number read off the
+package, which has not been photographed. The board wires it for 5 GHz only.
+
 ### Notes on individual chips
 
 **MT7603 (2.4 GHz)** and **MT7662 (5 GHz)** are two *separate* PCIe endpoint chips, one behind each of the SoC's two PCIe root ports — confirmed in the stock `/proc/bus/pci/devices`. Under OpenWrt they enumerate as `phy0`/`phy1` on domains `0000:01:00.0` (MT7603) and `0001:…` (MT7662). The MT7603 BAR0 is `0x20000000` (same on stock and OpenWrt). The MT7662 BAR0 is `0x20100000` under the stock OEM driver and `0x28000000` under OpenWrt (mainline assigns a different window; the register offsets are identical). The MT7662's factory calibration EEPROM (chip ID `0x7662` at byte 0) lives in the `misc` partition at `0xE0000`; the MT7603 has no stored EEPROM (its efuse holds only partial RF cal — XTAL/temp/TX-power-start — and no MAC), so a synthetic EEPROM is inlined in the DTS via `mediatek,eeprom-data`. WiFi MACs derive from the ETH MAC at `misc + 0xF100` (5 GHz uses it directly, 2.4 GHz uses `+1` via `mac-address-increment`). See the WiFi page for the full bring-up.
 
 **Le9642 SLIC** — a Microsemi/Microchip dual-channel (VE886/VP886-family) subscriber line interface for the two RJ11 FXS ports, reached over **ZSI** (a serial MPI transport multiplexed on the PCM bus, wrapped at `0x1fbd1000 + id·0x2000`). Live readback returns RCN=`0x08`, PCN=`0x75`. The stock driver is `slic3.ko`; OpenWrt support is a from-scratch reconstruction. See the telephony/VoIP page.
 
-**Board chip markings (teardown).** Part numbers photographed off the PCB: SoC **EcoNet EN751221**; NAND **ESMT F50L1G41A** (1 Gbit / 128 MB SPI-NAND); SLIC **Le9642P0C**; Wi-Fi **MT7603** (2.4 GHz) + **MT7662** (5 GHz); Ethernet magnetics 2× **JWD SG48001G** (10/100/1000 BASE-T dual-port transformer modules, between the switch and the four RJ45 jacks). The **DDR3 chip itself was not read** — note that an earlier draft misidentified `SG48001G` as the DRAM, but per the JWD datasheet it is the Ethernet magnetics, not memory. Two further chips were found whose role on *this* board is **not yet confirmed**: a MediaTek **MT7592N** in the RF area near the antenna connectors — it does **not** enumerate on PCIe (only `14c3:7603` and `14c3:7662` do), so it is *not* the host-facing Wi-Fi MAC; and an EcoNet **EN7570N** — EcoNet's EN75xx line is its PON family (e.g. EN7571 PON ONU MAC, EN7580 10G-PON), so this is **likely** a GPON/PON companion, consistent with the GPON block being separate and unsupported here. Neither has a public datasheet, so treat both roles as TBD.
+**Board chip markings (teardown).** Part numbers photographed off the PCB: SoC **EcoNet EN751221**; NAND **ESMT F50L1G41A** (1 Gbit / 128 MB SPI-NAND); SLIC **Le9642P0C**; 2.4 GHz Wi-Fi **MediaTek MT7592N**; Ethernet magnetics 2× **JWD SG48001G** (10/100/1000 BASE-T dual-port transformer modules, between the switch and the four RJ45 jacks); optical companion EcoNet **EN7570N**. The **DDR3 chip itself was not read** — note that an earlier draft misidentified `SG48001G` as the DRAM, but per the JWD datasheet it is the Ethernet magnetics, not memory. The 5 GHz package was not photographed: it sits under the RF shield.
+
+Two of those markings used to be listed here as unidentified, and both are now resolved:
+
+- **MT7592N** is the 2.4 GHz radio, i.e. the endpoint that enumerates as `14c3:7603`. An earlier draft of this page concluded the opposite — that it could not be the Wi-Fi MAC because it did not appear on the bus — which was wrong: `MT7592N` is simply the package marking for the MT7603 silicon. The stock firmware makes the same mapping, in `filesystem/usr/etc/init.d/rcS` of the GPL source: `TCSUPPORT_WLAN_MT7592` loads `mt7603eap.ko`. See the naming note under the chip table above.
+- **EN7570N** is the optical front-end companion — the laser driver and limiting amplifier of the BOSA, reached over I²C at address `0x70`, with its factory calibration stored in the OEM `misc` partition (magic `0x07050700` at `+0x20094`, exposed to the driver as an nvmem cell). It is not a second PON MAC: the GPON MAC is inside the SoC.
 
 **Ethernet switch — dual cascaded MT7530.** This was the single hardest part of the port. The EN751221 has **two** MT7530-class switches in cascade, *not* one (confirmed from the stock OEM `/proc/tc3162/gsw_link_st`, which prints both an "External switch" and an "Internal switch"):
 

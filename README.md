@@ -74,7 +74,9 @@ do not mix images, modules or instructions from different variants.
   Identified using the manufacturer's package-code rule, not a visible chip marking.
 - **Memory:** 256 MiB RAM and 128 MiB SPI-NAND; bootloader/BMT variants exist.
 - **Networking:** four Gigabit LAN ports, cascaded MT7530 switches, GPON WAN.
-- **Radios:** MT7603 (2.4 GHz) and MT7662 (5 GHz).
+- **Radios:** MT7603 (2.4 GHz) and MT7662 (5 GHz). The package on the board is
+  marked MT7592N; the stock firmware also drives it with its MT7603 driver
+  (`TCSUPPORT_WLAN_MT7592` → `mt7603eap.ko`).
 - **Peripherals:** USB 2.0 and two FXS ports on a dual-channel Le9642 SLIC.
 
 A matching SoC does not make another router compatible with XR500v firmware.
