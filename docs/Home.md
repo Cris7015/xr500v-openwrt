@@ -108,6 +108,7 @@ measured in, because the device's role and the measurement path materially chang
 | 09 | [GPON / xPON Status](09-gpon-xpon-status.md) | The one unported subsystem and why it is hard |
 | 10 | [Stock Firmware Access & Security Notes](10-stock-firmware-access.md) | Restricted CLI, root injection, accounts, firmware verification |
 | 11 | [OpenWrt Port, Build & Persistence](11-openwrt-port-build-persistence.md) | Developer guide: tree layout, build host, image recipe, UBI overlay |
+| 12 | [U-Boot + UBI migration](12-uboot-ubi-migration.md) | Advanced, one-way: replace the OEM bootloader with U-Boot, UBI layout, BootROM rescue, FIT sysupgrade |
 
 ---
 

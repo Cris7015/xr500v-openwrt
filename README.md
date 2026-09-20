@@ -10,10 +10,13 @@ two analog telephone ports in one router.
 [Release notes](https://github.com/Cris7015/xr500v-openwrt/releases) ·
 [Historical documentation](docs/Home.md)
 
-**Development status — 8 September 2026:** this is a community project, not
-official XR500v support in OpenWrt release images. The newer GPON integration
-has been tested locally; its public source export is a review set, **not a
-complete reproducible build or a ready-to-flash firmware release**.
+**Development status — 20 September 2026:** this is a community project, not
+official XR500v support in OpenWrt release images. The
+[`v2026.09.20-r21` release](https://github.com/Cris7015/xr500v-openwrt/releases/tag/v2026.09.20-r21)
+is the first ready-to-flash image of the newer GPON integration (Linux 6.18,
+Matheus `airoha_en7523` tree) for BMT94 units on the OEM bootloader, plus an
+experimental **U-Boot + UBI** layout for people with a UART. The public source
+export under `integrations/` is still a review set, not a reproducible build.
 
 ## Results in the local integration
 
@@ -46,10 +49,14 @@ not implemented.
 - **Review the current work:** [integration overview](integrations/matheus/)
   and [focused submissions](integrations/matheus/focused/). The public
   reference DTS leaves optical service disabled.
-- **Try an existing image:** read the exact
-  [release notes](https://github.com/Cris7015/xr500v-openwrt/releases) and match
-  your board, bootloader and BMT variant first. A newer tag does not mean an
-  image is compatible with every XR500v.
+- **Flash the current release:** read the
+  [`v2026.09.20-r21` notes](https://github.com/Cris7015/xr500v-openwrt/releases/tag/v2026.09.20-r21)
+  and match your board, bootloader and BMT variant first. A newer tag does not
+  mean an image is compatible with every XR500v; 2019/BMT81 units are only
+  covered by the August variant below.
+- **Replace the bootloader (advanced, one-way):** the
+  [U-Boot + UBI migration guide](docs/12-uboot-ubi-migration.md) documents the
+  backup, the BootROM rescue and the UBI/FIT layout the developer unit runs.
 - **Build or study the older port:** use the
   [archived README and build instructions](docs/README-history-before-2026-09-08.md)
   and [historical subsystem documentation](docs/Home.md). Those describe the
