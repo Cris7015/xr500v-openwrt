@@ -63,20 +63,23 @@ def xsend(path, onek, hs_wait=30, tag='', crc_seen=False):
     print(f'    {tag}: EOT ok, {blk-1} bloques', flush=True); return True
 
 # El ROM sólo toma la tecla durante el silencio de ~20 s ANTES de imprimir "done" (tras "MCC1="); después de "done"
-# salta directo (Undefined Exception). Tecleamos 'x' cada 0,5 s hasta ver "done" y comprobamos que siguió "err qdma"/'C'.
+# salta directo (Undefined Exception). Tecleamos 'x' cada 0,3 s hasta ver "done" y exigimos que la 'C' venga enseguida.
 def rom_take_chainloader():
     """Stages 1-3; False when the BootROM throws after receiving it (it does now and then)."""
-    print('[1] tecleando "x" cada 0,5 s hasta que el ROM acepte (ciclo de ~25 s, hasta 4 ciclos)...', flush=True)
-    ok = False; t0 = time.time()
+    print('[1] tecleando "x" cada 0,3 s hasta que el ROM acepte (ciclo de ~25 s)...', flush=True)
+    ok = False; t0 = time.time(); buf = b''
     while time.time() - t0 < int(os.environ.get('ROM_WAIT', '110')) and not ok:
-        os.write(fd, b'x'); out = rd(1.5, (b'done',))
-        if b'done' in out:
-            # mirar SOLO lo que viene después de "done": antes está "MCC1=" (tiene una C) y "DDR CALI" del ciclo anterior
-            tail = out.split(b'done', 1)[1]; d = time.time() + 3
-            while time.time() < d and b'C' not in tail and b'Undefined Exception' not in tail: tail += rd(0.1)
-            if b'Undefined Exception' in tail or b'C' not in tail:
-                print(f'    "done" sin tomar la x ({tail[:60]!r}); sigo con el próximo ciclo', flush=True); continue
-            print(f'[2] "done" + C del ROM: {tail[:80]!r}', flush=True); ok = True
+        os.write(fd, b'x'); buf = (buf + rd(0.3))[-4096:]
+        # El "done" del ROM va solo en su línea, tras "MCC1=...\r\n\r\n". Si se empieza a leer a mitad de ciclo,
+        # "DRAMC init done." también dice done, y la C de "Calculate size" parecía el pedido de XMODEM.
+        i = buf.find(b'\ndone')
+        if i < 0:
+            continue
+        tail = buf[i + 5:]; buf = b''; d = time.time() + 3
+        while time.time() < d and len(tail.lstrip(b'\r\n')) < 1: tail += rd(0.1)
+        if not tail.lstrip(b'\r\n').startswith(b'C'):
+            print(f'    "done" sin tomar la x ({tail[:60]!r}); sigo con el próximo ciclo', flush=True); continue
+        print(f'[2] "done" + C del ROM: {tail[:80]!r}', flush=True); ok = True
     if not ok: print('el ROM nunca tomó la x; ¿está en modo ROM?'); sys.exit(2)
     print('[3] chainloader por 1K-XMODEM', flush=True)
     if not xsend(chain, True, 30, 'chainloader', crc_seen=True): sys.exit(4)
