@@ -52,8 +52,10 @@ not implemented.
 - **Flash the current release:** read the
   [`v2026.09.20-r21` notes](https://github.com/Cris7015/xr500v-openwrt/releases/tag/v2026.09.20-r21)
   and match your board, bootloader and BMT variant first. A newer tag does not
-  mean an image is compatible with every XR500v; 2019/BMT81 units are only
-  covered by the August variant below.
+  mean an image is compatible with every XR500v; units with the December 2019
+  Bootbase and `bmt pool size: 81` are only covered by the August variant below.
+  The pool size depends on the unit's NAND, not on the bootloader
+  ([chapter 3](docs/03-boot-partitions-flashing.md)).
 - **Replace the bootloader (advanced, one-way):** the
   [U-Boot + UBI migration guide](docs/12-uboot-ubi-migration.md) documents the
   backup, the BootROM rescue and the UBI/FIT layout the developer unit runs.

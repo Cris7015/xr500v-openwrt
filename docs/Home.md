@@ -9,9 +9,15 @@
 > [releases](https://github.com/Cris7015/xr500v-openwrt/releases).
 
 This is, to our knowledge, the first public technical documentation of the **TP-Link
-Archer XR500v** (v1) — a GPON home gateway sold in Latin America. TP-Link publishes
-only marketing specs for this device and states that it cannot run OpenWrt; this document
-shows otherwise. Today (September 2026) the XR500v runs OpenWrt with Linux 6.18 as a
+Archer XR500v** (v1), a GPON home gateway. TP-Link built it for Europe (the firmware on its
+Italian support page is a Spain/EU build) and for Latin America (the developer unit carries a
+Brazil build). TP-Link publishes the specs, the GPL source and that firmware
+([chapter 10](10-stock-firmware-access.md#official-firmware-images)), but no technical
+documentation. A 2021 reply on TP-Link's English community forum, from a user rather than
+from TP-Link, said that because of the integrated ONU it could never be supported by alternative
+operating systems such as OpenWrt
+([thread](https://community.tp-link.com/en/home/forum/topic/206280)); this document shows
+otherwise. Today (September 2026) the XR500v runs OpenWrt with Linux 6.18 as a
 complete GPON gateway: fibre WAN with hardware NAT, four gigabit ports, dual-band Wi-Fi,
 USB, the full 256 MB of RAM and both RJ11 telephone ports, on either the OEM bootloader
 or a U-Boot + UBI layout. See [GPON / xPON Status](09-gpon-xpon-status.md) for how the

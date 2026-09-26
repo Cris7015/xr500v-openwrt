@@ -31,9 +31,11 @@ Requirements:
 - a **TFTP server** reachable from a LAN port (defaults below assume the server is `192.168.1.10`
   and the router `192.168.1.1`; change them with `setenv` if you must);
 - OpenWrt already installed on the OEM layout (any `v2026.08.09`+ or r-image) with SSH access, to
-  take the dumps. **August 2021 bootloader / BMT94 units only**: the UART log at power-on reads
-  `EN751221 at Mon Aug 16 ... 2021 version 1.1 free bootbase` and `bmt pool size: 94`. Units with the
-  December 2019 bootloader (`... Tue Dec 3 ... 2019 ...`, `bmt pool size: 81`): **not covered**, do not try;
+  take the dumps. **Only units whose UART log at power-on shows both**
+  `EN751221 at Mon Aug 16 ... 2021 version 1.1 free bootbase` and `bmt pool size: 94`. The pool size
+  depends on the unit's NAND, not on the bootloader ([chapter 3](03-boot-partitions-flashing.md)), so
+  an August 2021 unit can print another value. Any other unit, including those with the December 2019
+  bootloader (`... Tue Dec 3 ... 2019 ...`): **not covered**, do not try;
 - one to two hours, a power switch within reach, and no fibre service you need during that time.
 
 ## Files

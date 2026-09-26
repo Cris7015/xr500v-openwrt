@@ -8,8 +8,17 @@
 > stock firmware in slot A is never touched. The current `sysupgrade` path rewrites both
 > slices with a read-back check and re-provisions `openwrt_ubi`, restoring the saved
 > configuration into it. From stock, flash the August factory image first and then the
-> current `sysupgrade`. Units with the December 2019 bootloader (`bmt pool size: 81`) need
-> their own images; the August 2021 bootloader units (`bmt pool size: 94`) are the default.
+> current `sysupgrade`. Two lines of the power-on UART log decide which images fit: the
+> Bootbase build (`EN751221 at ... free bootbase`) and `bmt pool size`. The pool size is a
+> property of the unit's NAND, not of the Bootbase. The Bootbase reserves blocks at the end
+> of the chip until it has 81 good ones (8 % of 1024), so it prints 81 plus the number of
+> bad blocks in that area. The developer unit (August 2021 Bootbase, 13 bad blocks there)
+> prints 94, which is what the default images expect. The only other unit reported
+> (December 2019 Bootbase, no bad blocks there) prints 81 and has its own images. No
+> published image matches any other combination. An image built for another pool size
+> refuses the NAND's bad-block tables at boot (`reserve area size mismatch`). A block that
+> wears out in that area can raise the value, so check it again before reflashing a unit
+> that has been in service.
 >
 > The alternative layout, **U-Boot + one UBI partition** with a FIT image, is documented
 > in [chapter 12](12-uboot-ubi-migration.md). It is one-way and needs a UART.

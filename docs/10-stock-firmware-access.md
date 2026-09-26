@@ -29,6 +29,24 @@ This matters for two practical reasons:
 1. The firmware-image format and signature check are TrendChip's, **not** TP-Link's `tplink-v2`/`tclinux-trx` standard formats — which is why naïve OpenWrt images are rejected by the OEM updater (see §6).
 2. The operator management accounts and services that ship in the `romfile` remain defined and, for several of them, active — so understanding them is part of securing the device.
 
+### Official firmware images
+
+TP-Link publishes XR500v firmware on its Italian support page
+(<https://www.tp-link.com/it/support/download/archer-xr500v/#Firmware>). The build path left inside the kernel modules names the variant:
+
+| Image | Kernel and Bootbase build | Variant (build path) |
+|---|---|---|
+| `Archer_XR500vv1_1.1.0_0.8.0_up_boot_Build_200714.bin` (official) | 14 Jul 2020 | `XR500v_ESP_V1` |
+| `Archer_XR500v(SP)v1_1.1.0_0.8.0_up_boot(210816).bin` (official) | 16 Aug 2021 | `XR500v_EUSP_V1_1` |
+| stock of the developer unit (not published) | 16 Aug 2021, about an hour earlier | `XR500v_BRWISP_V1` |
+
+Both official files are `up_boot` images of 20 447 744 bytes. Each holds the 512-byte header of §6, a 512 KiB region with the bootloader, the 3 MiB kernel partition and the squashfs root. **Flashing one also rewrites the bootloader.** Their header has `fw[0x88] = 0x00020000`, the flag that selects `SALT_B` (§6).
+
+Compared with the developer unit's stock, the 2021 image has the same kernel modules: `eth.ko`, `phy.ko`, `xpon.ko`, `qdma_wan.ko` and the Wi-Fi drivers differ only in build ID, build path and date. Its Bootbase is byte-identical except for the build time. The differences are regional configuration:
+- the OMCI `EquipmentId`: `P-GW4423-1200` instead of `XR500v`;
+- the Wi-Fi power tables and the default configuration;
+- some web pages and `voip_client`.
+
 ## 2. The `romfile` config format
 
 Stock configuration lives in its own flash partition (see [Boot, partitions & flashing](03-boot-partitions-flashing.md)) as a single **plaintext XML document** rooted at `<ROMFILE>` (≈500 lines in the recovered dump). It is not encrypted or signed — it can be read directly from a flash dump. Each subsystem is a child element (`<Wan>`, `<Lan>`, `<Account>`, `<Wlan*>`, `<VoIP>`, `<TR069>`, `<Sys>`, …) with attributes as key/value config.
@@ -182,7 +200,7 @@ The two salts are constants in the library's `.rodata` (recovered from `libcmm.s
 | `SALT_A` | used when `fw[0x88] == 0` | `dcd73aa5c39598fbdcf9e7f40eae4737` | `0xb6e40` |
 | `SALT_B` | used when `fw[0x88] != 0` | `8cef335fd5c5cefaac9c28dab2e90f42` | `0xb6e50` |
 
-The `SALT_A` path is the one observed end-to-end (the image built and flashed in §below had `fw[0x88] == 0`). The `SALT_B` trigger condition is inferred from the disassembly of the selector, not exercised on the device.
+The `SALT_A` path is the one observed end-to-end (the image built and flashed in §below had `fw[0x88] == 0`). TP-Link's own images confirm the `SALT_B` selector: both official `up_boot` files (§1) have `fw[0x88] = 0x00020000`, and both verify with `SALT_B`. Uploading a `SALT_B` image has not been tried on the device.
 
 > These salts and the algorithm are legitimate reverse-engineering of the owner's own device. The "key" is a constant compiled into the firmware's own shipped library, not a third-party secret, so publishing it here is appropriate.
 
