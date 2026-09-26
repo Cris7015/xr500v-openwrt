@@ -47,8 +47,8 @@ SHA-256 of the downloads, to check a copy:
 
 | File | SHA-256 |
 |---|---|
-| `Archer_XR500vv1_1.1.0_0.8.0_Build_200714.zip` | `687ddabd307d09799d4400e6f367d76cd3ef0d4835888af2ba837769fdefa94a` |
-| `Archer XR500v(EUSP_A)_v1.1_0.8.0_1.1.0 Build 210816.zip` | `6a748df4ce474af33b3e54f2e0b965667dd17726e0e9025402012978f7465937` |
+| `Archer_XR500vv1_1.1.0_0.8.0_Build_200714.zip` ([archived](https://web.archive.org/web/20260926054634/https://static.tp-link.com/2021/202101/20210104/Archer_XR500vv1_1.1.0_0.8.0_Build_200714.zip)) | `687ddabd307d09799d4400e6f367d76cd3ef0d4835888af2ba837769fdefa94a` |
+| `Archer XR500v(EUSP_A)_v1.1_0.8.0_1.1.0 Build 210816.zip` ([archived](https://web.archive.org/web/20260926054337/https://static.tp-link.com/upload/firmware/2026/202603/20260312/Archer%20XR500v(EUSP_A)_v1.1_0.8.0_1.1.0%20Build%20210816.zip)) | `6a748df4ce474af33b3e54f2e0b965667dd17726e0e9025402012978f7465937` |
 | `…_up_boot_Build_200714.bin` (inside the zip) | `845e70900ef94e27bffaa381116ceec0a1ad98f557c3e78b13f1d3720fe2601b` |
 | `…_up_boot(210816).bin` (inside the zip) | `5bda88a5c9be6ae19310243d432a5607e383f3cae4d21eba65c794337a197e0d` |
 
