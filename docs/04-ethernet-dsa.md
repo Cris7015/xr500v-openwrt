@@ -11,7 +11,9 @@
 > upstream in Matheus's kernel as PR 53) and the boot-time "Ethernet lottery" (the TRGMII
 > training landed 2–4 taps from the real eye edge; the tap is fixed at 4 like the factory
 > firmware, PR 54). Measured: LAN↔LAN 929 Mbit/s with hardware NAT, fibre 668/664 Mbit/s,
-> 8/8 warm reboots and 4/4 power cuts with zero CRC errors. The topology below (on-die
+> 8/8 warm reboots and 4/4 power cuts with zero CRC errors. A rarer failure, where no TRGMII
+> lane trains at all, was traced on 26 September to hardware PHY polling that U-Boot leaves
+> running ([below](#the-rare-boot-where-no-trgmii-lane-trains)). The topology below (on-die
 > switch in passthrough, external MCM switch with the user ports) is unchanged and is
 > exactly what Caleb's mainline series describes.
 
@@ -154,6 +156,22 @@ The *first* working DSA (iter48) used a different, now-superseded technique: a ~
 ## TRGMII cascade calibration
 
 Patch `240-trgmii-cascade-cal.patch` ports the OEM `macMT7530doP6Cal` routine as a sysfs trigger (`en751221_trgmii_cal`). It sweeps the TX-tap DAC (`0x7a50..0x7a70`) and RX-tap DAC (`0x7a10..0x7a30`) registers in both cascade directions (SOC↔EXT), using a `0x55` test pattern plus an error-check toggle (BIT30 of the RX-tap reg) to find a clean eye window, then centers the tap. If no clean window is found it **keeps the existing tap** rather than zeroing it (safe default). In practice the cascade eye was already healthy (wide clean windows, taps 1–45) so this calibration is infrastructure rather than a required fix — but it stays in the build as cascade-link hygiene. (Note: it was investigated as a possible TX-throughput cause and *ruled out* — see below.)
+
+### The rare boot where no TRGMII lane trains
+
+On about 3 % of the boots where U-Boot loaded the kernel over TFTP, the SoC → MCM training found no window on any of the five lanes and the LAN stayed dead until the next reboot. It was never seen in about 100 boots from NAND.
+
+**Fingerprint.** The MCM's RX checker read value `0x00` with all four error bits set on every lane: it saw no transitions at all. PLL, TX/RX control, drive and taps read back as programmed on both switches, but **one lane always had tap 0 instead of the 16 the switch setup writes**, and the MCM's RCK/DQS register (`0x7a04`) read `0x…10` instead of `0xc0…`.
+
+**Cause.** U-Boot's `airoha_eth` driver writes `0x7f7f8c08` to the switch's PHY polling register (`0x7018`) when it probes the Ethernet device, which it does on every boot. That sets `PHY_AP_EN`: an MDIO master of its own that polls PHY addresses 8–12 on its own schedule, and Linux inherits it running. The Linux MDIO bus lock cannot serialize a hardware master. When a poll lands inside one of the paged accesses the driver makes to the MCM, the access goes to the wrong register. A tap value of 16 meant for an RD register (`0x7a10`, `0x7a18`, `0x7a28`) ends up in RCK/DQS, and that lane loses its receive clock. This explains the lost tap, the checker seeing nothing, and why unbinding and rebinding the switch driver recovered the link: the on-die reset leaves the polling off (`PPSC=0x007f8600`) and the MCM is set up again.
+
+**Proof.** A boot-time test that repeats the setup's tap writes 320 times and watches `0x7a04`, on the same binary: with the inherited polling kept, 4 of 4 boots corrupted the register; with the polling cleared first, 0 of 4 did (1280 writes).
+
+**Fix.** Linux clears `PHY_AP_EN` on EN751221 before registering the MDIO bus, waits for a transaction in flight and checks the readback (`930-386`, airoha/kernel#65). With it, 120 of 120 TFTP boots trained all five lanes on the first attempt. A matching U-Boot change keeps the poller off outside network use; on the unit, `0x7018` read `007f8c08` at the prompt, after two `tftpboot`s and when Linux probed the switch, against `7f7f8c08` in all four places with the current U-Boot.
+
+**Ruled out along the way.** A longer reset pulse for the switch, a race with the MCM PHY init, the (real) missing lock around the indirect core-register accesses, retrying the link setup, and `SYS_CTRL` soft resets of either switch. The series in #65 keeps the retry with a register dump, the lock fix and a switch re-probe as a safety net.
+
+**Still open.** Why NAND boots never showed it: the U-Boot prompt already reads `7f7f8c08` before any network command, so those boots inherit the poller as well.
 
 ## Port label inversion (physical LANn ≠ Linux lanN)
 
