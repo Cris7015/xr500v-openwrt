@@ -32,13 +32,25 @@ This matters for two practical reasons:
 ### Official firmware images
 
 TP-Link publishes XR500v firmware on its Italian support page
-(<https://www.tp-link.com/it/support/download/archer-xr500v/#Firmware>). The build path left inside the kernel modules names the variant:
+(<https://www.tp-link.com/it/support/download/archer-xr500v/#Firmware>). Archived copies of the
+[support page](https://web.archive.org/web/20260926054134/https://www.tp-link.com/it/support/download/archer-xr500v/)
+and the [product page](https://web.archive.org/web/20260926054734/https://www.tp-link.com/it/home-networking/wifi-router/archer-xr500v/)
+are on the Wayback Machine. The build path left inside the kernel modules names the variant:
 
 | Image | Kernel and Bootbase build | Variant (build path) |
 |---|---|---|
 | `Archer_XR500vv1_1.1.0_0.8.0_up_boot_Build_200714.bin` (official) | 14 Jul 2020 | `XR500v_ESP_V1` |
 | `Archer_XR500v(SP)v1_1.1.0_0.8.0_up_boot(210816).bin` (official) | 16 Aug 2021 | `XR500v_EUSP_V1_1` |
 | stock of the developer unit (not published) | 16 Aug 2021, about an hour earlier | `XR500v_BRWISP_V1` |
+
+SHA-256 of the downloads, to check a copy:
+
+| File | SHA-256 |
+|---|---|
+| `Archer_XR500vv1_1.1.0_0.8.0_Build_200714.zip` | `687ddabd307d09799d4400e6f367d76cd3ef0d4835888af2ba837769fdefa94a` |
+| `Archer XR500v(EUSP_A)_v1.1_0.8.0_1.1.0 Build 210816.zip` | `6a748df4ce474af33b3e54f2e0b965667dd17726e0e9025402012978f7465937` |
+| `…_up_boot_Build_200714.bin` (inside the zip) | `845e70900ef94e27bffaa381116ceec0a1ad98f557c3e78b13f1d3720fe2601b` |
+| `…_up_boot(210816).bin` (inside the zip) | `5bda88a5c9be6ae19310243d432a5607e383f3cae4d21eba65c794337a197e0d` |
 
 Both official files are `up_boot` images of 20 447 744 bytes. Each holds the 512-byte header of §6, a 512 KiB region with the bootloader, the 3 MiB kernel partition and the squashfs root. **Flashing one also rewrites the bootloader.** Their header has `fw[0x88] = 0x00020000`, the flag that selects `SALT_B` (§6).
 
