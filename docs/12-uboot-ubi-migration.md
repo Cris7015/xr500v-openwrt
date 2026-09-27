@@ -170,8 +170,10 @@ mw.b 0x84000000 0 0x480000; ubi read 0x84000000 misc 0x480000; crc32 0x84000000 
 Now **cut the power** (do not type `reset`: the ROM path stays latched) and power on normally. The
 flash bootloader should print, in order, `EN751221 DRAMC v1.2.2`, `calibration status: 0`,
 `Econet flash loader`, then the U-Boot banner, `Loading Environment from UBI...` (a bad-CRC warning
-is normal until the first `saveenv`), and, since there is no OpenWrt yet, `Install openwrt` followed
-by a TFTP boot of `bootfile`.
+is normal here: `format_ubi_part` leaves the environment volumes empty; bootloaders newer than r21
+then save their environment on this first boot, `Writing to UBI... done` and
+`Writing to redundant UBI... done`, while the r21 one does not, see step 4), and, since there is no
+OpenWrt yet, `Install openwrt` followed by a TFTP boot of `bootfile`.
 
 ## Step 3 — install OpenWrt on the new layout
 
@@ -195,12 +197,27 @@ configuration as usual.
 cat /proc/mtd                     # u-boot, ubi
 ubinfo -a | grep -E 'Name|Size'   # ubootenv, ubootenv2, misc, tcboot_oem, fit, rootfs_data
 mount | grep -E ' / |overlay'     # /dev/fit0 (squashfs) and ubi0:rootfs_data (ubifs)
-fw_printenv bootcmd               # run boot_ubi
+fw_printenv >/dev/null            # must not warn about a bad CRC (see below)
+fw_printenv bootcmd               # ends in "run boot_ubi"
 cat /sys/class/net/eth0/address   # factory MAC, not a random one
 iw dev                            # both radios (EEPROM from the misc volume)
 ```
 
-Save a first environment so the bad-CRC warning disappears and your TFTP addresses persist:
+If `fw_printenv` warns `Bad CRC, using default environment`, the environment has never been saved
+(the r21 bootloader does not save it by itself). **Do not run `fw_setenv` then**: with no valid copy
+it starts from its own generic default environment (`bootcmd=run distro_bootcmd`, `loadaddr=0x0`, a
+made-up MAC address), stores that, and on the next boot U-Boot stops at its prompt instead of
+booting OpenWrt. Save U-Boot's own environment from the UART instead: reboot, press a key at
+`Hit any key to stop autoboot`, then
+
+```
+saveenv
+saveenv
+```
+
+(the first writes `ubootenv`, the second `ubootenv2`) and power-cycle the router. Once
+`fw_printenv` no longer warns about a bad CRC, `fw_setenv` is safe, for example to keep your TFTP
+server address:
 
 ```sh
 fw_setenv serverip 192.168.1.10
@@ -211,6 +228,10 @@ fw_setenv serverip 192.168.1.10
 - **U-Boot prompt but no OpenWrt** (`fit` missing or broken): start a TFTP server with `bootfile`
   and run `run boot_tftp`, then redo step 3. To wipe and start over from the bootloader:
   `run format_ubi_part` again (it needs the two dumps on the TFTP server).
+- **U-Boot stops at `## Error: "distro_bootcmd" not defined`**: `fw_setenv` was run while the
+  environment had never been saved, and stored its generic default environment (see step 4). From
+  the UART: `env default -a`, `saveenv`, `saveenv`, then power-cycle. OpenWrt and its configuration
+  are untouched.
 - **No bootloader output at all**: step 1 (RESET at power-on, chainloader + U-Boot in RAM), then
   `run upgrade_uboot` to rewrite the 1 MiB bootloader from TFTP.
 - **Return to stock**: possible in principle from the RAM U-Boot with the full dumps and the
