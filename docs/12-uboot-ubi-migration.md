@@ -142,6 +142,7 @@ ping $serverip
 mtd list                          # u-boot 1 MiB + ubi expected
 mtd bad                           # only blocks inside the old BMT reserve (>= 0x7800000) are acceptable
 run load_oem_backups && echo BACKUPS OK   # dry run of the verification, nothing written
+ubi detach                        # harmless here, needed if ubi is already UBI (see below)
 run format_ubi_part
 ```
 
@@ -227,7 +228,11 @@ fw_setenv serverip 192.168.1.10
 
 - **U-Boot prompt but no OpenWrt** (`fit` missing or broken): start a TFTP server with `bootfile`
   and run `run boot_tftp`, then redo step 3. To wipe and start over from the bootloader:
-  `run format_ubi_part` again (it needs the two dumps on the TFTP server).
+  `ubi detach`, then `run format_ubi_part` (it needs the two dumps on the TFTP server). The
+  `ubi detach` matters: once the partition is UBI, the bootloader attaches it while loading its
+  environment, and the `format_ubi_part` of the bootloaders released so far does not detach it.
+  It then erases the partition and stops at `volume "ubootenv" exists`, leaving it empty. If that
+  happened, power-cycle and run it again: with the partition now empty it completes.
 - **U-Boot stops at `## Error: "distro_bootcmd" not defined`**: `fw_setenv` was run while the
   environment had never been saved, and stored its generic default environment (see step 4). From
   the UART: `env default -a`, `saveenv`, `saveenv`, then power-cycle. OpenWrt and its configuration
