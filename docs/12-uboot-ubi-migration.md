@@ -330,7 +330,10 @@ It checks the `6578` magic before erasing.
   that file over TFTP and power-cycle the router: the initramfs comes up at 192.168.1.1. If
   `ubinfo -a` there still shows the `misc` volume, `sysupgrade -n` the U-Boot image and you are done.
   If it does not (the migration stopped before writing it), recreate the volumes from the files you
-  copied off the router, then `sysupgrade -n`. This last case has **not been exercised**:
+  copied off the router (put them in `/tmp`), then `sysupgrade -n`. Both were tested on 7 October
+  2026: with the `fit` volume removed, U-Boot fell back to TFTP by itself, and these commands, run
+  from that initramfs, rebuilt the volumes before `sysupgrade -n` (the TFTP addresses came from a
+  saved environment there; the `192.168.1.x` defaults apply when none was saved):
 
   ```sh
   ubidetach -p /dev/mtd1 2>/dev/null; ubiformat /dev/mtd1 -y && ubiattach -p /dev/mtd1
