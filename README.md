@@ -10,13 +10,15 @@ two analog telephone ports in one router.
 [Release notes](https://github.com/Cris7015/xr500v-openwrt/releases) ·
 [Historical documentation](docs/Home.md)
 
-**Development status — 20 September 2026:** this is a community project, not
+**Development status — 7 October 2026:** this is a community project, not
 official XR500v support in OpenWrt release images. The
-[`v2026.09.20-r21` release](https://github.com/Cris7015/xr500v-openwrt/releases/tag/v2026.09.20-r21)
-is the first ready-to-flash image of the newer GPON integration (Linux 6.18,
-Matheus `airoha_en7523` tree) for BMT94 units on the OEM bootloader, plus an
-experimental **U-Boot + UBI** layout for people with a UART. The public source
-export under `integrations/` is still a review set, not a reproducible build.
+[`v2026.10.07` release](https://github.com/Cris7015/xr500v-openwrt/releases/tag/v2026.10.07)
+moves to the newer `airoha_en7523` tree (Linux 6.18.44) and ships both
+layouts for BMT94 units: the **U-Boot + UBI** layout, and the OEM bootloader
+layout for the **last time**, with a tool that moves a router from the second
+to the first **without a UART**. Later releases will be U-Boot only. The public
+source export under `integrations/` is still a review set, not a reproducible
+build.
 
 ## Results in the local integration
 
@@ -50,15 +52,16 @@ not implemented.
   and [focused submissions](integrations/matheus/focused/). The public
   reference DTS leaves optical service disabled.
 - **Flash the current release:** read the
-  [`v2026.09.20-r21` notes](https://github.com/Cris7015/xr500v-openwrt/releases/tag/v2026.09.20-r21)
+  [`v2026.10.07` notes](https://github.com/Cris7015/xr500v-openwrt/releases/tag/v2026.10.07)
   and match your board, bootloader and BMT variant first. A newer tag does not
   mean an image is compatible with every XR500v; units with the December 2019
   Bootbase and `bmt pool size: 81` are only covered by the August variant below.
   The pool size depends on the unit's NAND, not on the bootloader
   ([chapter 3](docs/03-boot-partitions-flashing.md)).
-- **Replace the bootloader (advanced, one-way):** the
-  [U-Boot + UBI migration guide](docs/12-uboot-ubi-migration.md) documents the
-  backup, the BootROM rescue and the UBI/FIT layout the developer unit runs.
+- **Move to U-Boot (one-way):** the
+  [U-Boot + UBI migration guide](docs/12-uboot-ubi-migration.md) covers the
+  migration from OpenWrt without a UART, the UART method, the BootROM rescue
+  and the UBI/FIT layout the developer unit runs.
 - **Build or study the older port:** use the
   [archived README and build instructions](docs/README-history-before-2026-09-08.md)
   and [historical subsystem documentation](docs/Home.md). Those describe the

@@ -54,7 +54,7 @@ measured in, because the device's role and the measurement path materially chang
 
 | Subsystem | Status | Page | Notes |
 |---|---|---|---|
-| Boot / flash / sysupgrade | Working | 03, 12 | OEM bootloader layout (slot B + 64 MiB UBI overlay, stock kept) **or** U-Boot + UBI (FIT from a UBI volume, whole flash, one-way migration) |
+| Boot / flash / sysupgrade | Working | 03, 12 | OEM bootloader layout (slot B + 64 MiB UBI overlay, stock kept; last release for it: October 2026) **or** U-Boot + UBI (FIT from a UBI volume, whole flash; one-way migration, from OpenWrt without a UART since October 2026) |
 | CPU | Working | 07 | Both MIPS 34Kc VPEs (SMP), HZ=1000, hardware watchdog and lockup detectors |
 | Ethernet — 4× GbE LAN | Working | 04 | Dual cascaded MT7530 DSA over the `airoha_eth` gen1 driver; TRGMII tap fixed like the factory firmware; conduit TX-stall fix |
 | **HW-NAT — PPE flow offload** | Working | 04 | nftables flowtable offload; **LAN↔LAN ~929 Mbit/s**, fibre PPPoE ~668/664 Mbit/s, CPU idle |
@@ -112,7 +112,7 @@ measured in, because the device's role and the measurement path materially chang
 | 09 | [GPON / xPON Status](09-gpon-xpon-status.md) | Where the optical WAN stands (working since September 2026) and the bring-up history |
 | 10 | [Stock Firmware Access & Security Notes](10-stock-firmware-access.md) | Restricted CLI, root injection, accounts, firmware verification |
 | 11 | [OpenWrt Port, Build & Persistence](11-openwrt-port-build-persistence.md) | Developer guide: the current recipe-based builds and the earlier overlay |
-| 12 | [U-Boot + UBI migration](12-uboot-ubi-migration.md) | Advanced, one-way: replace the OEM bootloader with U-Boot, UBI layout, BootROM rescue, FIT sysupgrade |
+| 12 | [U-Boot + UBI migration](12-uboot-ubi-migration.md) | One-way: replace the OEM bootloader with U-Boot from OpenWrt (no UART) or over UART, UBI layout, BootROM rescue, return to stock |
 
 ---
 

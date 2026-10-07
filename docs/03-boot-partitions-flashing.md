@@ -21,7 +21,9 @@
 > that has been in service.
 >
 > The alternative layout, **U-Boot + one UBI partition** with a FIT image, is documented
-> in [chapter 12](12-uboot-ubi-migration.md). It is one-way and needs a UART.
+> in [chapter 12](12-uboot-ubi-migration.md). It is one-way; since the October 2026 release
+> it can be installed from OpenWrt without a UART, and that release is the last one for
+> the OEM bootloader.
 
 The Archer XR500v boots via a proprietary TrendChip/EcoNet-derived bootloader (the `bldr>` prompt) that selects one of two firmware slots through a single byte-flag, `bflag`: `0` boots the stock OEM TCLinux image (slot A), `1` boots OpenWrt (slot B). The kernel partition for each slot is not a plain Linux image but is wrapped in a 512-byte proprietary header that the bootloader parses after LZMA decompression; producing a bootable OpenWrt image requires post-processing the OpenWrt `sysupgrade.bin` with `scripts/patch_trendchip_header.py` so those header fields (magic, kernel entry, rootfs offset/size, sub-magic) are valid — without it the bootloader dereferences garbage and crashes. The NAND is laid out in fixed partitions inherited from the OEM firmware, and OpenWrt adds a dedicated 64 MB UBI partition in the previously-unused free area between 0x3000000 and 0x7000000 without disturbing any OEM partition. Routine upgrades now use the board-specific, BMT-aware OpenWrt `sysupgrade` path; a manual `mtd write` from the live root remains unsupported. Stock telnet/web flashing is retained as the recovery and first-install path.
 
