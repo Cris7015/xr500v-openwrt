@@ -49,8 +49,8 @@ From the release assets (check `SHA256SUMS`):
 | `openwrt-airoha-en751221-tplink_archer-xr500v-v1-initramfs-kernel.bin` | OpenWrt initramfs FIT, booted over TFTP by U-Boot (recovery) |
 | `openwrt-airoha-en751221-tplink_archer-xr500v-v1-oem-squashfs-sysupgrade.bin` | OpenWrt for the OEM bootloader (slot B + `openwrt_ubi`), carries `xr500v-migrate-uboot` |
 | `openwrt-airoha-en751221-tplink_archer-xr500v-v1-oem-stock-webflash.bin` (19 MiB) | the same, in the layout the stock web interface accepts |
-| `u-boot-xr500v-ram.bin` (~720 KiB) | plain U-Boot, loaded into RAM by the BootROM chainloader (UART method and rescue) |
-| `en751221-chainloader-ddr.bin` (24 KiB) | BootROM XMODEM chainloader that runs the DDR stage, then receives U-Boot (unchanged since the September release) |
+| `u-boot-xr500v-ram.bin` (~720 KiB) | plain U-Boot, loaded into RAM through `bootext.bin` (UART method and rescue) |
+| `openwrt-airoha-en751221-tplink_archer-xr500v-v1-bootext.bin` (33 KiB) | BootROM rescue: calibrates the DRAM like the flash bootloader, then receives U-Boot by XMODEM |
 
 ## Which path
 
@@ -209,18 +209,23 @@ cp openwrt-airoha-en751221-tplink_archer-xr500v-v1-initramfs-kernel.bin /srv/tft
 Hold **RESET** while powering on. The BootROM (mask ROM, cannot be broken by software) prints its
 banner, goes quiet for about 20 seconds, then prints `done` and repeats. The recovery is entered by
 typing **`x` during the silence before a `done`**; after the next `done` the ROM sends `C` and waits
-for a 1K-XMODEM/CRC transfer of the chainloader. The chainloader then runs the DDR stage (PLL and DRAM
-exactly as the flash bootloader would) and itself sends `C` for the U-Boot binary.
+for a 1K-XMODEM/CRC transfer of `bootext.bin`. That calibrates the DRAM exactly as the flash
+bootloader would (the ROM's own setup is not good enough for U-Boot's Ethernet) and shows a menu:
+**`x` loads U-Boot into RAM; never press `b`, which writes the flash.** Then it receives `u-boot.bin`.
 
-The script does the whole dance and logs the UART:
+The script does the whole dance, stops at the U-Boot prompt and logs the UART:
 
 ```sh
-python3 scripts/bootrom-xrecover-ddr.py /dev/ttyUSB0 en751221-chainloader-ddr.bin u-boot-xr500v-ram.bin rescue.log
+python3 scripts/bootext-rescue.py /dev/ttyUSB0 \
+	openwrt-airoha-en751221-tplink_archer-xr500v-v1-bootext.bin u-boot-xr500v-ram.bin rescue.log
 ```
 
-Pitfalls seen while developing it: any stray byte after the first `C` makes the ROM fall back to the
-checksum protocol and abort; a bare Enter counts as a key; once in the ROM loop neither `reset` nor
-the watchdog leave it, **only a power cut**; an empty Enter at the U-Boot prompt repeats the last
+Tested with this release's files on the developer's unit on 7 October 2026. The BootROM now and then
+throws `Undefined Exception` right after a transfer, whatever the file; the script waits for the
+next cycle and sends again. Other pitfalls: any stray byte after the first `C` makes the ROM fall
+back to the checksum protocol and abort; a bare Enter counts as a key; once in the ROM loop neither
+`reset` nor the watchdog leave it, **only a power cut** (a system started through the rescue also
+falls back into it on a warm reboot); an empty Enter at the U-Boot prompt repeats the last
 command.
 
 You should reach `U-Boot>` with `DRAM: 256 MiB`, the ESMT SPI NAND detected and working Ethernet
@@ -342,7 +347,7 @@ It checks the `6578` magic before erasing.
   environment had never been saved, and stored its generic default environment (see
   [Check](#check)). From the UART: `env default -a`, `saveenv`, `saveenv`, then power-cycle. OpenWrt
   and its configuration are untouched.
-- **No bootloader output at all**: step 1 (RESET at power-on, chainloader + U-Boot in RAM), then
+- **No bootloader output at all**: step 1 (RESET at power-on, `bootext.bin` + U-Boot in RAM), then
   `run upgrade_uboot` to rewrite the 1 MiB bootloader from TFTP.
 
 ## Return to stock
@@ -374,5 +379,5 @@ permanent.
 - The power LED is driven by the bootloader on the OEM path; U-Boot lights it itself, and the new
   device tree defines it as `green:power`.
 - Bootloader sources: `airoha/u-boot` on the airoha Gitea (board, ESMT F50L1G41A identification,
-  timebase fix, UBI detach before `format_ubi_part`). The BootROM chainloader with the DDR stage is
-  the one of the September release.
+  timebase fix, UBI detach before `format_ubi_part`). `bootext.bin` (DRAM calibration and the XMODEM
+  receiver) comes from `airoha/airoha_mips_dramc`, built with the release.
