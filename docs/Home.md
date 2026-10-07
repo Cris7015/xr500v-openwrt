@@ -58,7 +58,7 @@ measured in, because the device's role and the measurement path materially chang
 | CPU | Working | 07 | Both MIPS 34Kc VPEs (SMP), HZ=1000, hardware watchdog and lockup detectors |
 | Ethernet — 4× GbE LAN | Working | 04 | Dual cascaded MT7530 DSA over the `airoha_eth` gen1 driver; TRGMII tap fixed like the factory firmware; conduit TX-stall fix |
 | **HW-NAT — PPE flow offload** | Working | 04 | nftables flowtable offload; **LAN↔LAN ~929 Mbit/s**, fibre PPPoE ~668/664 Mbit/s, CPU idle |
-| Wi-Fi HW forwarding (WHNAT) | Working (opt-in) | 05 | PPE NATs in hardware, CPU re-injects to the radio; disabled unless `xr500v-whnat.main.enabled=1` |
+| Wi-Fi HW forwarding (WHNAT) | Working (opt-in) | 05 | PPE NATs in hardware, CPU re-injects to the radio; disabled unless `whnat.main.enabled=1` (`xr500v-whnat` before the October 2026 release) |
 | Wi-Fi 5 GHz | Working | 05 | MT7662 / `mt76x2e`, EEPROM and MAC from the factory `misc` area via nvmem |
 | Wi-Fi 2.4 GHz | Working | 05 | MT7603 / `mt7603e`, `eeprom-data` + OTP merge, PCIe port0 quirks as a kernel patch |
 | USB | Working | 07 | xHCI; USB2 mass storage; the USB3 port has no wired T-PHY |
