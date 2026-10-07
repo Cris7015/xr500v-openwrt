@@ -2,8 +2,9 @@
 
 _Status (October 2026): two ways to migrate. **Without a serial console**, from OpenWrt running on
 the OEM bootloader (`xr500v-migrate-uboot`, new in the October 2026 release): tested end to end on
-the developer's unit on 7 October 2026, as another user would run it (OEM image → migration →
-U-Boot → OpenWrt with the same configuration, GPON, WiFi and VoIP working). **With a serial
+the developer's unit on 7 October 2026, twice, as other users would run it: from an older OEM
+release upgraded to this one, and from a fresh install over the stock firmware (OEM image →
+migration → U-Boot → OpenWrt with the same configuration, GPON, WiFi and VoIP working). **With a serial
 console**, from U-Boot loaded by the BootROM: performed on the same unit on 19 September 2026 and
 still the rescue path. Either way it is a **one-way** change for practical purposes. Read
 everything before touching the router._
@@ -60,10 +61,14 @@ From the release assets (check `SHA256SUMS`):
 | OpenWrt on the OEM bootloader, this release | [Migrating without a serial console](#migrating-without-a-serial-console) |
 | OpenWrt on U-Boot already (September release, U-Boot lane) | `sysupgrade` to `...-squashfs-sysupgrade.bin`. The bootloader stays as it is; [updating it](#updating-u-boot) is optional |
 
-After a web flash from stock, OpenWrt starts with its overlay in RAM: the `openwrt_ubi` area is
-prepared by the first `sysupgrade` of an OEM image (`sysupgrade -n` with the same file), or by the
-migration, which does not need it. The web flash layout is the one tested in June 2026 with the
-August images; this release's web flash image has not been flashed from stock yet.
+After a web flash from stock, OpenWrt starts with the defaults (LAN `192.168.1.1/24` with DHCP, WiFi
+off) and its overlay in RAM: the `openwrt_ubi` area is prepared by the first `sysupgrade` of an OEM
+image (`sysupgrade -n` with the same file), or by the migration, which does not need it and keeps
+what you configured meanwhile. For this release the web flash image was written to slot B from the
+stock firmware's shell with its own `mtd` tool, which is what the web page does after its check,
+and the OEM bootloader accepted it (it checks an MD5 over the whole slot) and booted it; the stock
+web page itself was not exercised again. Its check uses the same salted MD5 as the June and
+August web flash images, which it accepted.
 
 ## Layouts
 
